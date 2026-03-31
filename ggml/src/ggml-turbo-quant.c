@@ -26,9 +26,6 @@ int turbo3_cpu_wht_group_size = 0;
 #define TURBO_QJL_CONST     1.2533141373155003f  /* sqrt(pi/2) */
 
 /* Optimal centroids from paper (scaled by 1/sqrt(d)) */
-/* 1-bit: ±sqrt(2/(pi*d)) */
-static const float CENTROIDS_1BIT[2] = { -0.070711f, 0.070711f };  /* for d=128 */
-
 /* 2-bit: {±0.453, ±1.51} / sqrt(d) */
 static const float CENTROIDS_2BIT[4] = { -0.133462f, -0.039994f, 0.039994f, 0.133462f };
 
