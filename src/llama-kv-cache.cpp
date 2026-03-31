@@ -244,13 +244,21 @@ llama_kv_cache::llama_kv_cache(
         ggml_type layer_type_k = type_k;
         ggml_type layer_type_v = type_v;
         {
-            static const int adaptive_mode = []() {
+            static const int adaptive_mode = [&]() {
                 const char * env = getenv("TURBO_LAYER_ADAPTIVE");
-                int mode = env ? atoi(env) : 0;
-                if (mode > 0) {
-                    LLAMA_LOG_INFO("llama_kv_cache: layer-adaptive mode %d enabled\n", mode);
+                if (env) {
+                    int mode = atoi(env);
+                    if (mode > 0) {
+                        LLAMA_LOG_INFO("llama_kv_cache: layer-adaptive mode %d enabled (env)\n", mode);
+                    }
+                    return mode;
                 }
-                return mode;
+                // Auto-enable Boundary V (mode 7) when V is turbo2
+                if (type_v == GGML_TYPE_TURBO2_0 && hparams.n_layer >= 8) {
+                    LLAMA_LOG_INFO("llama_kv_cache: Boundary V auto-enabled for turbo2-V (opt-out: TURBO_LAYER_ADAPTIVE=0)\n");
+                    return 7;
+                }
+                return 0;
             }();
             const bool is_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0);
             const bool v_is_turbo = (type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0 || type_v == GGML_TYPE_TURBO2_0);
