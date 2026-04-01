@@ -785,6 +785,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
                 nr0 = N_R0_Q8_0;
                 smem = 32*sizeof(float)*N_R0_Q8_0;
             } break;
+        case GGML_TYPE_TQ3_1S:
+            {
+                nsg = N_SG_TQ3_1S;
+                nr0 = N_R0_TQ3_1S;
+                smem = 32*sizeof(float)*N_R0_TQ3_1S;
+            } break;
+        case GGML_TYPE_TQ4_1S:
+            {
+                nsg = N_SG_TQ4_1S;
+                nr0 = N_R0_TQ4_1S;
+                smem = 32*sizeof(float)*N_R0_TQ4_1S;
+            } break;
         case GGML_TYPE_MXFP4:
             {
                 nsg = N_SG_MXFP4;
@@ -896,6 +908,81 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
     return res;
 }
 
+// TQ3_1S / TQ4_1S rotated variant: uses dequantize_*_rotated (no inverse RHT)
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_tq_rotated(ggml_metal_library_t lib, const ggml_tensor * op) {
+    char base[256];
+    char name[256];
+
+    const ggml_type tsrc0 = op->src[0]->type;
+    const ggml_type tsrc1 = op->src[1]->type;
+
+    const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+    const bool bc_out = op->ne[0] % 64 != 0 || op->ne[1] % 32 != 0;
+
+    snprintf(base, 256, "kernel_mul_mm_%s_rotated_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+    snprintf(name, 256, "%s_bci=%d_bco=%d", base, bc_inp, bc_out);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, bc_inp, FC_MUL_MM + 0);
+        ggml_metal_cv_set_bool(cv, bc_out, FC_MUL_MM + 1);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    res.smem = bc_out ? 8192 : 4096 + 2048;
+
+    return res;
+}
+
+// TQ3_1S / TQ4_1S rotated MUL_MAT_ID variant
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_tq_rotated(ggml_metal_library_t lib, const ggml_tensor * op) {
+    char base[256];
+    char name[256];
+
+    const ggml_type tsrc0 = op->src[0]->type;
+    const ggml_type tsrc1 = op->src[1]->type;
+
+    const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+
+    snprintf(base, 256, "kernel_mul_mm_id_%s_rotated_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+    snprintf(name, 256, "%s_bci=%d", base, bc_inp);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, bc_inp, FC_MUL_MM + 0);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    res.smem = 8192;
+
+    return res;
+}
+
+// TQ3_1S / TQ4_1S activation pre-rotation pipeline (shared by both)
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_tq3_rotate_act(ggml_metal_library_t lib, bool inverse) {
+    char name[256];
+    const char * base = inverse ? "kernel_tq3_unrotate_act" : "kernel_tq3_rotate_act";
+
+    snprintf(name, 256, "%s", base);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(ggml_metal_library_t lib, int ne02, int ne20) {
     char base[256];
     char name[256];
@@ -1001,6 +1088,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                 nsg = N_SG_Q8_0;
                 nr0 = N_R0_Q8_0;
                 smem = 32*sizeof(float)*N_R0_Q8_0;
+            } break;
+        case GGML_TYPE_TQ3_1S:
+            {
+                nsg = N_SG_TQ3_1S;
+                nr0 = N_R0_TQ3_1S;
+                smem = 32*sizeof(float)*N_R0_TQ3_1S;
+            } break;
+        case GGML_TYPE_TQ4_1S:
+            {
+                nsg = N_SG_TQ4_1S;
+                nr0 = N_R0_TQ4_1S;
+                smem = 32*sizeof(float)*N_R0_TQ4_1S;
             } break;
         case GGML_TYPE_MXFP4:
             {

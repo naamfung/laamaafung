@@ -71,6 +71,12 @@
 #define N_R0_IQ4_XS 2
 #define N_SG_IQ4_XS 2
 
+#define N_R0_TQ3_1S 8
+#define N_SG_TQ3_1S 2
+
+#define N_R0_TQ4_1S 8
+#define N_SG_TQ4_1S 2
+
 // function constants offsets
 #define FC_FLASH_ATTN_EXT_PAD          100
 #define FC_FLASH_ATTN_EXT_BLK          200

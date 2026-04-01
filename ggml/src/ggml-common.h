@@ -344,6 +344,30 @@ typedef struct {
 } block_turbo2_0;                       // 10 bytes total
 static_assert(sizeof(block_turbo2_0) == sizeof(ggml_half) + QK_TURBO2/4, "wrong turbo2_0 block size/padding");
 
+// TQ3_1S: WHT-rotated 3-bit weight quantization (8-level Lloyd-Max for N(0,1))
+// Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
+// Per block: d0(fp16) + d1(fp16) + 3-bit indices packed (12 bytes) = 16 bytes per 32 values
+// = 4.0 bits/value
+#define QK_TQ3_0 32
+typedef struct {
+    ggml_half d0;                       //  2 bytes: scale for first 16 elements
+    ggml_half d1;                       //  2 bytes: scale for last 16 elements
+    uint8_t   qs[QK_TQ3_0 * 3 / 8];   // 12 bytes: 3-bit indices packed (4 groups of 8 in 3 bytes)
+} block_tq3_1s;                         // 16 bytes total
+static_assert(sizeof(block_tq3_1s) == 16, "wrong tq3_1s block size");
+
+// TQ4_1S: WHT-rotated 4-bit weight quantization (16-level Lloyd-Max for N(0,1))
+// Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
+// Per block: d0(fp16) + d1(fp16) + 4-bit indices packed (16 bytes) = 20 bytes per 32 values
+// = 5.0 bits/value
+#define QK_TQ4_1S 32
+typedef struct {
+    ggml_half d0;                       //  2 bytes: scale for first 16 elements
+    ggml_half d1;                       //  2 bytes: scale for last 16 elements
+    uint8_t   qs[QK_TQ4_1S / 2];      // 16 bytes: 4-bit indices nibble-packed
+} block_tq4_1s;                         // 20 bytes total
+static_assert(sizeof(block_tq4_1s) == 20, "wrong tq4_1s block size");
+
 //
 // Super-block quantization structures
 //
