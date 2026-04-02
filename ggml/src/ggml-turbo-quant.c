@@ -448,9 +448,10 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
             memset(normalized, 0, d * sizeof(float));
         }
 
-        /* Step 2: Rotate */
+        /* Step 2: Forward WHT rotation (matches CUDA set_rows) */
         float rotated[TURBO_D];
-        matvec(turbo_rotation, normalized, rotated, d);
+        memcpy(rotated, normalized, d * sizeof(float));
+        turbo_cpu_fwht(rotated, d);
 
 #if TURBO4_USE_4BIT
         /* Step 3: 4-bit quantization (16 centroids) */
@@ -551,14 +552,15 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
     };
     for (int block = 0; block < nb; block++) {
         float norm = GGML_FP16_TO_FP32(x[block].norm);
-        float rotated[QK_TURBO4];
+        float * dst = y + block * d;
         for (int i = 0; i < d; i++) {
             uint8_t idx = (x[block].qs[i / 2] >> ((i % 2) * 4)) & 0xF;
-            rotated[i] = CENTROIDS_4BIT[idx];
+            dst[i] = CENTROIDS_4BIT[idx] * norm;
         }
-        float * dst = y + block * d;
-        matvec(turbo_rotation_t, rotated, dst, d);
-        for (int i = 0; i < d; i++) dst[i] *= norm;
+        /* No inverse WHT, dequant stays in the rotated domain.
+        * Q is WHT-rotated by the graph, so <Q_rot, K_rot> gives correct attention scores.
+        * The inverse WHT is applied to the attention output via GGML_OP_TURBO_WHT (direction=1) in the graph. 
+        */
     }
 #else
     /* Legacy 3-bit + QJL dequant */
