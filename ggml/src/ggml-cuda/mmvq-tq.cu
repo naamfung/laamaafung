@@ -119,9 +119,6 @@ static __global__ void mul_mat_vec_tq3_1s_fused(
     if (lane == 0) dst[row] = sum;
 }
 
-static float * d_act_rotated = nullptr;
-static size_t  d_act_rotated_size = 0;
-
 void ggml_cuda_mul_mat_vec_tq(ggml_backend_cuda_context & ctx,
                                const ggml_tensor * src0,
                                const ggml_tensor * src1,
@@ -140,19 +137,37 @@ void ggml_cuda_mul_mat_vec_tq(ggml_backend_cuda_context & ctx,
     float       * dst_d  = (float *) dst->data;
     cudaStream_t stream = ctx.stream();
 
-    const size_t act_bytes = ncols_x * sizeof(float);
-    if (act_bytes > d_act_rotated_size) {
-        if (d_act_rotated) cudaFree(d_act_rotated);
-        cudaMalloc(&d_act_rotated, act_bytes);
-        d_act_rotated_size = act_bytes;
+    // Allocate scratch for rotated activation.
+    // Use a persistent per-device buffer that's allocated ONCE outside graph capture.
+    static float * d_act_buf = nullptr;
+    static size_t  d_act_buf_size = 0;
+
+    // Check if we're in graph capture mode
+    cudaStreamCaptureStatus capture_status;
+    cudaStreamIsCapturing(stream, &capture_status);
+
+    if (capture_status != cudaStreamCaptureStatusNone) {
+        // During graph capture: pre-allocate if not done yet (this shouldn't happen
+        // since the graph reservation pass calls us first without capture)
+        GGML_ASSERT(d_act_buf != nullptr && d_act_buf_size >= (size_t)ncols_x * sizeof(float) &&
+                     "TQ scratch buffer not pre-allocated before graph capture");
+    } else {
+        // Outside capture: allocate/resize freely
+        const size_t needed = ncols_x * sizeof(float);
+        if (needed > d_act_buf_size) {
+            if (d_act_buf) cudaFree(d_act_buf);
+            cudaMalloc(&d_act_buf, needed);
+            d_act_buf_size = needed;
+        }
     }
+    float * d_act_rotated_ptr = d_act_buf;
 
     {
         const int n_blocks = ncols_x / 32;
         const int warps_per_block = 4;
         const dim3 block(32, warps_per_block);
         const dim3 grid((n_blocks + warps_per_block - 1) / warps_per_block);
-        tq_prerotate_activation<<<grid, block, 0, stream>>>(src1_d, d_act_rotated, ncols_x);
+        tq_prerotate_activation<<<grid, block, 0, stream>>>(src1_d, d_act_rotated_ptr, ncols_x);
     }
 
     {
@@ -160,9 +175,10 @@ void ggml_cuda_mul_mat_vec_tq(ggml_backend_cuda_context & ctx,
         const dim3 grid((nrows_x + MMVQ_TQ_NWARPS - 1) / MMVQ_TQ_NWARPS);
 
         if (src0->type == GGML_TYPE_TQ4_1S) {
-            mul_mat_vec_tq4_1s_fused<<<grid, block, 0, stream>>>(src0_d, d_act_rotated, dst_d, ncols_x, nrows_x);
+            mul_mat_vec_tq4_1s_fused<<<grid, block, 0, stream>>>(src0_d, d_act_rotated_ptr, dst_d, ncols_x, nrows_x);
         } else {
-            mul_mat_vec_tq3_1s_fused<<<grid, block, 0, stream>>>(src0_d, d_act_rotated, dst_d, ncols_x, nrows_x);
+            mul_mat_vec_tq3_1s_fused<<<grid, block, 0, stream>>>(src0_d, d_act_rotated_ptr, dst_d, ncols_x, nrows_x);
         }
     }
+
 }
