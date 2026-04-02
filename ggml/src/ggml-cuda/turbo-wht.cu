@@ -26,7 +26,7 @@ static __global__ void k_turbo_wht_f32(const float * __restrict__ src,
                                         int64_t n_groups,
                                         int64_t head_dim,
                                         int64_t groups_per_head) {
-    static_assert(group_size == 128 || group_size == 64, "group_size must be 128 or 64");
+    static_assert(group_size == 128 || group_size == 64 || group_size == 32, "group_size must be 128, 64, or 32");
 
     const int64_t g = blockIdx.x;
     if (g >= n_groups) return;
@@ -54,8 +54,11 @@ static __global__ void k_turbo_wht_f32(const float * __restrict__ src,
     // Apply first sign array
     if (group_size == 128) {
         x[t] *= (direction == 0) ? TURBO_WHT_SIGNS1[t] : TURBO_WHT_SIGNS2[t];
-    } else {
+    } else if (group_size == 64) {
         x[t] *= (direction == 0) ? TURBO_WHT_SIGNS1_64[t] : TURBO_WHT_SIGNS2_64[t];
+    } else {
+        // group_size == 32: TQ weight signs (same for forward and inverse)
+        x[t] *= TQ_WEIGHT_SIGNS[t];
     }
     __syncthreads();
 
@@ -72,19 +75,24 @@ static __global__ void k_turbo_wht_f32(const float * __restrict__ src,
     WHT_STAGE(4)
     WHT_STAGE(8)
     WHT_STAGE(16)
-    WHT_STAGE(32)
+    if (group_size >= 64) { WHT_STAGE(32) }
     if (group_size == 128) { WHT_STAGE(64) }
 #undef WHT_STAGE
 
     // Normalize and apply second sign array, write to output
-    constexpr float inv_sqrt = (group_size == 128) ? 0.08838834764831845f : 0.125f;
+    constexpr float inv_sqrt = (group_size == 128) ? 0.08838834764831845f :
+                               (group_size == 64)  ? 0.125f :
+                                                     0.17677669529663688f; // 1/sqrt(32)
     float result;
     if (group_size == 128) {
         result = x[t] * inv_sqrt *
             ((direction == 0) ? TURBO_WHT_SIGNS2[t] : TURBO_WHT_SIGNS1[t]);
-    } else {
+    } else if (group_size == 64) {
         result = x[t] * inv_sqrt *
             ((direction == 0) ? TURBO_WHT_SIGNS2_64[t] : TURBO_WHT_SIGNS1_64[t]);
+    } else {
+        // group_size == 32: normalize only (signs already applied before butterfly)
+        result = x[t] * inv_sqrt;
     }
 
     // InnerQ inverse: apply scale_inv AFTER WHT+signs (for V un-rotation)
@@ -131,7 +139,7 @@ void ggml_cuda_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t head_dim        = src->ne[0];
     const int64_t n_heads         = ggml_nelements(src) / head_dim;
 
-    GGML_ASSERT(group_size == 64 || group_size == 128);
+    GGML_ASSERT(group_size == 32 || group_size == 64 || group_size == 128);
     const int64_t groups_per_head = head_dim / group_size;
     const int     tail_size       = (int)(head_dim % group_size);
     const int64_t n_groups        = groups_per_head * n_heads;
@@ -152,12 +160,19 @@ void ggml_cuda_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             } else {
                 k_turbo_wht_f32<1, 128><<<blocks, threads, 0, stream>>>(src_ptr, dst_ptr, scale_inv_ptr, n_groups, head_dim, groups_per_head);
             }
-        } else {
+        } else if (group_size == 64) {
             dim3 threads(64);
             if (direction == 0) {
                 k_turbo_wht_f32<0, 64><<<blocks, threads, 0, stream>>>(src_ptr, dst_ptr, scale_inv_ptr, n_groups, head_dim, groups_per_head);
             } else {
                 k_turbo_wht_f32<1, 64><<<blocks, threads, 0, stream>>>(src_ptr, dst_ptr, scale_inv_ptr, n_groups, head_dim, groups_per_head);
+            }
+        } else {
+            dim3 threads(32);
+            if (direction == 0) {
+                k_turbo_wht_f32<0, 32><<<blocks, threads, 0, stream>>>(src_ptr, dst_ptr, scale_inv_ptr, n_groups, head_dim, groups_per_head);
+            } else {
+                k_turbo_wht_f32<1, 32><<<blocks, threads, 0, stream>>>(src_ptr, dst_ptr, scale_inv_ptr, n_groups, head_dim, groups_per_head);
             }
         }
     }
