@@ -2250,6 +2250,10 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
             ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 0);
             ggml_metal_encoder_set_bytes   (enc, &n_act_val, sizeof(n_act_val), 1);
             ggml_metal_encoder_dispatch_threadgroups(enc, (int)(n_act_val / 32), 1, 1, 32, 1, 1);
+
+            // Barrier: ensure unrotate completes before any subsequent op reads src1
+            // Without this, mixing TQ and non-TQ tensors in the same layer corrupts src1
+            ggml_metal_op_concurrency_reset(ctx);
         } else {
             // Non-TQ weight or unaligned: use standard mul_mm path
             auto pipeline = ggml_metal_library_get_pipeline_mul_mm(lib, op);
@@ -2500,6 +2504,9 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
                 ggml_metal_encoder_set_buffer  (enc, bid_src1, 0);
                 ggml_metal_encoder_set_bytes   (enc, &n_act_val, sizeof(n_act_val), 1);
                 ggml_metal_encoder_dispatch_threadgroups(enc, (int)(n_act_val / 32), 1, 1, 32, 1, 1);
+
+                // Barrier: ensure unrotate completes before any subsequent op reads src1
+                ggml_metal_op_concurrency_reset(ctx);
             } else {
                 auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op);
 

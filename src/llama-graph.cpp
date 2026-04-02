@@ -2406,7 +2406,6 @@ ggml_tensor * llm_graph_context::build_attn(
             const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
             q = ggml_pad(ctx0, q, pad, 0, 0, 0);
         }
-        }
         if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
         ggml_tensor * innerq_scale = mctx_cur->get_turbo_innerq_scale_inv();
         q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);
