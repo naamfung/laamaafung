@@ -2,8 +2,8 @@
 #include <cstring>
 
 // Host-side shared state for InnerQ cross-TU communication
-bool  g_innerq_finalized = false;
-float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS] = {
+TURBO_IQ_API bool  g_innerq_finalized = false;
+TURBO_IQ_API float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS] = {
     1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
     1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
     1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
@@ -23,10 +23,10 @@ void turbo_innerq_publish(const float * scale_inv, int group_size) {
     g_innerq_tensor_needs_update = true;
 }
 
-bool turbo_innerq_needs_tensor_update(void) {
+TURBO_IQ_API bool turbo_innerq_needs_tensor_update(void) {
     return g_innerq_tensor_needs_update;
 }
 
-void turbo_innerq_mark_tensor_updated(void) {
+TURBO_IQ_API void turbo_innerq_mark_tensor_updated(void) {
     g_innerq_tensor_needs_update = false;
 }

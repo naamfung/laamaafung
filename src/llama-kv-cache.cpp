@@ -80,10 +80,15 @@ static ggml_tensor * ggml_mul_mat_aux(
 #endif
 
 #ifdef GGML_USE_CUDA
-extern bool  g_innerq_finalized;
-extern float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS];
-extern bool turbo_innerq_needs_tensor_update(void);
-extern void turbo_innerq_mark_tensor_updated(void);
+#if defined(_WIN32) && !defined(__MINGW32__)
+#  define TURBO_IQ_IMPORT __declspec(dllimport)
+#else
+#  define TURBO_IQ_IMPORT
+#endif
+extern TURBO_IQ_IMPORT bool  g_innerq_finalized;
+extern TURBO_IQ_IMPORT float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS];
+TURBO_IQ_IMPORT bool turbo_innerq_needs_tensor_update(void);
+TURBO_IQ_IMPORT void turbo_innerq_mark_tensor_updated(void);
 #else
 static bool  g_innerq_finalized = false;
 static float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS] = {};
