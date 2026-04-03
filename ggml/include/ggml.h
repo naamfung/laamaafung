@@ -181,7 +181,7 @@
 #            define GGML_API __declspec(dllimport) extern
 #        endif
 #    else
-#        define GGML_API __attribute__ ((visibility ("default"))) extern
+#        define GGML_API __attribute__ ((visibility ("default")))
 #    endif
 #else
 #    define GGML_API extern
