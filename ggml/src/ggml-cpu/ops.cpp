@@ -12,7 +12,9 @@
 #include <cfloat>
 #include <cmath>
 
-extern "C" GGML_API int turbo3_cpu_wht_group_size;
+extern "C" {
+GGML_API int turbo3_cpu_wht_group_size;
+}
 
 // ggml_compute_forward_dup
 
