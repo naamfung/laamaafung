@@ -178,10 +178,10 @@ static __global__ void mul_mat_tq4_1s_dp4a_multi(
             const float d_act = __half2float((__half)a_blk->ds.x);
             const int * a_qs = (const int *)(a_blk->qs);
 
-            const int s0 = __dp4a(c0_0, a_qs[0], __dp4a(c1_0, a_qs[1],
-                           __dp4a(c0_1, a_qs[2], __dp4a(c1_1, a_qs[3], 0))));
-            const int s1 = __dp4a(c0_2, a_qs[4], __dp4a(c1_2, a_qs[5],
-                           __dp4a(c0_3, a_qs[6], __dp4a(c1_3, a_qs[7], 0))));
+            const int s0 = ggml_cuda_dp4a(c0_0, a_qs[0], ggml_cuda_dp4a(c1_0, a_qs[1],
+                           ggml_cuda_dp4a(c0_1, a_qs[2], ggml_cuda_dp4a(c1_1, a_qs[3], 0))));
+            const int s1 = ggml_cuda_dp4a(c0_2, a_qs[4], ggml_cuda_dp4a(c1_2, a_qs[5],
+                           ggml_cuda_dp4a(c0_3, a_qs[6], ggml_cuda_dp4a(c1_3, a_qs[7], 0))));
 
             sumf[j] += d_act * (fd0 * (float)s0 + fd1 * (float)s1);
         }
