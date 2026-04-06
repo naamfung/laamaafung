@@ -657,12 +657,23 @@ static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer,
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 }
 
+// TQ4_1S load-time q8_0 conversion: opt-in with GGML_TQ_CONVERT_Q8=1.
+// Default OFF: native TQ4_1S kernel is faster and uses less VRAM.
+static bool ggml_tq_convert_q8() {
+    static int val = -1;
+    if (val == -1) {
+        const char * env = getenv("GGML_TQ_CONVERT_Q8");
+        val = (env && env[0] == '1') ? 1 : 0;
+    }
+    return val == 1;
+}
+
 static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
 
     ggml_cuda_set_device(ctx->device);
-    // TQ4_1S → q8_0 load-time conversion
-    if (tensor->type == GGML_TYPE_TQ4_1S && offset == 0 && size == ggml_nbytes(tensor)) {
+    // TQ4_1S → q8_0 load-time conversion (opt-in: GGML_TQ_CONVERT_Q8=1)
+    if (ggml_tq_convert_q8() && tensor->type == GGML_TYPE_TQ4_1S && offset == 0 && size == ggml_nbytes(tensor)) {
         const int64_t n_elements = ggml_nelements(tensor);
 
         // Upload TQ4_1S to a temp GPU buffer
@@ -807,8 +818,8 @@ static size_t ggml_backend_cuda_buffer_type_get_alloc_size(ggml_backend_buffer_t
     size_t size = ggml_nbytes(tensor);
     int64_t ne0 = tensor->ne[0];
 
-    // TQ4_1S → q8_0 load-time conversion: allocate q8_0-sized space in VRAM
-    if (tensor->type == GGML_TYPE_TQ4_1S) {
+    // TQ4_1S → q8_0 load-time conversion: allocate q8_0-sized space if opted in
+    if (ggml_tq_convert_q8() && tensor->type == GGML_TYPE_TQ4_1S) {
         // q8_0 block: 34 bytes per 32 elements. TQ4_1S block: 20 bytes per 32 elements.
         const int64_t n_blocks = ggml_nelements(tensor) / QK_TQ4_1S;
         size = n_blocks * sizeof(block_q8_0);
