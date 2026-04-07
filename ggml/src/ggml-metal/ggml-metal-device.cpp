@@ -995,7 +995,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(g
         res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
     }
 
+    // Graph reservation may pass worst-case ne20=ne02 (e.g. 256*256*2=128KB).
+    // At runtime ne20 is the actual n_expert_used (e.g. 8), keeping shmem within limits.
+    // Cap to 32KB (Apple Silicon threadgroup memory limit) to prevent reservation assert
+    // on high-expert-count MoE models (Qwen3.5-35B with 256 experts).
     res.smem = (size_t) ne02*ne20*sizeof(uint16_t);
+    if (res.smem > 32768) {
+        res.smem = 32768;
+    }
 
     return res;
 }
