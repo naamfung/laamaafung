@@ -3002,8 +3002,8 @@ llama_context * llama_init_from_model(
 
     // TurboQuant cache types require flash attention — auto-enable if disabled
     if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED &&
-        (params.type_k == GGML_TYPE_TURBO3_0 || params.type_k == GGML_TYPE_TURBO4_0 ||
-         params.type_v == GGML_TYPE_TURBO3_0 || params.type_v == GGML_TYPE_TURBO4_0)) {
+        (params.type_k == GGML_TYPE_TURBO2_0 || params.type_k == GGML_TYPE_TURBO3_0 || params.type_k == GGML_TYPE_TURBO4_0 ||
+         params.type_v == GGML_TYPE_TURBO2_0 || params.type_v == GGML_TYPE_TURBO3_0 || params.type_v == GGML_TYPE_TURBO4_0)) {
         LLAMA_LOG_WARN("%s: turbo cache types require flash_attn — enabling automatically\n", __func__);
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     }
