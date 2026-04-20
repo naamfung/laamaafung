@@ -2731,8 +2731,10 @@ static bool ggml_metal_op_flash_attn_ext_use_turbo_flash(const ggml_tensor * op)
     // Check environment variable to force enable (bypasses other checks)
     if (turbo_flash_env && turbo_flash_env[0] == '1') return true;
 
-    // Default: enabled for all qualifying configurations
-    return true;
+    // Default: disabled — TurboFlash two-pass kernel produces corrupt output
+    // on Apple10 (M5 Max) and possibly other Metal4 GPUs. Use TURBO_FLASH=1
+    // to opt-in for testing. See PR #91.
+    return false;
 }
 
 size_t ggml_metal_op_flash_attn_ext_extra_pad(const ggml_tensor * op) {
