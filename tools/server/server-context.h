@@ -21,7 +21,8 @@ struct server_context_meta {
     bool has_mtmd;
     bool has_inp_image;
     bool has_inp_audio;
-    json json_webui_settings;
+    json json_ui_settings;            // Primary: new name
+    json json_webui_settings;            // Deprecated: use json_ui_settings instead (kept for backward compat)
     int slot_n_ctx;
     enum llama_pooling_type pooling_type;
 
@@ -109,6 +110,7 @@ struct server_routes {
     server_http_context::handler_t post_completions;
     server_http_context::handler_t post_completions_oai;
     server_http_context::handler_t post_chat_completions;
+    server_http_context::handler_t post_control;
     server_http_context::handler_t post_responses_oai;
     server_http_context::handler_t post_transcriptions_oai;
     server_http_context::handler_t post_anthropic_messages;
