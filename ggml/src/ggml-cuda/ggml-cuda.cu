@@ -4698,17 +4698,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                        (
                            (
                                ggml_is_quantized(src0_type) &&
-                               (
-                                   (
-                                       dim == 3 &&
-                                       ggml_is_contiguous(op->src[0]) &&
-                                       ggml_is_contiguous(op->src[1])
-                                   ) || (
-                                       dim != 3 &&
-                                       ggml_is_contiguous_to_3(op->src[0]) &&
-                                       ggml_is_contiguous_to_3(op->src[1])
-                                   )
-                               ) &&
+                               ggml_is_contiguous(op->src[0]) &&
+                               ggml_is_contiguous(op->src[1]) &&
                                op->src[0]->ne[0] % ggml_blck_size(src0_type) == 0 &&
                                op->src[1]->ne[0] % ggml_blck_size(src0_type) == 0
                            ) || (

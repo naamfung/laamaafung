@@ -146,13 +146,21 @@ static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml
         const T * src1_d = (const T *) src1->data;
         T *       dst_d  = (T *) dst->data;
 
-        for (int64_t i3 = 0; i3 < dst->ne[3]; i3++) {
-            concat_cont_cuda(
-                    src0_d + i3*(src0->nb[3] / sizeof(T)),
-                    src1_d + i3*(src1->nb[3] / sizeof(T)),
-                    dst_d  + i3*( dst->nb[3] / sizeof(T)),
-                    ggml_row_size(src0->type, src0->ne[0])/sizeof(T), src0->ne[1], src0->ne[2],
-                    ggml_row_size(dst->type, dst->ne[0])/sizeof(T),  dst->ne[1],  dst->ne[2], dim, stream);
+        if (dim != 3) {
+            for (int64_t i3 = 0; i3 < dst->ne[3]; i3++) {
+                concat_cont_cuda(
+                        src0_d + i3*(src0->nb[3] / sizeof(T)),
+                        src1_d + i3*(src1->nb[3] / sizeof(T)),
+                        dst_d  + i3*( dst->nb[3] / sizeof(T)),
+                        ggml_row_size(src0->type, src0->ne[0])/sizeof(T), src0->ne[1], src0->ne[2],
+                        ggml_row_size(dst->type, dst->ne[0])/sizeof(T),  dst->ne[1],  dst->ne[2], dim, stream);
+            }
+        } else {
+            const size_t size0 = ggml_nbytes(src0);
+            const size_t size1 = ggml_nbytes(src1);
+
+            CUDA_CHECK(cudaMemcpyAsync((char *) dst->data,         src0->data, size0, cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync((char *) dst->data + size0, src1->data, size1, cudaMemcpyDeviceToDevice, stream));
         }
     } else if (dim == 3 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1)) {
         const size_t size0 = ggml_nbytes(src0);
@@ -206,6 +214,7 @@ void ggml_cuda_op_concat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(dst->type  == src0->type);
 
     if (ggml_is_quantized(src0->type)) {
+<<<<<<< HEAD
         if (dim == 3) {
             GGML_ASSERT(ggml_is_contiguous(src0));
             GGML_ASSERT(ggml_is_contiguous(src1));
@@ -217,6 +226,14 @@ void ggml_cuda_op_concat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ASSERT(src1->ne[0] % ggml_blck_size(src1->type) == 0);
 
         // if first 3 dimensions are contiguous and ne[0] is multiple of the block size we can concat both tensors as byte tensors
+=======
+        GGML_ASSERT(ggml_is_contiguous(src0));
+        GGML_ASSERT(ggml_is_contiguous(src1));
+        GGML_ASSERT(src0->ne[0] % ggml_blck_size(src0->type) == 0);
+        GGML_ASSERT(src1->ne[0] % ggml_blck_size(src1->type) == 0);
+
+        // if tensors are contiguous and ne[0] is multiple of the block size we can concat both tensors as byte tensors
+>>>>>>> 78d2f5246 (cuda : concat implementation for quantized types (#25303))
         concat_cuda<uint8_t>(src0, src1, dst, dim, stream);
     } else {
         GGML_ASSERT(ggml_blck_size(src0->type) == 1);
