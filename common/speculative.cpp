@@ -795,7 +795,7 @@ struct common_speculative_state_mtp : public common_speculative_impl {
     std::vector<int32_t> i_batch_end;
 
     common_speculative_state_mtp(const common_params_speculative & params, uint32_t n_seq)
-        : common_speculative_impl(COMMON_SPECULATIVE_TYPE_MTP, n_seq)
+        : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq)
         , params(params.draft)
     {
         auto * ctx_tgt = this->params.ctx_tgt;
@@ -819,8 +819,8 @@ struct common_speculative_state_mtp : public common_speculative_impl {
             s.reset(common_sampler_init(llama_get_model(ctx_dft), sparams));
         }
 
-        llama_set_embeddings_pre_norm(ctx_tgt, true);
-        llama_set_embeddings_pre_norm(ctx_dft, true);
+        llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
+        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
 
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
 
@@ -898,7 +898,7 @@ struct common_speculative_state_mtp : public common_speculative_impl {
         //                                                       ^--- this is a problem
         // TODO:this is generally true, but would be nice to assert it
         {
-            const float * h_tgt = llama_get_embeddings_pre_norm(ctx_tgt);
+            const float * h_tgt = llama_get_embeddings_nextn(ctx_tgt);
             std::memcpy(batch.embd + (size_t) 1 * n_embd, h_tgt, row_bytes * (n_tokens-1));
 
             //{
@@ -935,7 +935,7 @@ struct common_speculative_state_mtp : public common_speculative_impl {
                 continue;
             }
 
-            const float * h_last = llama_get_embeddings_pre_norm_ith(ctx_tgt, i_batch_end[seq_id]);
+            const float * h_last = llama_get_embeddings_nextn_ith(ctx_tgt, i_batch_end[seq_id]);
             std::memcpy(pending_h[seq_id].data(), h_last, row_bytes);
         }
 
@@ -992,7 +992,7 @@ struct common_speculative_state_mtp : public common_speculative_impl {
                 auto * smpl = smpls[seq_id].get();
 
                 common_sampler_sample(smpl, ctx_dft, i_batch, true);
-                h_row = llama_get_embeddings_pre_norm_ith(ctx_dft, i_batch);
+                h_row = llama_get_embeddings_nextn_ith(ctx_dft, i_batch);
                 ++i_batch;
 
                 const auto * cur_p = common_sampler_get_candidates(smpl, true);
@@ -1057,7 +1057,7 @@ struct common_speculative_state_mtp : public common_speculative_impl {
         }
     }
 
-    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/) override {
+    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
     }
 };
 
