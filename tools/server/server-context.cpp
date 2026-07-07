@@ -75,7 +75,7 @@ struct server_slot {
 
     // True when this slot's speculative impl is MTP (ctx_dft is the MTP head).
     // MTP needs every prefill position to carry logits=1 so the streaming
-    // hook in common_speculative_state_mtp::process() can read t_h_pre_norm.
+    // hook in common_speculative_impl_draft_mtp::process() can read t_h_nextn.
     bool is_mtp_enabled = false;
 
     // multimodal
@@ -1079,7 +1079,7 @@ private:
             slot.ctx_dft = ctx_dft.get();
             slot.spec    = spec.get();
             slot.is_mtp_enabled = (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
-                                             COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end())
+                                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end())
                                   && (ctx_dft != nullptr);
             slot.n_ctx   = n_ctx_slot;
 

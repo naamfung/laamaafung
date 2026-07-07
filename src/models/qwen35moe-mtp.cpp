@@ -15,7 +15,7 @@ void llama_model_qwen35moe_mtp::load_arch_hparams(llama_model_loader & ml) {
     hparams.kv_only_nextn         = true;
     hparams.n_layer_kv_from_start = -1;
     for (uint32_t i = 0; i < hparams.n_layer; ++i) {
-        hparams.recurrent_layer_arr[i] = false;
+        hparams.is_recr_impl[i] = false;
     }
 
     type = LLM_TYPE_UNKNOWN;
@@ -232,8 +232,8 @@ llama_model_qwen35moe_mtp::graph::graph(const llama_model & model, const llm_gra
     cb(cur, "mtp_post_ffn", il);
 
     // Pre-norm hidden state: used by the AR draft loop to seed the next MTP step.
-    cb(cur, "h_pre_norm", -1);
-    res->t_h_pre_norm = cur;
+    cb(cur, "h_nextn", -1);
+    res->t_h_nextn = cur;
 
     ggml_tensor * head_norm_w = layer.nextn.shared_head_norm
             ? layer.nextn.shared_head_norm
