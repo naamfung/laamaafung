@@ -515,16 +515,15 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     if (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type)) {
         // TurboQuant KV types bypass the standard check; they are handled by the VEC path
-        switch (K->type) {
-            case GGML_TYPE_TURBO3_0:
-            case GGML_TYPE_TURBO2_0:
-            case GGML_TYPE_TURBO4_0:
-                if (K->ne[0] % 64 != 0) {
-                    return BEST_FATTN_KERNEL_NONE;
-                }
-                break;
-            default:
+        auto is_turbo = [](ggml_type t) {
+            return t == GGML_TYPE_TURBO3_0 || t == GGML_TYPE_TURBO2_0 || t == GGML_TYPE_TURBO4_0;
+        };
+        if (is_turbo(K->type) || is_turbo(V->type)) {
+            if (K->ne[0] % 64 != 0) {
                 return BEST_FATTN_KERNEL_NONE;
+            }
+        } else {
+            return BEST_FATTN_KERNEL_NONE;
         }
     }
 
