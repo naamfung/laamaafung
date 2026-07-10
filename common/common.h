@@ -1079,6 +1079,7 @@ struct common_prompt_checkpoint {
 
     llama_pos pos_min;
     llama_pos pos_max;
+    llama_pos pos_end;
 
     std::vector<uint8_t> data_tgt;
     std::vector<uint8_t> data_dft;
@@ -1095,7 +1096,8 @@ struct common_prompt_checkpoint {
     void update_pos(
             int64_t n_tokens,
             llama_pos pos_min,
-            llama_pos pos_max);
+            llama_pos pos_max,
+            llama_pos pos_end);
 
     void update_tgt(
             llama_context * ctx,
