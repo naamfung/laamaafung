@@ -108,7 +108,7 @@ struct cli_context {
             }
 
             // reasoning budget sampler
-            if (!chat_params.thinking_end_tag.empty()) {
+            if (!chat_params.thinking_end_tags.empty()) {
                 task.params.sampling.reasoning_budget_tokens = defaults.sampling.reasoning_budget_tokens;
                 task.params.sampling.generation_prompt = chat_params.generation_prompt;
 
@@ -116,10 +116,13 @@ struct cli_context {
                     task.params.sampling.reasoning_budget_start =
                         common_tokenize(vocab, chat_params.thinking_start_tag, false, true);
                 }
-                task.params.sampling.reasoning_budget_end =
-                    common_tokenize(vocab, chat_params.thinking_end_tag, false, true);
+                for (const auto & end_tag : chat_params.thinking_end_tags) {
+                    task.params.sampling.reasoning_budget_end.push_back(
+                        common_tokenize(vocab, end_tag, false, true));
+                }
+                const std::string & first_end_tag = chat_params.thinking_end_tags.front();
                 task.params.sampling.reasoning_budget_forced =
-                    common_tokenize(vocab, defaults.sampling.reasoning_budget_message + chat_params.thinking_end_tag, false, true);
+                    common_tokenize(vocab, defaults.sampling.reasoning_budget_message + first_end_tag, false, true);
             }
 
             rd.post_task({std::move(task)});

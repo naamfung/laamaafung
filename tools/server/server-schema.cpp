@@ -154,6 +154,24 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_hard_limits(-1, INT32_MAX)
         ->set_desc("How many tokens to scan for repetitions (0 = disabled, -1 = context size)"));
 
+    add((new field_num("repeat_line_window", params.sampling.repeat_line_window))
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Number of past segments to track for loop detection (0 = disabled)"));
+
+    add((new field_num("repeat_line_min_length", params.sampling.repeat_line_min_length))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Minimum segment length to consider for loop detection (avoids false positives)"));
+
+    add((new field_str("repeat_line_delimiters"))
+        ->set_desc("Characters that end a segment for loop detection (default: \"\\n.!?:\")")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            ctx.params.sampling.repeat_line_delimiters = data.at("repeat_line_delimiters").get<std::string>();
+        }));
+
+    add((new field_num("repeat_line_temp_boost", params.sampling.repeat_line_temp_boost))
+        ->set_hard_limits(0.0f, std::numeric_limits<float>::max())
+        ->set_desc("Temperature boost when a repetition loop is detected"));
+
     add((new field_num("mirostat", params.sampling.mirostat))
         ->set_limits(0, 2)
         ->set_desc("Enable Mirostat sampling, controlling perplexity during text generation (0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)"));
@@ -393,19 +411,35 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
             ctx.params.sampling.reasoning_budget_start = common_tokenize(ctx.vocab, data.at("reasoning_budget_start_tag").get<std::string>(), false, true);
         }));
 
-    add((new field_str("reasoning_budget_end_tag"))
-        ->set_desc("Token string marking the end of the reasoning budget section")
+    add((new field_json("reasoning_budget_end_tags"))
+        ->add_alias("reasoning_budget_end_tag")
+        ->set_desc("Token string(s) marking the end of the reasoning budget section. Accepts a single string or an array of strings")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
-            std::string end_tag = data.at("reasoning_budget_end_tag").get<std::string>();
-            ctx.params.sampling.reasoning_budget_end = common_tokenize(ctx.vocab, end_tag, false, true);
+            ctx.params.sampling.reasoning_budget_end.clear();
+            json val;
+            if (data.contains("reasoning_budget_end_tags")) {
+                val = data.at("reasoning_budget_end_tags");
+            } else {
+                val = data.at("reasoning_budget_end_tag");
+            }
+            if (val.is_string()) {
+                ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, val.get<std::string>(), false, true));
+            } else if (val.is_array()) {
+                for (const auto & el : val) {
+                    ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, el.get<std::string>(), false, true));
+                }
+            }
         }));
 
     add((new field_str("reasoning_budget_message"))
         ->set_desc("Message to prepend to the reasoning budget end tag when forcing it")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
-            std::string end_tag = json_value(data, "reasoning_budget_end_tag", std::string());
+            std::string end_tag;
+            if (!ctx.params.sampling.reasoning_budget_end.empty()) {
+                end_tag = common_detokenize(ctx.vocab, ctx.params.sampling.reasoning_budget_end.front(), true);
+            }
             std::string message = data.at("reasoning_budget_message").get<std::string>();
             ctx.params.sampling.reasoning_budget_forced = common_tokenize(ctx.vocab, message + end_tag, false, true);
         }));
