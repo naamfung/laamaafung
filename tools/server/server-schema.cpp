@@ -319,6 +319,9 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
             ctx.params.chat_parser_params.parser.load(data.at("chat_parser").get<std::string>());
         }));
 
+    add((new field_bool("strict_eof_on_complete", params.chat_parser_params.strict_eof_on_complete))
+        ->set_desc("Retry parsing without leniency on the final input so EOF can act as a real boundary"));
+
     add((new field_json("continue_final_message"))
         ->set_desc("Whether to continue the final message of the chat template")
         ->set_handler([&](field_eval_context & ctx, const json & data) {

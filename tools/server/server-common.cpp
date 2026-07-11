@@ -1111,6 +1111,7 @@ json oaicompat_chat_params_parse(
     if (!chat_params.parser.empty()) {
         llama_params["chat_parser"] = chat_params.parser;
     }
+    llama_params["strict_eof_on_complete"] = chat_params.strict_eof_on_complete;
 
     llama_params["message_delimiters"] = chat_params.message_delimiters.to_json();
 
