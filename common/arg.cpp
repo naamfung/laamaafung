@@ -1898,6 +1898,40 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sampling());
     add_opt(common_arg(
+        {"--repeat-line-window"}, "N",
+        string_format("set repeat-line loop detection window (default: %d, 0 = disabled)", params.sampling.repeat_line_window),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid repeat-line-window = %d\n", value));
+            }
+            params.sampling.repeat_line_window = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-min-length"}, "N",
+        string_format("set minimum segment length for repeat-line detection (default: %d)", params.sampling.repeat_line_min_length),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::runtime_error(string_format("error: invalid repeat-line-min-length = %d\n", value));
+            }
+            params.sampling.repeat_line_min_length = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-delimiters"}, "STRING",
+        string_format("set delimiter characters for repeat-line segments (default: \"%s\")", params.sampling.repeat_line_delimiters.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.sampling.repeat_line_delimiters = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-temp-boost"}, "N",
+        string_format("set temperature boost for repeat-line loop detection (default: %.2f)", (double)params.sampling.repeat_line_temp_boost),
+        [](common_params & params, const std::string & value) {
+            params.sampling.repeat_line_temp_boost = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
         {"--dry-sequence-breaker"}, "STRING",
         string_format("add sequence breaker for DRY sampling, clearing out default breakers (%s) in the process; use \"none\" to not use any sequence breakers\n",
             params.sampling.dry_sequence_breakers.empty() ? "none" :

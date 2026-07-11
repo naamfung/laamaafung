@@ -51,10 +51,7 @@ struct stream_session {
     size_t  dropped_prefix() const; // bytes evicted from the front due to cap
     int64_t completed_at() const;   // 0 while alive, unix seconds after finalize
 
-    // attach the producer stop hook used to cancel its reader, pass an empty function to detach
-    void set_stop_producer(std::function<void()> fn);
-
-    // signal the producer to abort its inference asap via the stop hook, idempotent
+    // signal the producer to abort its inference asap, idempotent
     void cancel();
 
 private:
@@ -66,7 +63,6 @@ private:
     std::atomic<bool>       done;
     std::atomic<bool>       cancelled;
     std::atomic<int64_t>    completed_ts;
-    std::function<void()>   stop_producer; // protected by mu
 };
 
 using stream_session_ptr = std::shared_ptr<stream_session>;
@@ -88,37 +84,16 @@ protected:
 
 // producer end: writes chunks into the ring buffer and owns the session lifetime, finalizing it
 // on destruction.
-//
-// lifetime safety: holds a shared_ptr<atomic<bool>> alive also captured by the session's
-// stop_producer hook. cleanup() sets alive=false and clears the hook; it must run while the
-// response the hook calls stop() on is still alive. ~server_res_generator() does this explicitly.
 struct stream_pipe_producer : stream_pipe {
     ~stream_pipe_producer() override;
 
     // append raw bytes to the session's ring buffer, returns false if already finalized
     bool write(const char * data, size_t len);
 
-    // mark the natural end on the wire so a later close() is a no-op
-    void done();
-
-    // on a peer drop, pump the response next() into the ring buffer until done. runs on the http
-    // worker from on_complete, no-op after done() or cancel
-    void close();
-
-    // disarm the stop hook and drop the alive guard, must run while the response the hook
-    // references is still alive. idempotent, the destructor calls it too
-    void cleanup();
-
-    // res.stop() is invoked when the session is cancelled, the alive guard ensures stop() is not
-    // called after cleanup() has run
-    static std::shared_ptr<stream_pipe_producer> create(stream_session_ptr session, server_http_res & res);
+    static stream_pipe_producer * create(stream_session_ptr session);
 
 private:
     explicit stream_pipe_producer(stream_session_ptr session);
-
-    bool                                done_ = false;
-    std::shared_ptr<std::atomic<bool>>  alive_;
-    server_http_res *                   res_ = nullptr;
 };
 
 // consumer end: read-only replay of the ring buffer, the destructor does not finalize the session
@@ -193,11 +168,24 @@ server_http_context::handler_t make_stream_delete_handler();
 // the router can track which child serves a forwarded POST
 std::string stream_conv_id_from_headers(const std::map<std::string, std::string> & headers);
 
-// on an X-Conversation-Id header, create or replace the session and attach a producer pipe to
-// res. no-op when absent, called from the server_res_generator constructor
-void stream_session_attach_pipe(server_http_res & res, const std::map<std::string, std::string> & headers);
+// on an X-Conversation-Id header, create or replace the session and return a producer pipe.
+// returns nullptr when the header is absent
+stream_pipe_producer * stream_create_spipe(const std::map<std::string, std::string> & headers);
 
-// should_stop closure that ignores peer disconnect when a pipe is attached, so only an explicit
-// DELETE stops the producer and generation keeps flowing into the ring buffer. without a pipe it
-// delegates to fallback, the legacy non-resumable flow
-std::function<bool()> stream_aware_should_stop(server_http_res * res, std::function<bool()> fallback);
+// response wrapper that tees streaming output into a ring buffer for replay.
+// when a spipe is attached (via set_req), should_stop() reports the session cancel state
+// instead of the peer disconnect, so generation keeps flowing into the buffer on peer drop.
+struct server_res_spipe : server_http_res {
+private:
+    std::unique_ptr<stream_pipe_producer> spipe;
+    std::function<bool(std::string &)>    next_orig;
+    const server_http_req               * req = nullptr;
+    bool                                   next_finished = false;
+
+public:
+    void set_req(const server_http_req * req);
+    bool conn_alive();
+    bool should_stop();
+    void on_complete() override;
+    void set_next(std::function<bool(std::string &)> next_fn);
+};
