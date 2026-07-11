@@ -177,6 +177,17 @@ common_chat_msg task_result_state::update_chat_msg(
         chat_parser_params);
     if (!new_msg.empty()) {
         new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
+
+        // During partial parsing, the PEG parser's peek mechanism can cause it to
+        // oscillate between finding and not finding tool calls. Skip updates where
+        // the tool call count regresses; the final parse at EOF (with
+        // strict_eof_on_complete) will produce the correct result.
+        if (is_partial && new_msg.tool_calls.size() < chat_msg.tool_calls.size()) {
+            SRV_TRC("partial parse regressed tool calls (%zu -> %zu), skipping update\n",
+                    chat_msg.tool_calls.size(), new_msg.tool_calls.size());
+            return chat_msg;
+        }
+
         chat_msg = new_msg;
         auto all_diffs = common_chat_msg_diff::compute_diffs(msg_prv_copy, chat_msg);
 
