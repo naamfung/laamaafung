@@ -544,6 +544,19 @@ task_params eval_llama_cmpl_schema(
         // if "reasoning_format" is not provided, its handler will not be called, we will need to handle it here
         auto reasoning_format = params.chat_parser_params.reasoning_format;
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
+
+        // If n_predict would truncate generation before reasoning finishes, bump it
+        // so the model can still produce content after the reasoning budget.
+        {
+            const int budget = params.sampling.reasoning_budget_tokens;
+            if (budget > 0 && params.n_predict > 0 && params.n_predict <= budget) {
+                const int min_content_tokens = 2048;
+                const int new_n_predict = budget + min_content_tokens;
+                SRV_WRN("n_predict (%d) <= reasoning_budget_tokens (%d): bumping n_predict to %d to leave room for content after reasoning\n",
+                        params.n_predict, budget, new_n_predict);
+                params.n_predict = new_n_predict;
+            }
+        }
     }
 
     // debugging
