@@ -2,18 +2,18 @@
 #
 # Asset provisioning priority:
 #   1. Pre-built assets in SRC_DIST_DIR (manually built by user)
-#   2. If BUILD_UI=ON: npm build
-#   3. If above did not produce assets and HF_ENABLED=ON: HF Bucket download
-#      of dist.tar.gz (verified against dist.tar.gz.sha256)
+#   2. If BUILD_UI=ON: bun build (falls back to npm if bun not found)
+#   3. If above did not produce assets: extract from local archive in
+#      ${LLAMA_SOURCE_DIR}/files (llama-b<version>-ui.tar.gz)
 
 cmake_minimum_required(VERSION 3.18)
 
 set(UI_SOURCE_DIR     "" CACHE STRING "UI source directory (to run npm build)")
 set(UI_BINARY_DIR     "" CACHE STRING "UI binary directory (to store generated files)")
 set(LLAMA_SOURCE_DIR  "" CACHE STRING "Project source root (to resolve version from git)")
-set(HF_BUCKET         "" CACHE STRING "Hugging Face bucket name")
-set(HF_VERSION        "" CACHE STRING "Version to download (empty = resolve from git)")
-set(HF_ENABLED        "" CACHE STRING "Whether to allow HF Bucket download (ON/OFF)")
+set(HF_BUCKET         "" CACHE STRING "Hugging Face bucket name (unused, kept for compatibility)")
+set(HF_VERSION        "" CACHE STRING "Version to match for local archive (empty = resolve from git)")
+set(HF_ENABLED        "" CACHE STRING "Whether to use prebuilt UI from local archives (ON/OFF)")
 set(BUILD_UI          "" CACHE STRING "Build UI via npm (ON/OFF)")
 set(LLAMA_UI_EMBED    "" CACHE STRING "Path to llama-ui-embed helper")
 set(LLAMA_UI_GZIP     "" CACHE STRING "Apply gzip compress to assets to save bandwidth")
@@ -85,80 +85,98 @@ function(npm_build out_var)
     set(${out_var} FALSE PARENT_SCOPE)
 
     if(NOT EXISTS "${UI_SOURCE_DIR}/package.json")
-        message(STATUS "UI: ${UI_SOURCE_DIR}/package.json not found, skipping npm")
+        message(STATUS "UI: ${UI_SOURCE_DIR}/package.json not found, skipping build")
         return()
     endif()
 
     npm_build_should_skip(skip)
     if(skip)
-        message(STATUS "UI: npm output up-to-date, skipping build")
+        message(STATUS "UI: build output up-to-date, skipping")
         set(${out_var} TRUE PARENT_SCOPE)
         return()
     endif()
 
-    if(CMAKE_HOST_WIN32)
-        find_program(NPM_EXECUTABLE NAMES npm.cmd npm.bat npm)
+    # Prefer bun, fall back to npm
+    find_program(BUN_EXECUTABLE NAMES bun bun.exe)
+    if(BUN_EXECUTABLE)
+        set(PKG_EXECUTABLE ${BUN_EXECUTABLE})
+        message(STATUS "UI: using bun (${BUN_EXECUTABLE})")
     else()
-        find_program(NPM_EXECUTABLE npm)
-    endif()
-    if(NOT NPM_EXECUTABLE)
-        message(STATUS "UI: npm not found, skipping npm build")
-        return()
+        if(CMAKE_HOST_WIN32)
+            find_program(NPM_EXECUTABLE NAMES npm.cmd npm.bat npm)
+        else()
+            find_program(NPM_EXECUTABLE npm)
+        endif()
+        if(NOT NPM_EXECUTABLE)
+            message(STATUS "UI: neither bun nor npm found, skipping build")
+            return()
+        endif()
+        set(PKG_EXECUTABLE ${NPM_EXECUTABLE})
+        message(STATUS "UI: using npm (${NPM_EXECUTABLE})")
     endif()
 
     stage_sources()
 
-    # npm writes node_modules/.package-lock.json on every successful install,
-    # so a package-lock.json newer than this marker means node_modules is stale
-    set(NPM_MARKER "${WORK_DIR}/node_modules/.package-lock.json")
+    # Determine lockfile for staleness check (after staging copies sources)
+    if(EXISTS "${WORK_DIR}/bun.lock")
+        set(PKG_LOCKFILE "bun.lock")
+    elseif(EXISTS "${WORK_DIR}/bun.lockb")
+        set(PKG_LOCKFILE "bun.lockb")
+    else()
+        set(PKG_LOCKFILE "package-lock.json")
+    endif()
+
+    # Write our own marker after install so staleness works with either package manager
+    set(DEPS_MARKER "${WORK_DIR}/node_modules/.ui-deps-stamp")
     set(need_install FALSE)
-    if(NOT EXISTS "${NPM_MARKER}")
+    if(NOT EXISTS "${DEPS_MARKER}")
         set(need_install TRUE)
     else()
-        file(TIMESTAMP "${WORK_DIR}/package-lock.json" lock_ts)
-        file(TIMESTAMP "${NPM_MARKER}" marker_ts)
+        file(TIMESTAMP "${WORK_DIR}/${PKG_LOCKFILE}" lock_ts)
+        file(TIMESTAMP "${DEPS_MARKER}" marker_ts)
         if(lock_ts STRGREATER marker_ts)
             set(need_install TRUE)
         endif()
     endif()
 
     if(need_install)
-        message(STATUS "UI: running npm install")
+        message(STATUS "UI: running ${PKG_EXECUTABLE} install")
         execute_process(
-            COMMAND ${NPM_EXECUTABLE} install
+            COMMAND ${PKG_EXECUTABLE} install
             WORKING_DIRECTORY "${WORK_DIR}"
             RESULT_VARIABLE rc
             ERROR_VARIABLE  err
         )
         if(NOT rc EQUAL 0)
-            message(STATUS "UI: npm install failed (${rc})")
+            message(STATUS "UI: ${PKG_EXECUTABLE} install failed (${rc})")
             message(STATUS "  stderr: ${err}")
             return()
         endif()
+        file(WRITE "${DEPS_MARKER}" "")
     endif()
 
     file(MAKE_DIRECTORY "${DIST_DIR}")
 
-    message(STATUS "UI: running npm run build, output -> ${DIST_DIR}")
+    message(STATUS "UI: running ${PKG_EXECUTABLE} run build, output -> ${DIST_DIR}")
     execute_process(
         COMMAND ${CMAKE_COMMAND} -E env "LLAMA_UI_OUT_DIR=${DIST_DIR}" "LLAMA_UI_VERSION=${HF_VERSION}" "LLAMA_BUILD_NUMBER=${LLAMA_BUILD_NUMBER}"
-                ${NPM_EXECUTABLE} run build
+                ${PKG_EXECUTABLE} run build
         WORKING_DIRECTORY "${WORK_DIR}"
         RESULT_VARIABLE rc
         ERROR_VARIABLE  err
     )
     if(NOT rc EQUAL 0)
-        message(STATUS "UI: npm run build failed (${rc})")
+        message(STATUS "UI: ${PKG_EXECUTABLE} run build failed (${rc})")
         message(STATUS "  stderr: ${err}")
         return()
     endif()
 
     if(NOT EXISTS "${DIST_DIR}/index.html")
-        message(STATUS "UI: npm build finished but assets missing in ${DIST_DIR}")
+        message(STATUS "UI: build finished but assets missing in ${DIST_DIR}")
         return()
     endif()
 
-    message(STATUS "UI: npm build succeeded")
+    message(STATUS "UI: build succeeded")
     file(REMOVE "${STAMP_FILE}")
     set(${out_var} TRUE PARENT_SCOPE)
 endfunction()
@@ -180,74 +198,68 @@ function(resolve_version out_var)
     set(${out_var} "" PARENT_SCOPE)
 endfunction()
 
-function(hf_download version out_var out_resolved)
+function(local_archive_extract version out_var out_resolved)
     set(${out_var}      FALSE PARENT_SCOPE)
     set(${out_resolved} ""    PARENT_SCOPE)
 
-    set(archive "${UI_BINARY_DIR}/dist.tar.gz")
-
-    # Use HF_TOKEN to benefit from higher rate limits
-    set(auth_headers "")
-    if(DEFINED ENV{HF_TOKEN} AND NOT "$ENV{HF_TOKEN}" STREQUAL "")
-        list(APPEND auth_headers "HTTPHEADER" "Authorization: Bearer $ENV{HF_TOKEN}")
+    set(files_dir "${LLAMA_SOURCE_DIR}/files")
+    if(NOT EXISTS "${files_dir}")
+        message(STATUS "UI: local archive directory not found: ${files_dir}")
+        return()
     endif()
 
+    # Build candidate list: explicit version first, then any available archives (latest first)
     set(candidates "")
     if(NOT "${version}" STREQUAL "")
         list(APPEND candidates "${version}")
     endif()
-    list(APPEND candidates "latest")
+    file(GLOB archives "${files_dir}/llama-b*-ui.tar.gz")
+    if(archives)
+        list(SORT archives ORDER DESCENDING)
+        foreach(archive ${archives})
+            get_filename_component(fname "${archive}" NAME_WE)
+            string(REGEX REPLACE "llama-(b[0-9]+)-ui" "\\1" arch_ver "${fname}")
+            list(APPEND candidates "${arch_ver}")
+        endforeach()
+    endif()
 
     foreach(resolved ${candidates})
-        set(base "https://huggingface.co/buckets/${HF_BUCKET}/resolve/${resolved}")
-
-        message(STATUS "UI: downloading from ${resolved}: ${base}/dist.tar.gz")
-
-        file(DOWNLOAD "${base}/dist.tar.gz?download=true" "${archive}"
-            STATUS status TIMEOUT 300 ${auth_headers}
-        )
-        list(GET status 0 rc)
-        if(NOT rc EQUAL 0)
-            list(GET status 1 errmsg)
-            message(STATUS "UI: download dist.tar.gz from ${resolved} failed: ${errmsg}")
+        set(archive "${files_dir}/llama-${resolved}-ui.tar.gz")
+        if(NOT EXISTS "${archive}")
             continue()
         endif()
 
-        file(DOWNLOAD "${base}/dist.tar.gz.sha256?download=true" "${archive}.sha256"
-            STATUS status TIMEOUT 30 ${auth_headers}
-        )
-        list(GET status 0 rc)
-        if(NOT rc EQUAL 0)
-            list(GET status 1 errmsg)
-            message(STATUS "UI: download dist.tar.gz.sha256 from ${resolved} failed: ${errmsg}")
-            continue()
-        endif()
+        message(STATUS "UI: extracting local archive: ${archive}")
 
-        # Validate sha256 checkums
-        file(READ "${archive}.sha256" expected)
-        string(REGEX MATCH "^[0-9a-fA-F]+" expected "${expected}")
-        string(TOLOWER "${expected}" expected)
-        file(SHA256 "${archive}" actual)
-        if("${expected}" STREQUAL "" OR NOT "${actual}" STREQUAL "${expected}")
-            message(STATUS "UI: checksum mismatch for dist.tar.gz from ${resolved}")
-            continue()
-        endif()
-
-        # Clear DIST_DIR to remove stale files first
         file(REMOVE_RECURSE "${DIST_DIR}")
-
         file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${DIST_DIR}")
 
+        # Flatten wrapper directory if the archive wraps assets in a top-level dir
         if(NOT EXISTS "${DIST_DIR}/index.html")
-            message(STATUS "UI: archive from ${resolved} is missing required assets")
+            file(GLOB wrapper_index "${DIST_DIR}/*/index.html")
+            if(wrapper_index)
+                list(GET wrapper_index 0 first_index)
+                get_filename_component(wrapper_dir "${first_index}" DIRECTORY)
+                message(STATUS "UI: flattening archive wrapper directory: ${wrapper_dir}")
+                file(COPY "${wrapper_dir}/" DESTINATION "${DIST_DIR}")
+                file(REMOVE_RECURSE "${wrapper_dir}")
+            endif()
+        endif()
+
+        if(NOT EXISTS "${DIST_DIR}/index.html" OR NOT EXISTS "${DIST_DIR}/loading.html")
+            message(STATUS "UI: archive ${archive} is missing required assets (index.html or loading.html)")
             continue()
         endif()
 
-        message(STATUS "UI: archive verified and extracted")
+        message(STATUS "UI: local archive extracted successfully (${resolved})")
         set(${out_var}      TRUE          PARENT_SCOPE)
         set(${out_resolved} "${resolved}" PARENT_SCOPE)
         return()
     endforeach()
+
+    if(NOT candidates)
+        message(STATUS "UI: no local archives found in ${files_dir}")
+    endif()
 endfunction()
 
 function(emit_files dist_dir)
@@ -316,35 +328,34 @@ if(BUILD_UI)
 endif()
 
 # ---------------------------------------------------------------------------
-# 3. Priority 3: HF Bucket download (if npm did not produce assets and HF_ENABLED=ON)
+# 3. Priority 3: extract from local archive in ${LLAMA_SOURCE_DIR}/files
 # ---------------------------------------------------------------------------
 if(NOT provisioned AND HF_ENABLED)
-    resolve_version(VERSION)
-
     set(stamp_ok FALSE)
-    if(EXISTS "${STAMP_FILE}" AND NOT "${VERSION}" STREQUAL "")
+    set(stamped "")
+    if(EXISTS "${STAMP_FILE}")
         file(READ "${STAMP_FILE}" stamped)
         string(STRIP "${stamped}" stamped)
-        if("${stamped}" STREQUAL "${VERSION}")
-            set(stamp_ok TRUE)
+        if(NOT "${stamped}" STREQUAL "")
+            set(archive "${LLAMA_SOURCE_DIR}/files/llama-${stamped}-ui.tar.gz")
+            if(EXISTS "${archive}" AND EXISTS "${DIST_DIR}/index.html" AND EXISTS "${DIST_DIR}/loading.html")
+                set(stamp_ok TRUE)
+            endif()
         endif()
     endif()
 
-    set(have_assets FALSE)
-    if(EXISTS "${DIST_DIR}/index.html")
-        set(have_assets TRUE)
-    endif()
-    if(stamp_ok AND have_assets)
-        message(STATUS "UI: HF stamp '${stamped}' matches version, skipping HF fetch")
+    if(stamp_ok)
+        message(STATUS "UI: local archive '${stamped}' already extracted, skipping")
         set(provisioned TRUE)
     else()
-        hf_download("${VERSION}" HF_OK HF_RESOLVED)
-        if(HF_OK)
-            file(WRITE "${STAMP_FILE}" "${HF_RESOLVED}")
-            message(STATUS "UI: HF download succeeded, stamp updated (${HF_RESOLVED})")
+        resolve_version(VERSION)
+        local_archive_extract("${VERSION}" LOCAL_OK LOCAL_RESOLVED)
+        if(LOCAL_OK)
+            file(WRITE "${STAMP_FILE}" "${LOCAL_RESOLVED}")
+            message(STATUS "UI: local archive extracted, stamp updated (${LOCAL_RESOLVED})")
             set(provisioned TRUE)
         else()
-            message(STATUS "UI: HF download failed")
+            message(STATUS "UI: local archive extraction failed")
         endif()
     endif()
 endif()
@@ -357,10 +368,8 @@ if(NOT provisioned)
         message(WARNING "UI: provisioning failed; embedding stale assets from ${DIST_DIR}")
     else()
         message(WARNING "UI: no assets available - building without an embedded UI. "
-                        "In a disconnected environment, download the pre-built UI "
-                        "from a llama.cpp release at "
-                        "https://github.com/ggml-org/llama.cpp/releases and "
-                        "extract to tools/ui/dist.")
+                        "Place a pre-built archive (llama-b<version>-ui.tar.gz) in the "
+                        "'files' directory at the project root.")
     endif()
 endif()
 
