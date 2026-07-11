@@ -2379,7 +2379,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({
                 special_function_tool
         })
-            .expect_reasoning("<think>\n\n")
+            .expect_reasoning("")
             .expect_tool_calls({ { "special_function", "{\"arg1\": 1}", "" } })
             .run();
 
@@ -2492,6 +2492,16 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ run_in_terminal_tool })
             .expect_reasoning("I might call <tool_call> later, but I am still thinking.")
             .expect_content("Final answer without tools.")
+            .run();
+
+        // Plain content with no think/tool tags: the peek-based reasoning
+        // branches must fall through to content(rest()) so the output is not
+        // silently dropped (regression test for lenient peek/CHOICE bug).
+        tst.test("Let me just answer directly without thinking.")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .enable_thinking(true)
+            .tools({ run_in_terminal_tool })
+            .expect_content("Let me just answer directly without thinking.")
             .run();
 
         // Continuation tests

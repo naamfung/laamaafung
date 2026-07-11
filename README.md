@@ -1,3 +1,8 @@
+# laamaafung
+
+致力于修复 LlamaCpp 影响模型无法驱动智能代理胜任长程任务的所有问题。近期已修复 tagged thinking tools 模板下 PEG 解析器 `strict_eof_on_complete` 机制未通过 server 的 JSON 序列化/反序列化路径传播导致模型输出为空的问题。
+
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
