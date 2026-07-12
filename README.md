@@ -17,7 +17,7 @@
 | --- | --- | --- | --- |
 | `--repeat-line-window` | 整数 | 0（已禁用） | 要跟踪的历史片段数量 |
 | `--repeat-line-min-length` | 整数 | 20 | 最小片段长度（避免因短语而产生的误报） |
-| `--repeat-line-delimiters` | 字符串 | `"\n.!?:"` | 结束一个片段的字符 |
+| `--repeat-line-delimiters` | 字符串 | `"\n.!?:。！？："` | 结束一个片段的字符 |
 | `--repeat-line-temp-boost` | 浮点数 | 0.5 | 检测到回路时温度升高 |
 
 
