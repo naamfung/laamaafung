@@ -955,13 +955,15 @@ void quantize_q8_0(const float * x,
                 const float v = x[i * qk + j];
                 amax = std::max(amax, fabsf(v));
             }
-            const float d = amax / 127.0f;
+            const float d = amax / 128.0f;
             const float id = d ? 1.0f / d : 0.0f;
             scales[i] = ov::float16(d);
             zp[i] = 128;
             for (int j = 0; j < qk; ++j) {
                 const float x0 = x[i * qk + j] * id;
-                const int8_t xi0 = roundf(x0);
+                int32_t xi0 = roundf(x0);
+                if (xi0 > 127) xi0 = 127;
+                if (xi0 < -128) xi0 = -128;
                 weights[i * qk + j] = (uint8_t) (xi0 + 128);
             }
         }
@@ -974,12 +976,15 @@ void quantize_q8_0(const float * x,
                 const float v = x[i * qk + j];
                 amax = std::max(amax, fabsf(v));
             }
-            const float d = amax / 127.0f;
+            const float d = amax / 128.0f;
             const float id = d ? 1.0f / d : 0.0f;
             scales[i] = ov::float16(d);
             for (int j = 0; j < qk; ++j) {
                 const float x0 = x[i * qk + j] * id;
-                signed_weights[i * qk + j] = (int8_t) roundf(x0);
+                int32_t xi0 = roundf(x0);
+                if (xi0 > 127) xi0 = 127;
+                if (xi0 < -128) xi0 = -128;
+                signed_weights[i * qk + j] = (int8_t) xi0;
             }
         }
     }
