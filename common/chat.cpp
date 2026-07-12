@@ -2515,7 +2515,7 @@ static void func_args_not_string(json & messages) {
                         try {
                             args = json::parse(args.get<std::string>());
                         } catch (const std::exception & e) {
-                            throw std::runtime_error("Failed to parse tool call arguments as JSON: " + std::string(e.what()));
+                            throw std::invalid_argument("Failed to parse tool call arguments as JSON: " + std::string(e.what()));
                         }
                     }
                 }
@@ -2856,6 +2856,10 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         workaround::map_developer_role_to_system(params.messages);
     }
 
+    if (tmpl.original_caps().supports_object_arguments) {
+        workaround::func_args_not_string(params.messages);
+    }
+
     if (!tmpl.original_caps().supports_system_role) {
         workaround::system_message_not_supported(params.messages);
     }
@@ -2865,10 +2869,6 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         // to still be non-null, this puts an empty string everywhere where the
         // content field is null
         workaround::requires_non_null_content(params.messages);
-    }
-
-    if (tmpl.original_caps().supports_object_arguments) {
-        workaround::func_args_not_string(params.messages);
     }
 
     params.extra_context = common_chat_extra_context();
