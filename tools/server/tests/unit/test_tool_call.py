@@ -643,3 +643,34 @@ def do_test_hello_world(server: ServerProcess, **kwargs):
     code = actual_arguments["code"]
     assert isinstance(code, str), f"Expected code to be a string, got {type(code)}: {json.dumps(code)}"
     assert re.match(r'''print\(("[Hh]ello,? [Ww]orld!?"|'[Hh]ello,? [Ww]orld!?')\)''', re.sub(r'#.*\n?', '', code)), f'Expected hello world, got {code}'
+
+
+def test_tool_call_malformed_arguments():
+    global server
+    server.start()
+    # Send a malformed tool call arguments (incomplete JSON like '{"')
+    response = server.make_request("POST", "/v1/chat/completions", data={
+        "max_tokens": 128,
+        "messages": [
+            {"role": "system", "content": "You are a coding assistant."},
+            {"role": "user", "content": "Write an example"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "test",
+                            "arguments": "{"
+                        }
+                    }
+                ]
+            }
+        ],
+        "tools": [TEST_TOOL],
+        "parallel_tool_calls": False,
+    })
+    assert response.status_code == 400, f"Expected status code 400, got {response.status_code}"
+    assert response.body.get("error", {}).get("type") == "invalid_request_error", f"Expected invalid_request_error, got {response.body}"
