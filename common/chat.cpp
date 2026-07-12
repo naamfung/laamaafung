@@ -1206,18 +1206,17 @@ static common_chat_params common_chat_params_init_tagged_thinking_tools(const co
             p.reasoning(p.until_one_of({"</think>", "\n</think>", "\n<tool_call>"})) +
             p.optional(p.literal("\n"));
 
+        // No peek: reasoning_before_boundary parses first, producing AST nodes
+        // even during NEED_MORE_INPUT (streaming). The optional newlines above
+        // consume separator newlines, so the delimiter after them is a simple
+        // literal match. Final correctness is via strict_eof_on_complete.
         auto reasoning_until_tool =
-            p.peek(p.until_one_of({"</think>", "\n</think>", "\n<tool_call>"}) + p.literal("\n<tool_call>")) +
             reasoning_before_boundary +
             tool_suffix;
 
         auto reasoning_until_close =
-            p.peek(p.until_one_of({"</think>", "\n</think>", "\n<tool_call>"}) + p.choice({
-                p.literal("</think>"),
-                p.literal("\n</think>"),
-            })) +
             reasoning_before_boundary +
-            p.literal("</think>") + p.space() + outside;
+            p.literal("") + p.space() + outside;
 
         auto reasoning_then_boundary = p.choice({
             tool_suffix,
