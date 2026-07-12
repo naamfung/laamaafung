@@ -142,14 +142,18 @@ static __device__ void quantize_f32_q8_0_block(const float * __restrict__ x, blo
         amax = fmaxf(amax, fabsf(v));
     }
 
-    const float d = amax / ((1 << 7) - 1);
+    const float d = amax / 128.0f;
     const float id = d ? 1.0f/d : 0.0f;
 
     y->d = d;
 
     for (int j = 0; j < QK8_0; ++j) {
         const float x0 = x[j]*id;
-        y->qs[j] = roundf(x0);
+
+        int q = (int)roundf(x0);
+        if (q > 127) q = 127;
+        if (q < -128) q = -128;
+        y->qs[j] = (int8_t)q;
     }
 }
 
