@@ -3334,6 +3334,9 @@ private:
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
 
+                            // pos_next can be reduced below by a checkpoint restore - remember the divergence point for the checkpoint invalidation
+                            const llama_pos pos_next_lcp = pos_next;
+
                             if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                 if (pos_min == -1) {
@@ -3387,8 +3390,6 @@ private:
                                 if (pos_min >= pos_min_thold) {
                                     // search for a context checkpoint
                                     const bool is_recurrent_or_hybrid = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
-                                    // pos_next can be reduced below by a checkpoint restore - remember the divergence point for the checkpoint invalidation
-                                    const llama_pos pos_next_lcp = pos_next;
                                     const auto prefix_end = slot.prompt.tokens.pos_next(slot.task->n_tokens());
                                     const auto it = std::find_if(
                                         slot.prompt.checkpoints.rbegin(),
