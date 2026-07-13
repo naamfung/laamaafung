@@ -203,8 +203,9 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                 } else {
                     json chatcmpl_outputs = item.at("output");
                     for (json & chatcmpl_output : chatcmpl_outputs) {
-                        if (!chatcmpl_output.contains("type") || chatcmpl_output.at("type") != "input_text") {
-                            throw std::invalid_argument("Output of tool call should be 'Input text'");
+                        auto type = chatcmpl_output.value("type", "");
+                        if (type != "input_text" && type != "output_text" && type != "text") {
+                            throw std::invalid_argument("Output of tool call should be text");
                         }
                         chatcmpl_output["type"] = "text";
                     }
