@@ -814,7 +814,7 @@ void mtmd_free(mtmd_context * ctx) {
 struct mtmd_tokenizer {
     mtmd_context * ctx;
 
-    std::string input_text;
+    std::string input_text; // note: can contain null bytes; do not use c_str()
     bool add_special;
     bool parse_special;
     const llama_vocab * vocab;
@@ -844,7 +844,7 @@ struct mtmd_tokenizer {
             size_t n_bitmaps) : ctx(ctx) {
         add_special   = text->add_special;
         parse_special = text->parse_special;
-        input_text    = text->text;
+        input_text.assign(text->text, text->text_len);
         vocab         = ctx->vocab;
 
         std::vector<const mtmd_bitmap *> bitmaps(bmps, bmps + n_bitmaps);
