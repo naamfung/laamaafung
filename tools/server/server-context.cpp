@@ -21,6 +21,8 @@
 #include <cstddef>
 #include <cinttypes>
 #include <exception>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <filesystem>
 #include <utility>
@@ -3385,6 +3387,8 @@ private:
                                 if (pos_min >= pos_min_thold) {
                                     // search for a context checkpoint
                                     const bool is_recurrent_or_hybrid = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+                                    // pos_next can be reduced below by a checkpoint restore - remember the divergence point for the checkpoint invalidation
+                                    const llama_pos pos_next_lcp = pos_next;
                                     const auto prefix_end = slot.prompt.tokens.pos_next(slot.task->n_tokens());
                                     const auto it = std::find_if(
                                         slot.prompt.checkpoints.rbegin(),
@@ -3398,6 +3402,12 @@ private:
                                             }
                                             // workaround for [TAG_CHECKPOINTS_FIX_POS_MIN]
                                             if (is_recurrent_or_hybrid) {
+                                                const bool ckpt_exact = cur.pos_min == cur.pos_max;
+                                                if (ckpt_exact) {
+                                                    // usable only if the tokens up to and including its position are
+                                                    // a prefix of the new prompt
+                                                    return cur.pos_max < pos_min_thold;
+                                                }
                                                 return cur.pos_max < pos_next || cur.pos_min == 0;
                                             }
                                             if (cur.pos_max > pos_next) {
@@ -3434,10 +3444,11 @@ private:
 
                             {
                                 // erase any checkpoints with pos_max > prompt_end
+                                const llama_pos pos_stale = std::min(pos_next_lcp, (llama_pos) slot.task->n_tokens());
                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
                                     const auto & cur = *it;
-                                    if (cur.pos_max > (int)slot.task->n_tokens()) {
-                                        SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
+                                    if (cur.pos_max > pos_next || cur.pos_max >= pos_stale) {
+                                        SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, pos_stale = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (int)pos_stale, (float) cur.size() / 1024 / 1024);
                                         it = slot.prompt.checkpoints.erase(it);
                                     } else {
                                         ++it;
