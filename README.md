@@ -4,6 +4,29 @@
 
 致力於從推理引擎側修復影響模型無法驅動智能代理勝任長程任務的所有問題：模型遞歸生成式的死循環及各種因選項組合未被邏輯正確處理導致的無故停止工作。
 
+### 克隆指南
+
+推薦優先克隆穩定分支，当前为`v1`，此分支係遠端默認分支，適合穩定使用。
+
+如须測試最新功能，可以克隆開發分支`master`。
+
+- **克隆穩定分支（推薦）**：
+  ```sh
+  git clone https://github.com/naamfung/laamaafung.git
+  ```
+
+  或
+
+  ```sh
+  git clone -b v1 https://github.com/naamfung/laamaafung.git
+  ```
+
+- **克隆開發分支**：
+  ```sh
+  git clone -b master https://github.com/naamfung/laamaafung.git
+  ```
+
+---
 
 啟動示例：
 
