@@ -50,6 +50,7 @@
 | --- | --- | --- |
 | `--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64` | 啟用提示緩存（KV 緩存重用）機制。當多個請求有相同或相似的 prompt 前綴時，系統會重用之前計算的 KV 狀態，避免重複計算。`--cache-ram 8192` 設定緩存大小為 8GB，`--checkpoint-min-step 512` 設定創建 checkpoint 的最小步長，`--ctx-checkpoints 64` 設定保留的 checkpoint 數量。 | 適合有大量重複前綴請求、長對話歷史或需要加速響應的場景。 |
 | `--context-shift` | 啟用上下文遷移功能。當請求的 tokens 超過 `--ctx-size` 限制時，系統會自動截斷 prompt 的中間部分並保留前 `n_keep` 個 token，或進行上下文遷移，確保任務繼續執行而不會返回 HTTP 400 錯誤。 | 適合處理超長上下文、對話歷史較長或容易觸發上下文上限的長程代理任務。 |
+|| `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閱導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
 
 #### 啟用上下文遷移的啟動示例
 
