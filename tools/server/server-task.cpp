@@ -1690,7 +1690,7 @@ server_prompt * server_prompt_cache::alloc(const server_prompt & prompt, size_t 
             /*.main =*/ std::move(state_data_tgt),
             /*.drft =*/ std::move(state_data_dft),
         },
-        /*.checkpoints =*/ prompt.checkpoints,
+        /*.checkpoints =*/ {},
         /*.score       =*/ prompt.score,
     });
 
