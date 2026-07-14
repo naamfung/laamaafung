@@ -243,6 +243,9 @@ struct common_params_sampling {
     int32_t repeat_line_min_length = 20;           // ignore segments shorter than this (avoids false positives)
     std::string repeat_line_delimiters = "\n.!?:"; // characters that end a segment
     float   repeat_line_temp_boost = 0.50f;        // temperature boost when loop detected
+    int32_t runaway_threshold      = 8;             // consecutive identical tokens to trigger temp boost (0 = disabled)
+    float   runaway_boost          = 2.0f;          // mild temp boost at threshold
+    float   runaway_boost_strong   = 3.0f;          // strong temp boost at 2x threshold
     float   adaptive_target    = -1.0f;  // select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
     float   adaptive_decay     = 0.90f;  // EMA decay for adaptation; history ≈ 1/(1-decay) tokens (0.0 - 0.99)
     int32_t mirostat           = 0;      // 0 = disabled, 1 = mirostat, 2 = mirostat 2.0

@@ -40,12 +40,12 @@
 
 | 參數組 | 說明 | 適用場景 |
 | --- | --- | --- |
-| `--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64` | 啟用提示緩存（KV 緩存重用）機制。當多個請求有相同或相似嘅 prompt 前綴時，系統會重用之前計算嘅 KV 狀態，避免重複計算。`--cache-ram 8192` 設定緩存大小為 8GB，`--checkpoint-min-step 512` 設定創建 checkpoint 嘅最小步長，`--ctx-checkpoints 64` 設定保留嘅 checkpoint 數量。 | 適合有大量重複前綴請求、長對話歷史或需要加速響應嘅場景。 |
-| `--context-shift` | 啟用上下文遷移功能。當請求嘅 tokens 超過 `--ctx-size` 限制時，系統會自動截斷 prompt 嘅中間部分並保留前 `n_keep` 個 token，或進行上下文遷移，確保任務繼續執行而唔會返回 HTTP 400 錯誤。 | 適合處理超長上下文、對話歷史較長或容易觸發上下文上限嘅長程代理任務。 |
+| `--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64` | 啟用提示緩存（KV 緩存重用）機制。當多個請求有相同或相似的 prompt 前綴時，系統會重用之前計算的 KV 狀態，避免重複計算。`--cache-ram 8192` 設定緩存大小為 8GB，`--checkpoint-min-step 512` 設定創建 checkpoint 的最小步長，`--ctx-checkpoints 64` 設定保留的 checkpoint 數量。 | 適合有大量重複前綴請求、長對話歷史或需要加速響應的場景。 |
+| `--context-shift` | 啟用上下文遷移功能。當請求的 tokens 超過 `--ctx-size` 限制時，系統會自動截斷 prompt 的中間部分並保留前 `n_keep` 個 token，或進行上下文遷移，確保任務繼續執行而唔會返回 HTTP 400 錯誤。 | 適合處理超長上下文、對話歷史較長或容易觸發上下文上限的長程代理任務。 |
 
-#### 啟用上下文遷移嘅啟動示例
+#### 啟用上下文遷移的啟動示例
 
-如果須要處理可能超過上下文限制嘅請求，可以加入 `--context-shift` 參數：
+如果須要處理可能超過上下文限制的請求，可以加入 `--context-shift` 參數：
 
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "...enough. Need to give the final output now!" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --no-mmap --mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --context-shift --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --verbosity 5 --chat-template-file /path/to/iStartModel/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
@@ -66,6 +66,22 @@
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --repeat-line-window 10 --repeat-line-min-length 20 --repeat-line-delimiters "\n.!?:。！？：" --repeat-line-temp-boost 0.5
 ```
+
+#### 連續 Token 重複失控檢測（內建，無須配置）
+
+當模型陷入同一 token 反覆生成的死循環（例如 `</</</...`），系統會自動偵測並以分級升溫打破循環，無需手動啟用任何參數。此機制與段級重複檢測（`--repeat-line-*`）互補：前者針對行/段級語義重複，本機制針對 token 級的硬性失控。
+
+| 連續次數 | 動作 | 效果（以 base temp = 0.6 為例） |
+| --- | --- | --- |
+| 8 次 | `temp_boost = 2.0`，即 logit 乘以 1/(1+2) | 等效 temp = 1.8，溫和升溫，嘗試打破循環 |
+| 16 次 | `temp_boost = 3.0`，即 logit 乘以 1/(1+3) | 等效 temp = 2.4，強力升溫 |
+| 64 次 | `STOP_TYPE_LIMIT` | 升溫無效，強制停止作為最終安全網 |
+
+升溫原理與 `--repeat-line-temp-boost` 相同：對所有候選 token 的 logit 乘以 `1/(1+boost)`，等效於臨時提高採樣溫度。一旦生成的 token 不再重複，boost 立即歸零，恢復正常採樣。
+
+#### 上下文遷移的標籤邊界保護
+
+啟用 `--context-shift` 時，截斷操作會檢查截斷邊界是否切斷了多 token 組成的特殊標籤（如 `</function>`、`<function=...>`），並自動調整邊界避免割裂標籤，防止模型因看到殘缺標籤而產生異常輸出。
 
 #### DRY 采样防重复参数说明
 
