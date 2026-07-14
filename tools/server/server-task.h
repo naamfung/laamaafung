@@ -594,17 +594,23 @@ struct server_prompt_data {
 struct server_prompt {
     server_tokens tokens;
 
-    server_prompt_data data;
-
     std::list<common_prompt_checkpoint> checkpoints;
 
     // second-chance score for cache eviction, 1 = fresh/decayed, higher = more retained
     uint8_t score = 1;
 
+    void clear() {
+        tokens.clear();
+        checkpoints.clear();
+        score = 1;
+    }
+
+    int n_tokens() const {
+        return tokens.size();
+    }
+
     size_t size() const {
         size_t res = 0;
-
-        res += data.size();
 
         for (const auto & ckpt : checkpoints) {
             res += ckpt.size();
@@ -613,16 +619,22 @@ struct server_prompt {
         return res;
     }
 
-    int n_tokens() const {
-        return tokens.size();
-    }
-
     server_prompt clone() const {
         return server_prompt {
             tokens.clone(),
-            data,
             checkpoints,
+            score,
         };
+    }
+};
+
+// KV cache state data paired with its logical prompt
+struct server_prompt_cache_state {
+    server_prompt prompt;
+    server_prompt_data data;
+
+    size_t size() const {
+        return data.size() + prompt.size();
     }
 };
 
@@ -632,7 +644,7 @@ struct server_prompt_cache {
         this->limit_tokens = limit_tokens;
     }
 
-    std::list<server_prompt> states;
+    std::list<server_prompt_cache_state> states;
 
     // in bytes, 0 = no limit
     size_t limit_size = 0;
@@ -644,7 +656,7 @@ struct server_prompt_cache {
 
     size_t n_tokens() const;
 
-    server_prompt * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
+    server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
 
     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_main, llama_context * ctx_drft, int32_t id_slot);
 

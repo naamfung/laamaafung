@@ -6,7 +6,7 @@
 
 ### 克隆指南
 
-推薦優先克隆穩定分支，当前为`v1`，此分支係遠端默認分支，適合穩定使用。
+推薦優先克隆穩定分支，当前为`v2`，此分支係遠端默認分支，適合穩定使用。
 
 如须測試最新功能，可以克隆開發分支`master`。
 
@@ -17,6 +17,12 @@
 
   或
 
+  ```sh
+  git clone -b v2 https://github.com/naamfung/laamaafung.git
+  ```
+
+- **回退版本（v1）**：
+  如需使用舊版穩定分支 `v1`，可執行：
   ```sh
   git clone -b v1 https://github.com/naamfung/laamaafung.git
   ```
