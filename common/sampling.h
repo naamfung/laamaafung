@@ -52,6 +52,8 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
 // get the underlying llama_sampler_chain
 struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
 
+void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost);
+
 // extended sampling implementation:
 //
 // - set logits

@@ -198,6 +198,10 @@ struct server_slot {
     int32_t n_remaining = -1;
     int32_t i_batch     = -1;
 
+    llama_token last_repeated_tok    = LLAMA_TOKEN_NULL;
+    int32_t     n_consecutive_repeat = 0;
+    float       sampling_temp_boost  = 0.0f;
+
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_processed = 0;
     int32_t n_prompt_tokens_prefix    = -1;
@@ -318,6 +322,10 @@ struct server_slot {
         stop           = STOP_TYPE_NONE;
         stopping_word  = "";
         n_sent_text    = 0;
+
+        last_repeated_tok    = LLAMA_TOKEN_NULL;
+        n_consecutive_repeat = 0;
+        sampling_temp_boost  = 0.0f;
 
         if (can_speculate()) {
             spec_draft.clear();
@@ -1768,6 +1776,61 @@ private:
         return output;
     }
 
+// Given a token sequence and a junction position, check if the junction
+// splits a multi-token tag sequence. Returns the number of tokens to shift
+// the junction: positive = move right, negative = move left, 0 = no change.
+static int check_tag_boundary(
+        const llama_context * ctx,
+        const llama_tokens & tokens,
+        int junction) {
+    const int radius = 12;
+
+    if (junction <= 0 || junction >= (int)tokens.size()) {
+        return 0;
+    }
+
+    int left_start = std::max(0, junction - radius);
+
+    llama_tokens left_tok(tokens.begin() + left_start, tokens.begin() + junction);
+    if (left_tok.empty()) {
+        return 0;
+    }
+
+    std::string left_text = common_detokenize(ctx, left_tok, true);
+
+    auto last_lt = left_text.rfind('<');
+    if (last_lt == std::string::npos) {
+        return 0;
+    }
+
+    if (left_text.find('>', last_lt) != std::string::npos) {
+        return 0;
+    }
+
+    // Unclosed '<' found. Try to include the full tag by moving junction right.
+    int right_end = std::min((int)tokens.size(), junction + radius);
+    for (int shift = 1; shift <= radius && junction + shift <= right_end; shift++) {
+        llama_tokens probe(tokens.begin() + left_start, tokens.begin() + junction + shift);
+        std::string probe_text = common_detokenize(ctx, probe, true);
+        auto lt = probe_text.rfind('<');
+        if (lt != std::string::npos && probe_text.find('>', lt) != std::string::npos) {
+            return shift;
+        }
+    }
+
+    // Could not find closing '>'. Remove the broken fragment by moving junction left.
+    for (int shift = 1; shift <= radius && junction - shift > left_start; shift++) {
+        llama_tokens probe(tokens.begin() + left_start, tokens.begin() + junction - shift);
+        std::string probe_text = common_detokenize(ctx, probe, true);
+        auto lt = probe_text.rfind('<');
+        if (lt == std::string::npos || probe_text.find('>', lt) != std::string::npos) {
+            return -shift;
+        }
+    }
+
+    return 0;
+}
+
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
@@ -1798,8 +1861,15 @@ private:
 
             const llama_tokens & curr_tokens = task.tokens.get_text_tokens();
 
+            int junction = n_keep + erased_blocks * n_block_size;
+            int shift = check_tag_boundary(ctx_tgt, curr_tokens, junction);
+            if (shift != 0) {
+                SLT_WRN(slot, "adjusted truncation boundary by %d tokens to avoid splitting a tag\n", shift);
+                junction += shift;
+            }
+
             llama_tokens new_tokens(curr_tokens.begin(), curr_tokens.begin() + n_keep);
-            new_tokens.insert(new_tokens.end(), curr_tokens.begin() + n_keep + erased_blocks * n_block_size, curr_tokens.end());
+            new_tokens.insert(new_tokens.end(), curr_tokens.begin() + junction, curr_tokens.end());
 
             task.tokens.clear();
             task.tokens.insert(new_tokens);
@@ -1920,6 +1990,31 @@ private:
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
 
+        if (result.tok == slot.last_repeated_tok) {
+            slot.n_consecutive_repeat++;
+        } else {
+            if (slot.sampling_temp_boost > 0.0f) {
+                slot.sampling_temp_boost = 0.0f;
+                common_sampler_set_temp_boost(slot.smpl.get(), 0.0f);
+            }
+            slot.last_repeated_tok    = result.tok;
+            slot.n_consecutive_repeat = 1;
+        }
+
+        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold && slot.sampling_temp_boost < params_base.sampling.runaway_boost) {
+            slot.sampling_temp_boost = params_base.sampling.runaway_boost;
+            common_sampler_set_temp_boost(slot.smpl.get(), params_base.sampling.runaway_boost);
+            SLT_WRN(slot, "runaway repetition detected, token %d repeated %d times, mild temp boost %.2f\n",
+                    slot.last_repeated_tok, slot.n_consecutive_repeat, params_base.sampling.runaway_boost);
+        }
+
+        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold * 2 && slot.sampling_temp_boost < params_base.sampling.runaway_boost_strong) {
+            slot.sampling_temp_boost = params_base.sampling.runaway_boost_strong;
+            common_sampler_set_temp_boost(slot.smpl.get(), params_base.sampling.runaway_boost_strong);
+            SLT_WRN(slot, "runaway repetition persists, token %d repeated %d times, strong temp boost %.2f\n",
+                    slot.last_repeated_tok, slot.n_consecutive_repeat, params_base.sampling.runaway_boost_strong);
+        }
+
         slot.generated_text += token_str;
         if (slot.task->params.return_tokens) {
             slot.generated_tokens.push_back(result.tok);
@@ -2039,6 +2134,14 @@ private:
             slot.has_next_token = false;
 
             SLT_DBG(slot, "%s", "stopped by EOS\n");
+        }
+
+        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold * 8) {
+            slot.stop           = STOP_TYPE_LIMIT;
+            slot.has_next_token = false;
+
+            SLT_WRN(slot, "stopped due to runaway repetition despite temp boost, token %d repeated %d times\n",
+                    slot.last_repeated_tok, slot.n_consecutive_repeat);
         }
 
         SLT_DBG(slot, "n_decoded = %d, n_remaining = %d, next token: %5d '%s'\n", slot.n_decoded, slot.n_remaining, result.tok, token_str.c_str());
@@ -2998,6 +3101,17 @@ private:
 
                 // ref: https://github.com/ggml-org/llama.cpp/pull/24786
                 n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
+
+                {
+                    const auto & prompt_tokens = slot.prompt.tokens.get_tokens();
+                    int junction = n_keep + n_discard;
+                    int shift = check_tag_boundary(ctx_tgt, prompt_tokens, junction);
+                    if (shift != 0) {
+                        SLT_WRN(slot, "adjusted context shift boundary by %d tokens to avoid splitting a tag\n", shift);
+                        n_discard += shift;
+                        n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
+                    }
+                }
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 

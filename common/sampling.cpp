@@ -121,10 +121,14 @@ struct common_sampler {
 
     llama_token_data_array cur_p;
 
+    float temp_boost = 0.0f;
+
     void reset() {
         prev.clear();
 
         llama_sampler_reset(chain);
+
+        temp_boost = 0.0f;
     }
 
     void set_logits(struct llama_context * ctx, int idx) {
@@ -175,11 +179,13 @@ std::string common_params_sampling::print() const {
             "\trepeat_last_n = %d, repeat_penalty = %.3f, frequency_penalty = %.3f, presence_penalty = %.3f\n"
             "\tdry_multiplier = %.3f, dry_base = %.3f, dry_allowed_length = %d, dry_penalty_last_n = %d\n"
             "\ttop_k = %d, top_p = %.3f, min_p = %.3f, xtc_probability = %.3f, xtc_threshold = %.3f, typical_p = %.3f, top_n_sigma = %.3f, temp = %.3f\n"
-            "\tmirostat = %d, mirostat_lr = %.3f, mirostat_ent = %.3f, adaptive_target = %.3f, adaptive_decay = %.3f",
+            "\tmirostat = %d, mirostat_lr = %.3f, mirostat_ent = %.3f, adaptive_target = %.3f, adaptive_decay = %.3f\n"
+            "\trunaway_threshold = %d, runaway_boost = %.3f, runaway_boost_strong = %.3f",
             penalty_last_n, penalty_repeat, penalty_freq, penalty_present,
             dry_multiplier, dry_base, dry_allowed_length, dry_penalty_last_n,
             top_k, top_p, min_p, xtc_probability, xtc_threshold, typ_p, top_n_sigma, temp,
-            mirostat, mirostat_eta, mirostat_tau, adaptive_target, adaptive_decay);
+            mirostat, mirostat_eta, mirostat_tau, adaptive_target, adaptive_decay,
+            runaway_threshold, runaway_boost, runaway_boost_strong);
 
     return std::string(result);
 }
@@ -553,6 +559,12 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
     return gsmpl->chain;
 }
 
+void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost) {
+    if (gsmpl) {
+        gsmpl->temp_boost = boost;
+    }
+}
+
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
     llama_synchronize(ctx);
 
@@ -567,6 +579,13 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
     gsmpl->set_logits(ctx, idx);
+
+    if (gsmpl->temp_boost > 0.0f) {
+        const float inv_temp = 1.0f / (1.0f + gsmpl->temp_boost);
+        for (size_t i = 0; i < cur_p.size; i++) {
+            cur_p.data[i].logit *= inv_temp;
+        }
+    }
 
     // Check if a backend sampler has already sampled a token in which case we
     // return that token id directly.
