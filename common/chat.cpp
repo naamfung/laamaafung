@@ -1214,9 +1214,15 @@ static common_chat_params common_chat_params_init_tagged_thinking_tools(const co
             reasoning_before_boundary +
             tool_suffix;
 
+        // Consume the </think> close tag if present. until_one_of stops before
+        // it, so we must explicitly match it here to prevent it from leaking
+        // into content via outside. Optional handles the case where the model
+        // omits the close tag (reasoning until EOF). During streaming, a partial
+        // </think> prefix at end of input yields NEED_MORE_INPUT, preventing
+        // stray </ fragments from being emitted as content.
         auto reasoning_until_close =
             reasoning_before_boundary +
-            p.literal("") + p.space() + outside;
+            p.optional(p.literal("</think>")) + p.space() + outside;
 
         auto reasoning_then_boundary = p.choice({
             tool_suffix,
