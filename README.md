@@ -132,6 +132,11 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="Agentic-Turbo-Coder"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="Agentic-Turbo-Coder"
 ```
 
+### Glash
+
+Glash 是另外一個选择，提供终端環境下的编程代理能力：https://github.com/naamfung/glash
+
+
 ## llama.cpp
 
 `llama.cpp` is a C/C++ library for LLM inference, designed to enable efficient model inference with minimal setup on a wide range of hardware (Apple Silicon, x86/ARM CPUs, NVIDIA/AMD GPUs, Vulkan, WebGPU, etc.). 
