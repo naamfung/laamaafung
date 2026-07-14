@@ -1,4 +1,4 @@
-{%- set template_version = "Qwen-Agentic-HONT-v2" %}
+{%- set template_version = "Qwen-Agentic-HONT-v2.1" %}
 {%- set _tool_format = tool_call_format if tool_call_format is defined else 'xml' %}
 {%- set image_count = namespace(value=0) %}
 {%- set video_count = namespace(value=0) %}
@@ -332,8 +332,6 @@ Reminder:
     {%- if add_generation_prompt %}
         {{- '<|im_start|>assistant\n' }}
         {%- if not ns_state.thinking %}
-            {{- '<think>\n\n</think>\n\n' }}
-        {%- elif ns2.consecutive_failures >= 2 %}
             {{- '<think>\n\n</think>\n\n' }}
         {%- else %}
             {{- '<think>\n思考過程：\n' }}
