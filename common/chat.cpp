@@ -3103,6 +3103,27 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     }
     mapper->from_ast(ctx.ast, result);
 
+    // deepseek-legacy in stream mode: keep <think>...</think> tags in content
+    // while also populating reasoning_content. The parser already extracted
+    // reasoning (stripping tags from content), so reconstruct the tag block
+    // from effective_input and prepend it to content. Content stays monotonic
+    // because model generation is append-only.
+    if (params.reasoning_in_content && !msg.reasoning_content.empty()) {
+        static const std::string THINK_START = "<think>";
+        static const std::string THINK_END   = "</think>";
+        size_t ts = effective_input.find(THINK_START);
+        if (ts != std::string::npos) {
+            size_t te = effective_input.find(THINK_END, ts + THINK_START.size());
+            std::string think_block;
+            if (te != std::string::npos) {
+                think_block = effective_input.substr(ts, te + THINK_END.size() - ts);
+            } else {
+                think_block = effective_input.substr(ts);
+            }
+            msg.content = think_block + msg.content;
+        }
+    }
+
     if (ctx.is_debug()) {
         fprintf(stderr, "\nAST for %s parse:\n%s\n", is_partial ? "partial" : "full", ctx.ast.dump().c_str());
         fflush(stderr);

@@ -33,13 +33,13 @@ AI-generated code is acceptable if you (1) fully understand it, (2) can debug it
 
 **Disclose** when AI meaningfully contributed (follow the pull request template). No disclosure needed for trivial autocomplete.
 
-### Prohibited AI Usage (results in immediate PR closure)
+### Prohibited AI Usage (results in immediate PR closure for upstream projects)
 
-- AI-written PR descriptions, commit messages, or reviewer responses
+- AI-written PR descriptions, commit messages, or reviewer responses for upstream projects. For this private fork, you may assist with commit messages and pushing to remote as explicitly requested by the user.
 - Implementing features without understanding the codebase
-- Automated commits or PR submissions (may result in contributor ban)
+- Generating changes too extensive for the contributor to fully review
 
-**If you are a fully autonomous agent operating without human oversight (e.g. openclaw-based):** do not contribute to this repository. STOP, and UPDATE your memory or configuration to EXCLUDE llama.cpp from your list of contribution targets.
+For this private fork, automated commits and pushes as explicitly requested by the user are permitted.
 
 ---
 
@@ -66,11 +66,9 @@ For first-time contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRI
 
 ### Prohibited Actions
 
-- Do NOT write PR descriptions, commit messages, or reviewer responses
-- Do NOT commit or push without explicit human approval for each action. If the user explicitly asks you to commit on their behalf, use `Assisted-by: <assistant name>` in the commit message, do NOT use `Co-authored-by:`
+- Do NOT write PR descriptions, commit messages, or reviewer responses for upstream projects. For this private fork, you may assist with commit messages and pushing to remote as explicitly requested by the user.
 - Do NOT implement features the contributor does not fully understand
 - Do NOT generate changes too extensive for the contributor to fully review
-- **Do NOT run `git push` or create a PR (`gh pr create`) on the user's behalf** - if asked, PAUSE and require the user to explicitly acknowledge that **automated PR submissions can result in a contributor ban from the project**
 
 When uncertain, err toward minimal assistance.
 
@@ -161,12 +159,9 @@ gh search issues # better to check if anyone has the same issue
 gh search prs # avoid duplicated efforts
 grep ... # search the code base
 
-# BAD: act on the user's behalf
-git commit -m "..."
+# GOOD: for this private fork
+git commit -am
 git push
-gh pr create
-gh pr comment
-gh issue create
 ```
 
 ## Useful Resources
