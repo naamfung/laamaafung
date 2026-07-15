@@ -8,25 +8,25 @@
 
 ### 克隆指南
 
-推薦優先克隆穩定分支，当前为`v2`，此分支係遠端默認分支，適合穩定使用。
+推薦優先克隆穩定分支 `v3`，適合穩定使用。
 
-如须測試最新功能，可以克隆開發分支`master`。
+如須測試最新功能，可以克隆開發分支 `master`。
 
 - **克隆穩定分支（推薦）**：
   ```sh
-  git clone https://github.com/naamfung/laamaafung.git
+  git clone -b v3 https://github.com/naamfung/laamaafung.git
   ```
 
-  或
-
+- **回退版本（v2）**：
+  如須使用舊版穩定分支 `v2`，可執行：
   ```sh
   git clone -b v2 https://github.com/naamfung/laamaafung.git
   ```
 
-- **回退版本（v1）**：
-  如需使用舊版穩定分支 `v1`，可執行：
+- **試驗分支（chainthink）**：
+  測試 PR #25709（reasoning 塊採樣參數覆蓋）的試驗分支，可能不穩定：
   ```sh
-  git clone -b v1 https://github.com/naamfung/laamaafung.git
+  git clone -b chainthink https://github.com/naamfung/laamaafung.git
   ```
 
 - **克隆開發分支**：
