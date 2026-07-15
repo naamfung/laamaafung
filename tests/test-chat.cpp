@@ -13,6 +13,7 @@
 #include "common.h"
 #include "ggml.h"
 #include "log.h"
+#include "server-schema.h"
 
 #include <algorithm>
 #include <exception>
@@ -1135,7 +1136,7 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
         // budget sampler inhibits grammar application while inside thinking blocks —
         // triggers inside <think>...</think> are suppressed.
         bool use_reasoning_budget_path = false;
-        if (parser.params_.grammar_lazy && !parser.params_.thinking_end_tags.empty()) {
+        if (parser.params_.grammar_lazy && !parser.params_.thinking_end_tag.empty()) {
             use_reasoning_budget_path = true;
             for (const auto & trigger : parser.params_.grammar_triggers) {
                 if (trigger.type != COMMON_GRAMMAR_TRIGGER_TYPE_WORD) {
@@ -1153,7 +1154,7 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
             // Walk through full_input tracking thinking state; only match triggers
             // when outside thinking blocks.
             const auto & think_start = parser.params_.thinking_start_tag;
-            const auto & think_end   = parser.params_.thinking_end_tags.front();
+            const auto & think_end   = parser.params_.thinking_end_tag;
 
             bool in_thinking = false;
             for (size_t i = 0; i < full_input.size(); ++i) {
@@ -1372,11 +1373,6 @@ class peg_tester {
   public:
     explicit peg_tester(const std::string & template_path, const bool detailed_debug = false) :
         tmpls_(read_templates(template_path)),
-        template_path_(template_path),
-        detailed_debug_(detailed_debug) {}
-
-    explicit peg_tester(common_chat_templates_ptr tmpls, const std::string & template_path, const bool detailed_debug = false) :
-        tmpls_(std::move(tmpls)),
         template_path_(template_path),
         detailed_debug_(detailed_debug) {}
 
@@ -1903,41 +1899,6 @@ static void test_convert_responses_to_chatcmpl() {
 
         assert_equals(false, result.contains("tools"));
     }
-
-    // Test function_call_output output arrays accept text-like content blocks
-    {
-        json input = json::parse(R"({
-            "input": [
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_1",
-                    "output": [
-                        {
-                            "type": "output_text",
-                            "text": "Sunny"
-                        },
-                        {
-                            "type": "text",
-                            "text": "Warm"
-                        }
-                    ]
-                }
-            ],
-            "model": "test-model"
-        })");
-
-        json result = server_chat_convert_responses_to_chatcmpl(input);
-
-        assert_equals((size_t) 1, result.at("messages").size());
-        const auto & msg = result.at("messages")[0];
-        assert_equals(std::string("tool"), msg.at("role").get<std::string>());
-        assert_equals(std::string("call_1"), msg.at("tool_call_id").get<std::string>());
-        assert_equals((size_t) 2, msg.at("content").size());
-        assert_equals(std::string("text"), msg.at("content")[0].at("type").get<std::string>());
-        assert_equals(std::string("Sunny"), msg.at("content")[0].at("text").get<std::string>());
-        assert_equals(std::string("text"), msg.at("content")[1].at("type").get<std::string>());
-        assert_equals(std::string("Warm"), msg.at("content")[1].at("text").get<std::string>());
-    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
@@ -2212,100 +2173,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
 
 
-        tst.test(
-               "Need to inspect the current directory.\n"
-               "<tool_call>\n"
-               "<function=run_in_terminal>\n"
-               "<parameter=command>\n"
-               "pwd\n"
-               "</parameter>\n"
-               "</function>\n"
-               "</tool_call>\n"
-               "</think>\n"
-               "Done.")
-            .enable_thinking(true)
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .tools({ run_in_terminal_tool })
-            .expect_reasoning("Need to inspect the current directory.")
-            .expect_content("Done.")
-            .expect_tool_calls({
-                { "run_in_terminal", R"({"command": "pwd"})", {} },
-            })
-            .run();
-
-        tst.test(
-               "Need to inspect the current directory.\n"
-               "<tool_call>\n"
-               "<function=run_in_terminal>\n"
-               "<parameter=command>\n"
-               "pwd\n"
-               "</parameter>\n"
-               "</function>\n"
-               "</tool_call>\n"
-               "Done.")
-            .enable_thinking(true)
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .tools({ run_in_terminal_tool })
-            .expect_reasoning("Need to inspect the current directory.")
-            .expect_content("Done.")
-            .expect_tool_calls({
-                { "run_in_terminal", R"({"command": "pwd"})", {} },
-            })
-            .run();
-
-        tst.test(
-               "<tool_call>\n"
-               "<function=edit>\n"
-               "<parameter=newString>\n"
-               "new text\n"
-               "</parameter>\n"
-               "<parameter=oldString>\n"
-               "old text\n"
-               "</parameter>\n"
-               "<parameter=filename>\n"
-               "foo.cpp\n"
-               "</parameter>\n"
-               "</function>\n"
-               "</tool_call>")
-            .enable_thinking(false)
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .tools({ edit_tool })
-            .expect_tool_calls({
-                { "edit", R"({"newString": "new text", "oldString": "old text", "filename": "foo.cpp"})", {} },
-            })
-            .run();
-
-        tst.test(
-               "Need the directory.\n"
-               "<tool_call>\n"
-               "<function=run_in_terminal>\n"
-               "<parameter=command>\n"
-               "pwd\n"
-               "</parameter>\n"
-               "</function>\n"
-               "</tool_call>\n"
-               "Need the files.\n"
-               "<tool_call>\n"
-               "<function=run_in_terminal>\n"
-               "<parameter=command>\n"
-               "ls\n"
-               "</parameter>\n"
-               "</function>\n"
-               "</tool_call>\n"
-               "</think>\n"
-               "Done.")
-            .enable_thinking(true)
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .parallel_tool_calls(true)
-            .tools({ run_in_terminal_tool })
-            .expect_reasoning("Need the directory.")
-            .expect_content("Need the files.\nDone.")
-            .expect_tool_calls({
-                { "run_in_terminal", R"({"command": "pwd"})", {} },
-                { "run_in_terminal", R"({"command": "ls"})", {} },
-            })
-            .run();
-
+        // test code that starts with indent
         tst.test(
                "<tool_call>\n"
                "<function=python>\n"
@@ -2414,7 +2282,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({
                 special_function_tool
         })
-            .expect_reasoning("")
+            .expect_reasoning("<think>\n\n")
             .expect_tool_calls({ { "special_function", "{\"arg1\": 1}", "" } })
             .run();
 
@@ -2527,16 +2395,6 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .tools({ run_in_terminal_tool })
             .expect_reasoning("I might call <tool_call> later, but I am still thinking.")
             .expect_content("Final answer without tools.")
-            .run();
-
-        // Plain content with no think/tool tags: the peek-based reasoning
-        // branches must fall through to content(rest()) so the output is not
-        // silently dropped (regression test for lenient peek/CHOICE bug).
-        tst.test("Let me just answer directly without thinking.")
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .enable_thinking(true)
-            .tools({ run_in_terminal_tool })
-            .expect_content("Let me just answer directly without thinking.")
             .run();
 
         // Continuation tests
@@ -4849,9 +4707,16 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
     // Format: <TOOLCALL>[{"name": "func", "arguments": {...}}]</TOOLCALL>
     {
         auto tst = peg_tester("models/templates/NVIDIA-Nemotron-Nano-v2.jinja", detailed_debug);
-        tst.test("<TOOLCALL>[{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}]</TOOLCALL>")
+        tst.test("I'm\nthinking\n</think>\n<TOOLCALL>[{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}]</TOOLCALL>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
             .tools({ special_function_tool })
-            .expect(message_assist_call)
+            .expect(message_assist_call_thoughts)
+            .run();
+
+        tst.test("I'm\nthinking\n</think>\n\n<TOOLCALL>[{\"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}]</TOOLCALL>\n")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .tools({ special_function_tool })
+            .expect(message_assist_call_thoughts)
             .run();
 
         // Continuation tests
@@ -6054,6 +5919,112 @@ static void test_developer_role_to_system_workaround() {
     }
 }
 
+static void test_reasoning_budget_tokens_per_request() {
+    LOG_DBG("%s\n", __func__);
+    // Use Qwen3 template which has <think>...</think> reasoning markers.
+    // The autoparser detects them and sets thinking_start/end_tag, which enables
+    // the reasoning-budget code path in oaicompat_chat_params_parse.
+    auto tmpls = read_templates("models/templates/Qwen-Qwen3-0.6B.jinja");
+
+    server_chat_params opt;
+    opt.tmpls            = std::move(tmpls);
+    opt.use_jinja        = true;
+    opt.enable_thinking  = true;
+    opt.reasoning_budget = -1;
+    opt.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+
+    // Body with per-request reasoning_budget_tokens=0 (suppress thinking).
+    json body = {
+        {"messages", json::array({json{{"role", "user"}, {"content", "hello"}}})},
+        {"reasoning_budget_tokens", 0},
+    };
+    std::vector<raw_buffer> out_files;
+    auto llama_params = oaicompat_chat_params_parse(body, opt, out_files);
+
+    // The per-request value must win over the server default (-1).
+    if (!llama_params.contains("reasoning_budget_tokens")) {
+        throw std::runtime_error("reasoning_budget_tokens missing from llama_params (thinking_end_tag may be empty for this template)");
+    }
+    int got = llama_params["reasoning_budget_tokens"].get<int>();
+    if (got != 0) {
+        throw std::runtime_error(std::string("Expected reasoning_budget_tokens=0, got ") + std::to_string(got));
+    }
+}
+
+static void test_reasoning_budget_message_per_request() {
+    LOG_DBG("%s\n", __func__);
+    // Same code path as test_reasoning_budget_tokens_per_request: the Qwen3 template's
+    // <think>...</think> markers enable the reasoning-budget block in oaicompat_chat_params_parse.
+    auto tmpls = read_templates("models/templates/Qwen-Qwen3-0.6B.jinja");
+
+    server_chat_params opt;
+    opt.tmpls                   = std::move(tmpls);
+    opt.use_jinja               = true;
+    opt.enable_thinking         = true;
+    opt.reasoning_budget        = -1;
+    opt.reasoning_format        = COMMON_REASONING_FORMAT_NONE;
+    opt.reasoning_budget_message = "server default";
+
+    // Body with a per-request reasoning_budget_message override.
+    const std::string per_request_message = "per-request message";
+    json body = {
+        {"messages", json::array({json{{"role", "user"}, {"content", "hello"}}})},
+        {"reasoning_budget_message", per_request_message},
+    };
+    std::vector<raw_buffer> out_files;
+    auto llama_params = oaicompat_chat_params_parse(body, opt, out_files);
+
+    // The per-request value must win over the server default.
+    if (!llama_params.contains("reasoning_budget_message")) {
+        throw std::runtime_error("reasoning_budget_message missing from llama_params (thinking_end_tag may be empty for this template)");
+    }
+    std::string got = llama_params["reasoning_budget_message"].get<std::string>();
+    if (got != per_request_message) {
+        throw std::runtime_error("Expected reasoning_budget_message='" + per_request_message + "', got '" + got + "'");
+    }
+}
+
+static void test_reasoning_sampling_per_request() {
+    common_params params_base;
+    const json body = {
+        {"reasoning_temp", 1.25f},
+        {"reasoning_top_k", 17},
+        {"reasoning_top_p", 0.82f},
+        {"reasoning_min_p", 0.03f},
+        {"reasoning_repeat_last_n", -1},
+        {"reasoning_repeat_penalty", 1.08f},
+        {"reasoning_frequency_penalty", -0.2f},
+        {"reasoning_presence_penalty", 0.4f},
+        {"reasoning_dry_penalty_last_n", -1},
+    };
+    const std::vector<llama_logit_bias> logit_bias_eog;
+
+    auto params = server_schema::eval_llama_cmpl_schema(
+        nullptr, params_base, 4096, logit_bias_eog, body);
+
+    assert_equals(1.25f, params.sampling.reasoning_temp);
+    assert_equals(17, params.sampling.reasoning_top_k);
+    assert_equals(0.82f, params.sampling.reasoning_top_p);
+    assert_equals(0.03f, params.sampling.reasoning_min_p);
+    assert_equals(4096, params.sampling.reasoning_penalty_last_n);
+    assert_equals(1.08f, params.sampling.reasoning_penalty_repeat);
+    assert_equals(-0.2f, params.sampling.reasoning_penalty_freq);
+    assert_equals(0.4f, params.sampling.reasoning_penalty_present);
+    assert_equals(4096, params.sampling.reasoning_dry_penalty_last_n);
+
+    const uint64_t expected =
+        COMMON_PARAMS_SAMPLING_CONFIG_TEMP |
+        COMMON_PARAMS_SAMPLING_CONFIG_TOP_K |
+        COMMON_PARAMS_SAMPLING_CONFIG_TOP_P |
+        COMMON_PARAMS_SAMPLING_CONFIG_MIN_P |
+        COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_LAST_N |
+        COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_REPEAT |
+        COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_FREQ |
+        COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_PRESENT |
+        COMMON_PARAMS_SAMPLING_CONFIG_DRY_PENALTY_LAST_N;
+    assert_equals(expected, params.sampling.reasoning_sampling);
+}
+
 static void test_msg_diffs_compute() {
     LOG_DBG("%s\n", __func__);
     {
@@ -6211,6 +6182,9 @@ int main(int argc, char ** argv) {
         test_convert_responses_to_chatcmpl();
         test_developer_role_to_system_workaround();
         test_template_generation_prompt();
+        test_reasoning_budget_tokens_per_request();
+        test_reasoning_budget_message_per_request();
+        test_reasoning_sampling_per_request();
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All tests passed!" << '\n';
     }

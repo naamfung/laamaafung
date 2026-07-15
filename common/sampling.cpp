@@ -114,6 +114,9 @@ struct common_sampler {
     struct llama_sampler * grmr;
     struct llama_sampler * rbudget;
     struct llama_sampler * chain;
+    struct llama_sampler * chain_think;
+
+    std::vector<llama_token> prefill_tokens;
 
     ring_buffer<llama_token> prev;
 
@@ -128,7 +131,18 @@ struct common_sampler {
 
         llama_sampler_reset(chain);
 
+        if (chain_think) {
+            llama_sampler_reset(chain_think);
+        }
+
         temp_boost = 0.0f;
+
+        if (rbudget) {
+            llama_sampler_reset(rbudget);
+            for (const auto & token : prefill_tokens) {
+                llama_sampler_accept(rbudget, token);
+            }
+        }
     }
 
     void set_logits(struct llama_context * ctx, int idx) {
@@ -190,131 +204,16 @@ std::string common_params_sampling::print() const {
     return std::string(result);
 }
 
-struct common_sampler * common_sampler_init(const struct llama_model * model, struct common_params_sampling & params) {
+static llama_sampler * common_sampler_chain_build(const struct llama_model * model, const struct common_params_sampling & params) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
     llama_sampler_chain_params lparams = llama_sampler_chain_default_params();
 
     lparams.no_perf = params.no_perf;
 
-    llama_sampler * grmr = nullptr;
-    llama_sampler * rbudget = nullptr;
     llama_sampler * chain = llama_sampler_chain_init(lparams);
 
     std::vector<llama_sampler *> samplers;
-
-    const std::string & grammar_str = common_grammar_value(params.grammar);
-    if (grammar_str.compare(0, 11, "%llguidance") == 0) {
-#ifdef LLAMA_USE_LLGUIDANCE
-        grmr = llama_sampler_init_llg(vocab, "lark", grammar_str.c_str());
-#else
-        GGML_ABORT("llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled");
-#endif // LLAMA_USE_LLGUIDANCE
-    } else {
-        std::vector<std::string> trigger_patterns;
-        std::vector<llama_token> trigger_tokens;
-        for (const auto & trigger : params.grammar_triggers) {
-            switch (trigger.type) {
-                case COMMON_GRAMMAR_TRIGGER_TYPE_WORD:
-                {
-                    const auto & word = trigger.value;
-                    trigger_patterns.push_back(regex_escape(word));
-                    break;
-                }
-                case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN:
-                {
-                    trigger_patterns.push_back(trigger.value);
-                    break;
-                }
-                case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL:
-                {
-                    const auto & pattern = trigger.value;
-                    std::string anchored = "^$";
-                    if (!pattern.empty()) {
-                        anchored = (pattern.front() != '^' ? "^" : "")
-                            + pattern
-                            + (pattern.back() != '$' ? "$" : "");
-                    }
-                    trigger_patterns.push_back(anchored);
-                    break;
-                }
-                case COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN:
-                {
-                    const auto token = trigger.token;
-                    trigger_tokens.push_back(token);
-                    break;
-                }
-                default:
-                    GGML_ASSERT(false && "unknown trigger type");
-            }
-        }
-
-        std::vector<const char *> trigger_patterns_c;
-        trigger_patterns_c.reserve(trigger_patterns.size());
-        for (const auto & regex : trigger_patterns) {
-            trigger_patterns_c.push_back(regex.c_str());
-        }
-
-        if (!grammar_str.empty()) {
-             if (params.grammar_lazy) {
-                 grmr = llama_sampler_init_grammar_lazy_patterns(vocab, grammar_str.c_str(), "root",
-                         trigger_patterns_c.data(), trigger_patterns_c.size(),
-                         trigger_tokens.data(), trigger_tokens.size());
-             } else {
-                 grmr = llama_sampler_init_grammar(vocab, grammar_str.c_str(), "root");
-             }
-        }
-    }
-    if (!grmr && !grammar_str.empty()) {
-        throw std::runtime_error("failed to parse grammar");
-    }
-
-    // Compute prefill tokens from the generation prompt
-    std::vector<llama_token> prefill_tokens;
-    if (!params.generation_prompt.empty()) {
-        GGML_ASSERT(vocab != nullptr);
-        auto tokens = common_tokenize(vocab, params.generation_prompt, false, true);
-        for (size_t i = 0; i < tokens.size(); i++) {
-            std::string piece = common_token_to_piece(vocab, tokens[i], true);
-            if (i == 0 && std::isspace(piece[0]) && !std::isspace(params.generation_prompt[0])) {
-                // Some tokenizers will add a space before the first special token, need to exclude
-                continue;
-            }
-            LOG_DBG("%s: prefill token: %d = %s\n", __func__, tokens[i], piece.c_str());
-            prefill_tokens.push_back(tokens[i]);
-        }
-    }
-
-    // Feed generation prompt tokens to the grammar sampler so it advances past
-    // tokens the template already placed in the prompt.
-    // Only applies to output-format and tool-call grammars; user-supplied grammars must not be prefilled.
-    if (grmr && !params.grammar_lazy && common_grammar_needs_prefill(params.grammar)) {
-        try {
-            for (const auto & token : prefill_tokens) {
-                llama_sampler_accept(grmr, token);
-                LOG_DBG("%s: grammar accepted prefill token (%d)\n", __func__, token);
-            }
-        } catch (std::exception &e) {
-            LOG_ERR("%s: error initializing grammar sampler for grammar:\n%s\n\nGeneration prompt:\n'%s'\n", __func__,
-                common_grammar_value(params.grammar).c_str(), params.generation_prompt.c_str());
-            throw e;
-        }
-    }
-
-    // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
-        rbudget = common_reasoning_budget_init(
-            vocab,
-            {params.reasoning_budget_start},
-            params.reasoning_budget_end,
-            params.reasoning_budget_forced,
-            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
-
-        for (const auto & token : prefill_tokens) {
-            llama_sampler_accept(rbudget, token);
-            LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
-        }
-    }
 
     if (params.has_logit_bias()) {
         samplers.push_back(llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), params.logit_bias.size(), params.logit_bias.data()));
@@ -400,29 +299,232 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         llama_sampler_chain_add(chain, smpl);
     }
 
+    return chain;
+}
+
+static llama_sampler * common_sampler_reasoning_budget_init(
+        const llama_vocab * vocab,
+        const common_params_sampling & params,
+        const std::vector<llama_token> & prefill_tokens) {
+    if (params.reasoning_budget_start.empty() || params.reasoning_budget_end.empty() ||
+        !(params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control || params.reasoning_sampling)) {
+        return nullptr;
+    }
+
+    auto * rbudget = common_reasoning_budget_init(
+        vocab,
+        {params.reasoning_budget_start},
+        params.reasoning_budget_end,
+        params.reasoning_budget_forced,
+        params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+
+    for (const auto & token : prefill_tokens) {
+        llama_sampler_accept(rbudget, token);
+        LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+    }
+
+    return rbudget;
+}
+
+static std::vector<llama_token> common_sampler_prefill_tokens(
+        const llama_vocab * vocab,
+        const std::string & generation_prompt) {
+    std::vector<llama_token> result;
+    if (generation_prompt.empty()) {
+        return result;
+    }
+
+    GGML_ASSERT(vocab != nullptr);
+    auto tokens = common_tokenize(vocab, generation_prompt, false, true);
+    for (size_t i = 0; i < tokens.size(); i++) {
+        std::string piece = common_token_to_piece(vocab, tokens[i], true);
+        if (i == 0 && !piece.empty() &&
+            std::isspace(static_cast<unsigned char>(piece[0])) &&
+            !std::isspace(static_cast<unsigned char>(generation_prompt[0]))) {
+            continue;
+        }
+        LOG_DBG("%s: prefill token: %d = %s\n", __func__, tokens[i], piece.c_str());
+        result.push_back(tokens[i]);
+    }
+
+    return result;
+}
+
+struct common_sampler * common_sampler_init(const struct llama_model * model, struct common_params_sampling & params) {
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    llama_sampler * grmr = nullptr;
+    llama_sampler * rbudget = nullptr;
+
+    const std::string & grammar_str = common_grammar_value(params.grammar);
+    if (grammar_str.compare(0, 11, "%llguidance") == 0) {
+#ifdef LLAMA_USE_LLGUIDANCE
+        grmr = llama_sampler_init_llg(vocab, "lark", grammar_str.c_str());
+#else
+        GGML_ABORT("llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled");
+#endif // LLAMA_USE_LLGUIDANCE
+    } else {
+        std::vector<std::string> trigger_patterns;
+        std::vector<llama_token> trigger_tokens;
+        for (const auto & trigger : params.grammar_triggers) {
+            switch (trigger.type) {
+                case COMMON_GRAMMAR_TRIGGER_TYPE_WORD:
+                {
+                    const auto & word = trigger.value;
+                    trigger_patterns.push_back(regex_escape(word));
+                    break;
+                }
+                case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN:
+                {
+                    trigger_patterns.push_back(trigger.value);
+                    break;
+                }
+                case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL:
+                {
+                    const auto & pattern = trigger.value;
+                    std::string anchored = "^$";
+                    if (!pattern.empty()) {
+                        anchored = (pattern.front() != '^' ? "^" : "")
+                            + pattern
+                            + (pattern.back() != '$' ? "$" : "");
+                    }
+                    trigger_patterns.push_back(anchored);
+                    break;
+                }
+                case COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN:
+                {
+                    const auto token = trigger.token;
+                    trigger_tokens.push_back(token);
+                    break;
+                }
+                default:
+                    GGML_ASSERT(false && "unknown trigger type");
+            }
+        }
+
+        std::vector<const char *> trigger_patterns_c;
+        trigger_patterns_c.reserve(trigger_patterns.size());
+        for (const auto & regex : trigger_patterns) {
+            trigger_patterns_c.push_back(regex.c_str());
+        }
+
+        if (!grammar_str.empty()) {
+             if (params.grammar_lazy) {
+                 grmr = llama_sampler_init_grammar_lazy_patterns(vocab, grammar_str.c_str(), "root",
+                         trigger_patterns_c.data(), trigger_patterns_c.size(),
+                         trigger_tokens.data(), trigger_tokens.size());
+             } else {
+                 grmr = llama_sampler_init_grammar(vocab, grammar_str.c_str(), "root");
+             }
+        }
+    }
+    if (!grmr && !grammar_str.empty()) {
+        throw std::runtime_error("failed to parse grammar");
+    }
+
+    auto prefill_tokens = common_sampler_prefill_tokens(vocab, params.generation_prompt);
+
+    // Feed generation prompt tokens to the grammar sampler so it advances past
+    // tokens the template already placed in the prompt.
+    // Only applies to output-format and tool-call grammars; user-supplied grammars must not be prefilled.
+    if (grmr && !params.grammar_lazy && common_grammar_needs_prefill(params.grammar)) {
+        try {
+            for (const auto & token : prefill_tokens) {
+                llama_sampler_accept(grmr, token);
+                LOG_DBG("%s: grammar accepted prefill token (%d)\n", __func__, token);
+            }
+        } catch (std::exception &e) {
+            LOG_ERR("%s: error initializing grammar sampler for grammar:\n%s\n\nGeneration prompt:\n'%s'\n", __func__,
+                common_grammar_value(params.grammar).c_str(), params.generation_prompt.c_str());
+            throw e;
+        }
+    }
+
+    rbudget = common_sampler_reasoning_budget_init(vocab, params, prefill_tokens);
+
+    llama_sampler * chain = common_sampler_chain_build(model, params);
+
+    llama_sampler * chain_think = nullptr;
+    if (params.reasoning_sampling) {
+        common_params_sampling params_think = params;
+
+        const auto config = params.reasoning_sampling;
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_SEED)               { params_think.seed               = params.reasoning_seed; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIN_KEEP)           { params_think.min_keep           = params.reasoning_min_keep; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_TOP_K)              { params_think.top_k              = params.reasoning_top_k; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_TOP_P)              { params_think.top_p              = params.reasoning_top_p; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIN_P)              { params_think.min_p              = params.reasoning_min_p; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_XTC_PROBABILITY)    { params_think.xtc_probability    = params.reasoning_xtc_probability; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_XTC_THRESHOLD)      { params_think.xtc_threshold      = params.reasoning_xtc_threshold; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_TYPICAL_P)          { params_think.typ_p              = params.reasoning_typ_p; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_TEMP)               { params_think.temp               = params.reasoning_temp; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_RANGE)     { params_think.dynatemp_range     = params.reasoning_dynatemp_range; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_EXPONENT)  { params_think.dynatemp_exponent  = params.reasoning_dynatemp_exponent; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_LAST_N)     { params_think.penalty_last_n     = params.reasoning_penalty_last_n; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_REPEAT)     { params_think.penalty_repeat     = params.reasoning_penalty_repeat; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_FREQ)       { params_think.penalty_freq       = params.reasoning_penalty_freq; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_PRESENT)    { params_think.penalty_present    = params.reasoning_penalty_present; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_DRY_MULTIPLIER)     { params_think.dry_multiplier     = params.reasoning_dry_multiplier; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_DRY_BASE)           { params_think.dry_base           = params.reasoning_dry_base; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_DRY_ALLOWED_LEN)    { params_think.dry_allowed_length = params.reasoning_dry_allowed_length; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_DRY_PENALTY_LAST_N) { params_think.dry_penalty_last_n = params.reasoning_dry_penalty_last_n; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_TARGET)    { params_think.adaptive_target    = params.reasoning_adaptive_target; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_DECAY)     { params_think.adaptive_decay     = params.reasoning_adaptive_decay; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT)           { params_think.mirostat           = params.reasoning_mirostat; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_TOP_N_SIGMA)        { params_think.top_n_sigma        = params.reasoning_top_n_sigma; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_TAU)       { params_think.mirostat_tau       = params.reasoning_mirostat_tau; }
+        if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA)       { params_think.mirostat_eta       = params.reasoning_mirostat_eta; }
+
+        chain_think = common_sampler_chain_build(model, params_think);
+    }
+
     if (grmr && params.backend_sampling) {
         LOG_WRN("%s: backend sampling is not compatible with grammar, disabling\n", __func__);
 
         params.backend_sampling = false;
     }
 
-    if (rbudget && params.backend_sampling) {
-        LOG_WRN("%s: backend sampling is not compatible with reasoning budget, disabling\n", __func__);
+    if ((rbudget || params.reasoning_sampling) && params.backend_sampling) {
+        LOG_WRN("%s: backend sampling is not compatible with reasoning sampling or budgets, disabling\n", __func__);
 
         params.backend_sampling = false;
     }
 
     auto * result = new common_sampler {
-        /* .params  = */ params,
-        /* .grmr    = */ grmr,
-        /* .rbudget = */ rbudget,
-        /* .chain   = */ chain,
-        /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
-        /* .cur     = */ {},
-        /* .cur_p   = */ {},
+        /* .params         = */ params,
+        /* .grmr           = */ grmr,
+        /* .rbudget        = */ rbudget,
+        /* .chain          = */ chain,
+        /* .chain_think    = */ chain_think,
+        /* .prefill_tokens = */ std::move(prefill_tokens),
+        /* .prev           = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
+        /* .cur            = */ {},
+        /* .cur_p          = */ {},
     };
 
     return result;
+}
+
+void common_sampler_configure_reasoning(
+        struct common_sampler * gsmpl,
+        const llama_vocab * vocab,
+        const common_params_sampling & params) {
+    if (!gsmpl) {
+        return;
+    }
+
+    gsmpl->params.generation_prompt        = params.generation_prompt;
+    gsmpl->params.reasoning_budget_start   = params.reasoning_budget_start;
+    gsmpl->params.reasoning_budget_end     = params.reasoning_budget_end;
+    gsmpl->params.reasoning_budget_forced  = params.reasoning_budget_forced;
+    gsmpl->params.reasoning_budget_tokens  = params.reasoning_budget_tokens;
+    gsmpl->params.reasoning_budget_message = params.reasoning_budget_message;
+    gsmpl->params.reasoning_control        = params.reasoning_control;
+
+    gsmpl->prefill_tokens = common_sampler_prefill_tokens(vocab, params.generation_prompt);
+
+    llama_sampler_free(gsmpl->rbudget);
+    gsmpl->rbudget = common_sampler_reasoning_budget_init(vocab, gsmpl->params, gsmpl->prefill_tokens);
 }
 
 void common_sampler_free(struct common_sampler * gsmpl) {
@@ -433,6 +535,7 @@ void common_sampler_free(struct common_sampler * gsmpl) {
     llama_sampler_free(gsmpl->grmr);
     llama_sampler_free(gsmpl->rbudget);
     llama_sampler_free(gsmpl->chain);
+    llama_sampler_free(gsmpl->chain_think);
 
     delete gsmpl;
 }
@@ -450,6 +553,27 @@ static bool grammar_should_apply(struct common_sampler * gsmpl) {
         return state == REASONING_BUDGET_IDLE || state == REASONING_BUDGET_DONE;
     }
     return true;
+}
+
+// true while generation is inside the reasoning block (as tracked by the
+// reasoning budget sampler), i.e. after the start tag and before the end tag
+static bool common_sampler_reasoning_active(const struct common_sampler * gsmpl) {
+    if (!gsmpl->rbudget) {
+        return false;
+    }
+    const auto state = common_reasoning_budget_get_state(gsmpl->rbudget);
+    return state == REASONING_BUDGET_COUNTING ||
+           state == REASONING_BUDGET_WAITING_UTF8 ||
+           state == REASONING_BUDGET_FORCING;
+}
+
+// select the sampler chain for the current position:
+// the reasoning chain inside the reasoning block (if configured), the base chain otherwise
+static llama_sampler * common_sampler_active_chain(struct common_sampler * gsmpl) {
+    if (gsmpl->chain_think && common_sampler_reasoning_active(gsmpl)) {
+        return gsmpl->chain_think;
+    }
+    return gsmpl->chain;
 }
 
 void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, bool is_generated) {
@@ -483,6 +607,10 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
 
     llama_sampler_accept(gsmpl->chain, token);
 
+    if (gsmpl->chain_think) {
+        llama_sampler_accept(gsmpl->chain_think, token);
+    }
+
     gsmpl->prev.push_back(token);
 }
 
@@ -494,15 +622,23 @@ void common_sampler_reset(struct common_sampler * gsmpl) {
     gsmpl->reset();
 }
 
+void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost) {
+    if (gsmpl) {
+        gsmpl->temp_boost = boost;
+    }
+}
+
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
     return new common_sampler {
-        /* .params  = */ gsmpl->params,
-        /* .grmr    = */ llama_sampler_clone(gsmpl->grmr),
-        /* .rbudget = */ llama_sampler_clone(gsmpl->rbudget),
-        /* .chain   = */ llama_sampler_clone(gsmpl->chain),
-        /* .prev    = */ gsmpl->prev,
-        /* .cur     = */ gsmpl->cur,
-        /* .cur_p   = */ gsmpl->cur_p,
+        /* .params         = */ gsmpl->params,
+        /* .grmr           = */ llama_sampler_clone(gsmpl->grmr),
+        /* .rbudget        = */ llama_sampler_clone(gsmpl->rbudget),
+        /* .chain          = */ llama_sampler_clone(gsmpl->chain),
+        /* .chain_think    = */ gsmpl->chain_think ? llama_sampler_clone(gsmpl->chain_think) : nullptr,
+        /* .prefill_tokens = */ gsmpl->prefill_tokens,
+        /* .prev           = */ gsmpl->prev,
+        /* .cur            = */ gsmpl->cur,
+        /* .cur_p          = */ gsmpl->cur_p,
     };
 }
 
@@ -559,12 +695,6 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
     return gsmpl->chain;
 }
 
-void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost) {
-    if (gsmpl) {
-        gsmpl->temp_boost = boost;
-    }
-}
-
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
     llama_synchronize(ctx);
 
@@ -575,17 +705,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     auto & grmr  = gsmpl->grmr;
     auto & rbudget = gsmpl->rbudget;
-    auto & chain = gsmpl->chain;
+    auto * chain = common_sampler_active_chain(gsmpl);
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
     gsmpl->set_logits(ctx, idx);
-
-    if (gsmpl->temp_boost > 0.0f) {
-        const float inv_temp = 1.0f / (1.0f + gsmpl->temp_boost);
-        for (size_t i = 0; i < cur_p.size; i++) {
-            cur_p.data[i].logit *= inv_temp;
-        }
-    }
 
     // Check if a backend sampler has already sampled a token in which case we
     // return that token id directly.
@@ -611,6 +734,13 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     // apply reasoning budget first
     llama_sampler_apply(rbudget, &cur_p);
+
+    if (gsmpl->temp_boost > 0.0f) {
+        const float inv_temp = 1.0f / (1.0f + gsmpl->temp_boost);
+        for (size_t i = 0; i < cur_p.size; i++) {
+            cur_p.data[i].logit *= inv_temp;
+        }
+    }
 
     if (grammar_first && grammar_should_apply(gsmpl)) {
         llama_sampler_apply(grmr, &cur_p);
