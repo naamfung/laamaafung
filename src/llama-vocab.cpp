@@ -2517,6 +2517,16 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
             } else {
                 id = new_id;
             }
+
+            // The default id (used when the key is absent, or when an explicit id is out of range)
+            // is otherwise never validated against the vocab size. An out-of-range default reaches
+            // id_to_token[id] below (e.g. the special_eog_ids loop) as an out-of-bounds access.
+            // Disable the special token if its resolved id is out of range.
+            if (id != LLAMA_TOKEN_NULL && (size_t) id >= id_to_token.size()) {
+                LLAMA_LOG_WARN("%s: special token '%s' id %d is out of vocab range (size %zu), disabling\n",
+                    __func__, key.c_str(), id, id_to_token.size());
+                id = LLAMA_TOKEN_NULL;
+            }
         }
 
         // Handle add_bos, add_eos and add_sep
