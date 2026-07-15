@@ -3,7 +3,7 @@
 #   --clean     删除 build/ 后全量编译
 #   --ui        启用界面编译 (LLAMA_BUILD_UI=ON)
 #   --no-ccache 禁用 ccache (MSVC + ccache 偶发崩溃时使用)
-#   --jobs N    并行任务数 (默认 8, 避免无限并行导致 cl.exe OOM 崩溃)
+#   --jobs N    并行任务数 (默认 4, 避免高并行导致 cl.exe access violation 崩溃)
 #   target      可选 cmake 目标, 如 llama-server; 不指定则编译全部
 
 set -e
@@ -11,7 +11,7 @@ set -e
 CLEAN=0
 BUILD_UI=OFF
 USE_CCACHE=ON
-JOBS=8
+JOBS=4
 TARGETS=""
 
 # 手动解析参数 (POSIX sh 无 getopts 长选项支持)
