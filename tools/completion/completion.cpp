@@ -287,14 +287,16 @@ int llama_completion(int argc, char ** argv) {
     };
 
     auto configure_reasoning_sampler = [&](const common_chat_params & chat_params) {
-        if (chat_params.thinking_start_tag.empty() || chat_params.thinking_end_tag.empty()) {
+        if (chat_params.thinking_start_tag.empty() || chat_params.thinking_end_tags.empty()) {
             return;
         }
 
         sparams.generation_prompt       = chat_params.generation_prompt;
         sparams.reasoning_budget_start  = common_tokenize(vocab, chat_params.thinking_start_tag, false, true);
-        sparams.reasoning_budget_end    = common_tokenize(vocab, chat_params.thinking_end_tag, false, true);
-        sparams.reasoning_budget_forced = common_tokenize(vocab, sparams.reasoning_budget_message + chat_params.thinking_end_tag, false, true);
+        for (const auto & tag : chat_params.thinking_end_tags) {
+            sparams.reasoning_budget_end.push_back(common_tokenize(vocab, tag, false, true));
+        }
+        sparams.reasoning_budget_forced = common_tokenize(vocab, sparams.reasoning_budget_message + chat_params.thinking_end_tags.front(), false, true);
 
         common_sampler_configure_reasoning(smpl, vocab, sparams);
     };
