@@ -1310,9 +1310,18 @@ private:
         }
 
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
+            // ctx_shift has two independent roles:
+            //   1. initial prompt truncation (launch_slot_with_task) - pure token
+            //      array manipulation, does not require K-shift support
+            //   2. runtime context shift during generation (update_slots) - requires
+            //      K-shift support to rotate cached K tensors to new positions
+            // Keep ctx_shift enabled so role 1 works; role 2 is guarded separately
+            // in update_slots() to avoid GGML_ABORT when K-shift is unavailable.
             if (params_base.ctx_shift) {
-                params_base.ctx_shift = false;
-                SRV_WRN("%s\n", "ctx_shift is not supported by this context, it will be disabled");
+                SRV_WRN("%s\n",
+                    "ctx_shift: KV cache does not support K-shift (e.g. SWA with non-full size). "
+                    "Initial prompt truncation will still work, but runtime context shift during "
+                    "generation is disabled. Use --swa-full to enable full K-shift support");
             }
 
             if (params_base.n_cache_reuse) {
@@ -2055,8 +2064,9 @@ static int check_tag_boundary(
             slot.has_next_token = true;
         }
 
-        // if context shifting is disabled, make sure that we don't run out of context
-        if (!params_base.ctx_shift && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+        // if context shifting is disabled or unsupported (no K-shift), make sure that we don't run out of context
+        if ((!params_base.ctx_shift || !llama_memory_can_shift(llama_get_memory(ctx_tgt))) &&
+                slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
             slot.truncated      = true;
             slot.stop           = STOP_TYPE_LIMIT;
             slot.has_next_token = false;
@@ -3081,10 +3091,10 @@ static int check_tag_boundary(
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
             if (slot.is_processing() && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
-                if (!params_base.ctx_shift) {
+                if (!params_base.ctx_shift || !llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
                     // this check is redundant (for good)
                     // we should never get here, because generation should already stopped in process_token()
-                    send_error(slot, "context shift is disabled", ERROR_TYPE_SERVER);
+                    send_error(slot, "context shift is disabled or unsupported by this KV cache", ERROR_TYPE_SERVER);
                     slot.release();
                     return;
                 }
