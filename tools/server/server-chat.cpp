@@ -533,6 +533,27 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         }
     }
 
+    // Pass through reasoning sampling overrides so Anthropic clients can also
+    // dynamically configure reasoning-block sampling per request.
+    for (const auto & key : {
+        "reasoning_temp", "reasoning_temperature",
+        "reasoning_top_k", "reasoning_top_p", "reasoning_min_p", "reasoning_top_n_sigma",
+        "reasoning_xtc_probability", "reasoning_xtc_threshold", "reasoning_typical_p",
+        "reasoning_dynatemp_range", "reasoning_dynatemp_exp", "reasoning_dynatemp_exponent",
+        "reasoning_repeat_last_n", "reasoning_repeat_penalty",
+        "reasoning_presence_penalty", "reasoning_frequency_penalty",
+        "reasoning_dry_multiplier", "reasoning_dry_base",
+        "reasoning_dry_allowed_length", "reasoning_dry_penalty_last_n",
+        "reasoning_mirostat", "reasoning_mirostat_tau", "reasoning_mirostat_ent",
+        "reasoning_mirostat_eta", "reasoning_mirostat_lr",
+        "reasoning_adaptive_target", "reasoning_adaptive_decay",
+        "reasoning_min_keep", "reasoning_seed",
+    }) {
+        if (body.contains(key)) {
+            oai_body[key] = body.at(key);
+        }
+    }
+
     // Handle Anthropic-specific thinking param
     if (body.contains("thinking")) {
         json thinking = json_value(body, "thinking", json::object());
