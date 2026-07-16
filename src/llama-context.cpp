@@ -607,10 +607,21 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
             ggml_backend_dev_t device_layer = model.dev_layer(node.il);
 
             if (device_fused != device_layer) {
+                const char * name_layer = device_layer ? ggml_backend_dev_name(device_layer) : "none";
+                const char * name_fused = device_fused ? ggml_backend_dev_name(device_fused) : "none";
                 LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but %s "
                                "is assigned to device %s (usually due to missing support)\n",
-                               func, node.il, device_layer ? ggml_backend_dev_name(device_layer) : "none",
-                               probe.name, device_fused ? ggml_backend_dev_name(device_fused) : "none");
+                               func, node.il, name_layer,
+                               probe.name, name_fused);
+                
+                // Check if RPC devices are involved to provide helpful hint about -ot and -ts mismatch
+                bool rpc_mismatch = (std::string(name_layer).find("RPC") != std::string::npos) || 
+                                    (std::string(name_fused).find("RPC") != std::string::npos);
+                if (rpc_mismatch) {
+                    LLAMA_LOG_WARN("%s: WARNING: RPC device mismatch detected. This may be caused by a configuration mismatch between --override-tensor (-ot) and --tensor-split (-ts). "
+                                   "Please ensure that the layer boundaries set by -ot match the layer distribution computed by -ts to avoid CROSS-ENDPOINT MISMATCH errors.\n", func);
+                }
+                
                 device_mismatch = true;
                 break;
             }
