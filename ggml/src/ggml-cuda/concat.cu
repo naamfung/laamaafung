@@ -214,7 +214,6 @@ void ggml_cuda_op_concat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(dst->type  == src0->type);
 
     if (ggml_is_quantized(src0->type)) {
-<<<<<<< HEAD
         if (dim == 3) {
             GGML_ASSERT(ggml_is_contiguous(src0));
             GGML_ASSERT(ggml_is_contiguous(src1));
@@ -226,14 +225,6 @@ void ggml_cuda_op_concat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ASSERT(src1->ne[0] % ggml_blck_size(src1->type) == 0);
 
         // if first 3 dimensions are contiguous and ne[0] is multiple of the block size we can concat both tensors as byte tensors
-=======
-        GGML_ASSERT(ggml_is_contiguous(src0));
-        GGML_ASSERT(ggml_is_contiguous(src1));
-        GGML_ASSERT(src0->ne[0] % ggml_blck_size(src0->type) == 0);
-        GGML_ASSERT(src1->ne[0] % ggml_blck_size(src1->type) == 0);
-
-        // if tensors are contiguous and ne[0] is multiple of the block size we can concat both tensors as byte tensors
->>>>>>> 78d2f5246 (cuda : concat implementation for quantized types (#25303))
         concat_cuda<uint8_t>(src0, src1, dst, dim, stream);
     } else {
         GGML_ASSERT(ggml_blck_size(src0->type) == 1);

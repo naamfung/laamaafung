@@ -15,6 +15,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -64,6 +65,20 @@ static std::string string_diff(const std::string & last, const std::string & cur
         throw std::runtime_error("Invalid diff: '" + last + "' not found at start of '" + current + "'");
     }
     return current.substr(last.size());
+}
+
+// Streaming parse oscillation (e.g. tagged_thinking_tools template) can cause
+// the partial parse to extract content/tool_calls that the final strict parse
+// at EOF reclassifies. When that happens string_diff would throw and abort the
+// whole request. Fall back to no-delta so the client keeps its accumulated
+// state and the request completes; the final oaicompat_msg reflects truth.
+static std::string safe_string_diff(const std::string & last, const std::string & current) {
+    try {
+        return string_diff(last, current);
+    } catch (const std::exception & e) {
+        LOG_WRN("%s: %s; suppressing delta\n", __func__, e.what());
+        return "";
+    }
 }
 
 static bool has_content_or_tool_calls(const common_chat_msg & msg) {
@@ -270,32 +285,38 @@ std::vector<common_chat_msg_diff> common_chat_msg_diff::compute_diffs(const comm
         diffs.reserve(3);
     }
 
+    // Streaming parse oscillation (e.g. tagged_thinking_tools template) can
+    // commit phantom tool calls during partial parsing that the final strict
+    // parse at EOF reclassifies as content. Use the common-prefix length for
+    // diff computation so we never throw; the phantom tool calls already sent
+    // to the client during streaming can't be unsent, but the final
+    // oaicompat_msg reflects the correct (final) state.
+    const size_t min_tc = std::min(msg_prv.tool_calls.size(), msg_new.tool_calls.size());
+    if (msg_new.tool_calls.size() < msg_prv.tool_calls.size()) {
+        LOG_WRN("compute_diffs: tool call count regressed (%zu -> %zu), truncating to common prefix\n",
+                msg_prv.tool_calls.size(), msg_new.tool_calls.size());
+        LOG_WRN("  Previous tool calls:\n");
+        for (const auto & tc : msg_prv.tool_calls) {
+            LOG_WRN("    - name: '%s', args: '%s'\n", tc.name.c_str(), tc.arguments.c_str());
+        }
+        LOG_WRN("  Current tool calls:\n");
+        for (const auto & tc : msg_new.tool_calls) {
+            LOG_WRN("    - name: '%s', args: '%s'\n", tc.name.c_str(), tc.arguments.c_str());
+        }
+    }
+
     // TODO: these can become expensive for long messages - how to optimize?
     if (msg_prv.reasoning_content != msg_new.reasoning_content) {
         auto & diff                  = diffs.emplace_back();
-        diff.reasoning_content_delta = string_diff(msg_prv.reasoning_content, msg_new.reasoning_content);
+        diff.reasoning_content_delta = safe_string_diff(msg_prv.reasoning_content, msg_new.reasoning_content);
     }
     if (msg_prv.content != msg_new.content) {
         auto & diff        = diffs.emplace_back();
-        diff.content_delta = string_diff(msg_prv.content, msg_new.content);
+        diff.content_delta = safe_string_diff(msg_prv.content, msg_new.content);
     }
 
-    if (msg_new.tool_calls.size() < msg_prv.tool_calls.size()) {
-        std::string err = "Invalid diff: now finding less tool calls!\n";
-        err += "  Previous (" + std::to_string(msg_prv.tool_calls.size()) + "):\n";
-        for (const auto & tc : msg_prv.tool_calls) {
-            err += "    - name: '" + tc.name + "', args: '" + tc.arguments + "'\n";
-        }
-        err += "  Current (" + std::to_string(msg_new.tool_calls.size()) + "):\n";
-        for (const auto & tc : msg_new.tool_calls) {
-            err += "    - name: '" + tc.name + "', args: '" + tc.arguments + "'\n";
-        }
-        err += "  Current msg text content:\n" + msg_new.content + "\n";
-        throw std::runtime_error(err);
-    }
-
-    if (!msg_prv.tool_calls.empty()) {
-        const auto   idx  = msg_prv.tool_calls.size() - 1;
+    if (min_tc > 0) {
+        const auto   idx  = min_tc - 1;
         const auto & pref = msg_prv.tool_calls[idx];
         const auto & newf = msg_new.tool_calls[idx];
         // Allow tool name to change during incremental parsing:
@@ -309,7 +330,7 @@ std::vector<common_chat_msg_diff> common_chat_msg_diff::compute_diffs(const comm
                 throw std::runtime_error("Invalid diff: tool call mismatch!");
             }
         }
-        const auto args_diff = string_diff(pref.arguments, newf.arguments);
+        const auto args_diff = safe_string_diff(pref.arguments, newf.arguments);
         if (!args_diff.empty() || pref.id != newf.id || pref.name != newf.name) {
             auto & diff          = diffs.emplace_back();
             diff.tool_call_index = idx;
@@ -320,7 +341,7 @@ std::vector<common_chat_msg_diff> common_chat_msg_diff::compute_diffs(const comm
             diff.tool_call_delta.arguments = args_diff;
         }
     }
-    for (size_t idx = msg_prv.tool_calls.size(); idx < msg_new.tool_calls.size(); ++idx) {
+    for (size_t idx = min_tc; idx < msg_new.tool_calls.size(); ++idx) {
         auto & diff          = diffs.emplace_back();
         diff.tool_call_index = idx;
         diff.tool_call_delta = msg_new.tool_calls[idx];
