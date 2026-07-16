@@ -574,6 +574,7 @@ extern "C" {
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_TURBO_WHT,
+        GGML_OP_LIGHTNING_INDEXER,
 
         GGML_OP_UNARY,
 
@@ -782,6 +783,7 @@ extern "C" {
     GGML_API bool ggml_is_contiguous_0(const struct ggml_tensor * tensor); // same as ggml_is_contiguous()
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
+    GGML_API bool ggml_is_contiguous_to_3(const struct ggml_tensor * tensor); // contiguous for dims < 3
 
     // returns whether the tensor elements are allocated as one contiguous block of memory (no gaps, but permutation ok)
     GGML_API bool ggml_is_contiguously_allocated(const struct ggml_tensor * tensor);

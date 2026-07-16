@@ -7304,6 +7304,7 @@ static void ggml_compute_forward_conv_2d_dw_cwhn(
 
     const int64_t c = p.channels;
     const float * knl_data = (const float *)kernel->data;
+    const ggml_type knl_type = kernel->type;
 
     const int64_t rows_total = p.dst_h * p.batch;
     const int64_t rows_per_thread = (rows_total + params->nth - 1) / params->nth;
@@ -7319,8 +7320,8 @@ static void ggml_compute_forward_conv_2d_dw_cwhn(
 #else
         pkg_size = GGML_F32_EPR;
 #endif
-        const int64_t pkg_count = c / pkg_size;
-        const int64_t c_pkg_end = pkg_count * pkg_size;
+        c_pkg_end = (c / pkg_size) * pkg_size;
+    }
 #else
     const int64_t c_pkg_end = 0;
 #endif

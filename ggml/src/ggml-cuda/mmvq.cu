@@ -672,6 +672,7 @@ static __global__ void mul_mat_vec_q(
                 }
                 dst[j*stride_col_dst + i] = result;
             }
+        }
     }
 
     if constexpr (!has_fusion) {
