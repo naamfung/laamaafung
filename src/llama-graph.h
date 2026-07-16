@@ -55,6 +55,18 @@ enum llm_ffn_gate_type {
     LLM_FFN_PAR, // ffn_gate is parallel to ffn_up
 };
 
+enum llm_fused_op {
+    LLM_FUSED_OP_FLASH_ATTN,
+    LLM_FUSED_OP_GDN_AR,
+    LLM_FUSED_OP_GDN_CH,
+};
+
+struct llm_graph_fused_node {
+    llm_fused_op op;
+    ggml_tensor * tensor;
+    int il;
+};
+
 enum llm_norm_type {
     LLM_NORM,
     LLM_NORM_RMS,
@@ -835,6 +847,11 @@ public:
     ggml_cgraph * gf;
 
     int64_t max_nodes;
+
+    std::vector<llm_graph_fused_node> fused_nodes;
+
+    void add_fused_node(llm_graph_fused_node result);
+    const std::vector<llm_graph_fused_node> & get_fused_nodes() const;
 
 private:
     // keep a copy of the previous graph parameters
