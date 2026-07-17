@@ -3124,6 +3124,49 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     }
     mapper->from_ast(ctx.ast, result);
 
+    // Final-only rfind correction: when the model emits multiple </think> tags
+    // (e.g. reasoning about the tag itself, quoting '</think>' as a literal),
+    // the PEG parser's until_one_of stops at the first one, misclassifying
+    // subsequent reasoning as content. On final (non-partial) parse, re-split
+    // using rfind so the LAST </think> is treated as the real close tag.
+    // Streaming deltas already sent remain as-is; safe_string_diff tolerates
+    // the resulting non-monotonic content by returning empty deltas, and the
+    // final oaicompat_msg reflects the corrected state.
+    if (!is_partial && params.reasoning_format != COMMON_REASONING_FORMAT_NONE) {
+        static const std::string THINK_END = "</think>";
+        // Only applies when generation_prompt prefilled <think> (Qwen-Agentic /
+        // DeepSeek templates) so the model emits reasoning + </think> + content.
+        const size_t ts = effective_input.find("<think>");
+        if (ts != std::string::npos) {
+            const size_t first_close = effective_input.find(THINK_END, ts + 7);
+            if (first_close != std::string::npos) {
+                const size_t second_close = effective_input.find(THINK_END, first_close + THINK_END.size());
+                if (second_close != std::string::npos) {
+                    // Multiple </think> found: re-split at the last one.
+                    const size_t last_close = effective_input.rfind(THINK_END);
+                    // reasoning = content between <think> and last </think>
+                    // (skip the prefilled "<think>" tag itself)
+                    const size_t reason_start = ts + 7; // length of "<think>"
+                    const std::string new_reasoning = effective_input.substr(
+                        reason_start, last_close - reason_start);
+                    // content = everything after last </think>
+                    const size_t content_start = last_close + THINK_END.size();
+                    const std::string new_content = content_start < effective_input.size()
+                        ? effective_input.substr(content_start)
+                        : "";
+                    // Preserve tool_calls: only override reasoning/content when
+                    // the model didn't emit a tool_call (tool_calls would have
+                    // been parsed from content after </think>, so a multi-</think>
+                    // reasoning quote scenario implies no tool_call this turn).
+                    if (msg.tool_calls.empty()) {
+                        msg.reasoning_content = new_reasoning;
+                        msg.content           = new_content;
+                    }
+                }
+            }
+        }
+    }
+
     // deepseek-legacy in stream mode: keep <think>...</think> tags in content
     // while also populating reasoning_content. The parser already extracted
     // reasoning (stripping tags from content), so reconstruct the tag block
