@@ -17,16 +17,14 @@
   git clone -b v3 https://github.com/naamfung/laamaafung.git
   ```
 
-- **回退版本（v2）**：
-  如須使用舊版穩定分支 `v2`，可執行：
+- **回退版本（v2 / v1）**：
+  如須使用舊版穩定分支 `v2` 或 `v1`，可執行：
   ```sh
   git clone -b v2 https://github.com/naamfung/laamaafung.git
   ```
-
-- **試驗分支（chainthink）**：
-  測試推理塊独立採樣參數覆蓋的試驗分支，可能不穩定：
+  或
   ```sh
-  git clone -b chainthink https://github.com/naamfung/laamaafung.git
+  git clone -b v1 https://github.com/naamfung/laamaafung.git
   ```
 
 - **克隆開發分支**：
