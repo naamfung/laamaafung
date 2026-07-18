@@ -3626,6 +3626,7 @@ static int check_tag_boundary(
                         if (n_past == slot.task->n_tokens() && n_past > 0) {
                             SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
                             n_past--;
+                            n_past_common = std::min(n_past_common, n_past);
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
@@ -3802,9 +3803,18 @@ static int check_tag_boundary(
 
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
-                        slot.state = SLOT_STATE_DONE_PROMPT;
+                        if (batch.size() == 0) {
+                            SLT_WRN(slot, "%s", "prompt fully cached but batch is empty, forcing re-evaluation of last token\n");
+                            const llama_pos p_last = slot.prompt.tokens.pos_next() - 1;
+                            slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - 1);
+                            common_context_seq_rm(ctx_tgt, slot.id, p_last, -1);
+                            if (ctx_dft) {
+                                common_context_seq_rm(ctx_dft.get(), slot.id, p_last, -1);
+                            }
+                            return;
+                        }
 
-                        GGML_ASSERT(batch.size() > 0);
+                        slot.state = SLOT_STATE_DONE_PROMPT;
 
                         // extract the logits only for the last token
                         batch.set_output(batch.size() - 1, true);
