@@ -8,19 +8,19 @@
 
 ### 克隆指南
 
-推薦優先克隆穩定分支 `v3`，適合穩定使用。
+推薦優先克隆穩定分支 `v5`，適合穩定使用。
 
 如須測試最新功能，可以克隆開發分支 `master`。
 
 - **克隆穩定分支（推薦）**：
   ```sh
-  git clone -b v3 https://github.com/naamfung/laamaafung.git
+  git clone -b v5 https://github.com/naamfung/laamaafung.git
   ```
 
-- **回退版本（v2）**：
-  如須使用舊版穩定分支 `v2`，可執行：
+- **回退版本（v3）**：
+  如須使用舊版穩定分支 `v3`，可執行：
   ```sh
-  git clone -b v2 https://github.com/naamfung/laamaafung.git
+  git clone -b v3 https://github.com/naamfung/laamaafung.git
   ```
 
 - **克隆開發分支**：
