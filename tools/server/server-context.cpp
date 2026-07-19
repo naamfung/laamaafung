@@ -3091,6 +3091,12 @@ static int check_tag_boundary(
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
             if (slot.is_processing() && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+                // skip context shift for slots that just started a new task
+                // the prompt processing code will clear the old KV cache
+                if (slot.state == SLOT_STATE_STARTED) {
+                    return;
+                }
+
                 if (!params_base.ctx_shift || !llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
                     // this check is redundant (for good)
                     // we should never get here, because generation should already stopped in process_token()
