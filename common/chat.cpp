@@ -3124,6 +3124,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     }
     mapper->from_ast(ctx.ast, result);
 
+    bool rfind_corrected = false;
     // Final-only rfind correction: when the model emits multiple </think> tags
     // (e.g. reasoning about the tag itself, quoting '</think>' as a literal),
     // the PEG parser's until_one_of stops at the first one, misclassifying
@@ -3144,12 +3145,9 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
                 if (second_close != std::string::npos) {
                     // Multiple </think> found: re-split at the last one.
                     const size_t last_close = effective_input.rfind(THINK_END);
-                    // reasoning = content between <think> and last </think>
-                    // (skip the prefilled "<think>" tag itself)
                     const size_t reason_start = ts + 7; // length of "<think>"
                     const std::string new_reasoning = effective_input.substr(
                         reason_start, last_close - reason_start);
-                    // content = everything after last </think>
                     const size_t content_start = last_close + THINK_END.size();
                     const std::string new_content = content_start < effective_input.size()
                         ? effective_input.substr(content_start)
@@ -3159,8 +3157,13 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
                     // been parsed from content after </think>, so a multi-</think>
                     // reasoning quote scenario implies no tool_call this turn).
                     if (msg.tool_calls.empty()) {
+                        LOG_WRN("rfind correction: multiple </think> tags detected, re-splitting at last occurrence "
+                                "(reasoning: %zu -> %zu bytes, content: %zu -> %zu bytes)\n",
+                                msg.reasoning_content.size(), new_reasoning.size(),
+                                msg.content.size(), new_content.size());
                         msg.reasoning_content = new_reasoning;
                         msg.content           = new_content;
+                        rfind_corrected = true;
                     }
                 }
             }
@@ -3193,7 +3196,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
         fflush(stderr);
     }
 
-    if (!is_partial) {
+    if (!is_partial && !rfind_corrected) {
         LOG_DBG("Parsed message: %s\n", common_chat_msgs_to_json_oaicompat({ msg }).at(0).dump().c_str());
     }
     return msg;
