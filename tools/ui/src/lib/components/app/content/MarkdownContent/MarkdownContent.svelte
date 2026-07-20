@@ -156,7 +156,8 @@
 			.use(remarkRehype); // Convert Markdown AST to rehype
 
 		if (!disableMath) {
-			proc = proc.use(rehypeKatex); // Render math using KaTeX
+			// strict: 'ignore' suppresses KaTeX warnings for Unicode chars (e.g. CJK) in math mode
+			proc = proc.use(rehypeKatex, { strict: 'ignore' }); // Render math using KaTeX
 		}
 
 		return proc
