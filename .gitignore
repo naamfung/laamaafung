@@ -159,3 +159,10 @@ AGENTS.local.md
 .trae/
 .glash/
 .klaude/
+
+# UI build archives
+# Track only the current UI archive (b10236); ignore all others so
+# repeated ./build-ui.sh runs don't bloat the repo. When b10236 is
+# retired, update the exception to the new tracked version.
+files/llama-b*-ui.tar.gz
+!files/llama-b10236-ui.tar.gz
