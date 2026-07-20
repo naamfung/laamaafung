@@ -385,10 +385,14 @@ class ToolsStore {
 	 * Fetch built-in tools from the server.
 	 *
 	 * @param enabled - Optional hint from /props (builtin_tools_enabled).
-	 *                  When explicitly `false`, skip the /tools request
-	 *                  entirely so the server does not return 403 and the
-	 *                  browser console stays clean. When `undefined` or
-	 *                  `true`, the request proceeds normally.
+	 *                  - `false`: mark the endpoint as disabled and skip
+	 *                    the request so the server does not return 403.
+	 *                  - `true`: force a fresh request even if a prior
+	 *                    call learned the endpoint was disabled (handles
+	 *                    server config changes between /props polls).
+	 *                  - `undefined`: proceed unless a prior call already
+	 *                    learned the endpoint is disabled, in which case
+	 *                    short-circuit to avoid re-fetching.
 	 */
 	async fetchBuiltinTools(enabled?: boolean): Promise<void> {
 		if (this._loading) return;
@@ -396,6 +400,16 @@ class ToolsStore {
 		if (enabled === false) {
 			this._toolsEndpointUnreachable = true;
 			this._builtinTools = [];
+			return;
+		}
+
+		// Already known to be disabled (e.g. /props reported
+		// builtin_tools_enabled=false). Skip the request so callers
+		// that don't pass the flag (e.g. agentic flow, tools panel)
+		// don't trigger a 403 on every invocation. An explicit
+		// `enabled === true` overrides this to support server config
+		// changes between /props polls.
+		if (enabled !== true && this._toolsEndpointUnreachable) {
 			return;
 		}
 
