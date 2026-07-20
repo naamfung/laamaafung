@@ -372,8 +372,20 @@ bool server_http_context::init(const common_params & params) {
                         return false;
                     }
                     if (isolation) {
-                        res.set_header("Cross-Origin-Embedder-Policy", "require-corp");
-                        res.set_header("Cross-Origin-Opener-Policy",   "same-origin");
+                        // COOP/COEP only take effect in secure contexts (HTTPS or
+                        // localhost). On plain HTTP with a non-localhost Host the
+                        // browser ignores them and logs a warning, so skip the
+                        // headers there to keep the console clean without changing
+                        // secure-context behavior.
+                        const auto & host = req.get_header_value("Host");
+                        const bool is_secure_origin =
+                            host.compare(0, 9, "localhost") == 0
+                            || host.compare(0, 9, "127.0.0.1") == 0
+                            || host.compare(0, 5, "[::1]")   == 0;
+                        if (is_secure_origin) {
+                            res.set_header("Cross-Origin-Embedder-Policy", "require-corp");
+                            res.set_header("Cross-Origin-Opener-Policy",   "same-origin");
+                        }
                     }
                     res.set_header("Cache-Control", "public, max-age=31536000, immutable");
                     res.set_content(reinterpret_cast<const char*>(a->data), a->size, a->type.c_str());

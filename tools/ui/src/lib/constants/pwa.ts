@@ -281,10 +281,15 @@ export const RUNTIME_CACHING = {
 	CACHE_NAME: 'api-cache'
 } as const;
 
-// Workbox runtime caching patterns
+// Workbox runtime caching patterns.
+// NOTE: /tools is intentionally excluded from STATIC_API. When the server is
+// started without --server-tools, /tools returns 403; if it appeared in this
+// pattern the service worker would still fetch it for caching, surfacing a
+// 403 in the browser console. /tools is only useful when explicitly enabled,
+// and in that case live requests are preferable to a cached response.
 export const API_CACHING_PATTERNS = {
 	V1_API: /^\/v1\/.*/,
-	STATIC_API: /^\/(health|props|models|tools|slots|cors-proxy).*/
+	STATIC_API: /^\/(health|props|models|slots|cors-proxy).*/
 } as const;
 
 // SvelteKit PWA plugin options
