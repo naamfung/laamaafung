@@ -4853,6 +4853,7 @@ void server_routes::init_routes() {
             { "build_info",                  meta->build_info },
             { "is_sleeping",                 queue_tasks.is_sleeping() },
             { "cors_proxy_enabled",          params.ui_mcp_proxy },
+            { "builtin_tools_enabled",       !params.server_tools.empty() },
         };
         if (params.use_jinja) {
             if (!tmpl_tools.empty()) {

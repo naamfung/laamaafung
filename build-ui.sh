@@ -91,9 +91,10 @@ else
 fi
 
 # Build (LLAMA_UI_VERSION / LLAMA_BUILD_NUMBER drive build.json)
-# Clean dist first so stale bundles from previous builds don't accumulate
-log "cleaning dist"
-rm -rf "$ui_src/dist"
+# Clean dist and .svelte-kit/output first so stale chunks from previous
+# builds don't accumulate and get precached by the service worker.
+log "cleaning dist and .svelte-kit/output"
+rm -rf "$ui_src/dist" "$ui_src/.svelte-kit/output"
 
 log "running $pkg_mgr run build"
 (

@@ -77,19 +77,29 @@ class ServerStore {
 		this.error = null;
 
 		const fetchPromise = (async () => {
-			try {
-				const props = await PropsService.fetch();
-				this.props = props;
-				this.error = null;
-				this.detectRole(props);
-			} catch (error: unknown) {
-				this.error = error instanceof Error ? error.message : String(error);
-				console.error('Error fetching server properties:', error);
-			} finally {
-				this.loading = false;
-				this.fetchPromise = null;
-			}
-		})();
+		try {
+			const props = await PropsService.fetch();
+			this.props = props;
+			this.error = null;
+			this.detectRole(props);
+			// Trigger built-in tools fetch now that we know whether the
+			// server was started with --tools. Passing the flag lets the
+			// toolsStore skip the /tools request (and avoid a 403) when
+			// built-in tools are disabled.
+			//
+			// Dynamic import avoids a circular dependency:
+			// server.svelte -> tools.svelte -> mcp.svelte -> server.svelte
+			void import('$lib/stores/tools.svelte').then(({ toolsStore }) =>
+				toolsStore.fetchBuiltinTools(props.builtin_tools_enabled)
+			);
+		} catch (error: unknown) {
+			this.error = error instanceof Error ? error.message : String(error);
+			console.error('Error fetching server properties:', error);
+		} finally {
+			this.loading = false;
+			this.fetchPromise = null;
+		}
+	})();
 
 		this.fetchPromise = fetchPromise;
 		await fetchPromise;

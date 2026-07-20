@@ -63,7 +63,9 @@ class ToolsStore {
 			console.error('[ToolsStore] Failed to load disabled tools from localStorage:', err);
 		}
 
-		this.fetchBuiltinTools();
+		// Built-in tools are fetched lazily after /props resolves (see
+		// serverStore.fetch) so we can skip the request entirely when the
+		// server was started without --tools, avoiding a 403 in the console.
 	}
 
 	private persistDisabledTools(): void {
@@ -379,8 +381,23 @@ class ToolsStore {
 		return this.getEnabledToolsForLLM().length > 0;
 	}
 
-	async fetchBuiltinTools(): Promise<void> {
+	/**
+	 * Fetch built-in tools from the server.
+	 *
+	 * @param enabled - Optional hint from /props (builtin_tools_enabled).
+	 *                  When explicitly `false`, skip the /tools request
+	 *                  entirely so the server does not return 403 and the
+	 *                  browser console stays clean. When `undefined` or
+	 *                  `true`, the request proceeds normally.
+	 */
+	async fetchBuiltinTools(enabled?: boolean): Promise<void> {
 		if (this._loading) return;
+
+		if (enabled === false) {
+			this._toolsEndpointUnreachable = true;
+			this._builtinTools = [];
+			return;
+		}
 
 		this._loading = true;
 		this._error = null;
