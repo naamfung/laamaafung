@@ -202,6 +202,12 @@ struct server_slot {
     int32_t     n_consecutive_repeat = 0;
     float       sampling_temp_boost  = 0.0f;
 
+    int32_t eog_retry_count = 0;
+    bool    suppress_eog    = false;
+
+    // monitoring state (persists across requests, not reset by reset())
+    int monitoring_turns = 0;
+
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_processed = 0;
     int32_t n_prompt_tokens_prefix    = -1;
@@ -319,6 +325,18 @@ struct server_slot {
         last_repeated_tok    = LLAMA_TOKEN_NULL;
         n_consecutive_repeat = 0;
         sampling_temp_boost  = 0.0f;
+
+        eog_retry_count = 0;
+        suppress_eog    = false;
+
+        if (monitoring_turns > 0) {
+            monitoring_turns--;
+            if (monitoring_turns > 0) {
+                SLT_INF(*this, "slot under high monitoring, %d turns remaining\n", monitoring_turns);
+            } else {
+                SLT_INF(*this, "%s", "slot monitoring period ended\n");
+            }
+        }
 
         if (can_speculate()) {
             spec_draft.clear();
@@ -1833,6 +1851,32 @@ static int check_tag_boundary(
     return 0;
 }
 
+// returns true if text has more occurrences of open_tag than close_tag
+static bool has_unclosed_tag(const std::string & text, const std::string & open_tag, const std::string & close_tag) {
+    size_t pos = 0;
+    int depth = 0;
+    while ((pos = text.find(open_tag, pos)) != std::string::npos) {
+        depth++;
+        pos += open_tag.size();
+    }
+    pos = 0;
+    while ((pos = text.find(close_tag, pos)) != std::string::npos) {
+        depth--;
+        pos += close_tag.size();
+    }
+    return depth > 0;
+}
+
+// returns true if there is non-whitespace after the given offset
+static bool has_visible_after(const std::string & text, size_t offset) {
+    for (size_t i = offset; i < text.size(); i++) {
+        if (!std::isspace((unsigned char) text[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
@@ -2060,6 +2104,36 @@ static int check_tag_boundary(
             }
         }
 
+        // clear EOG suppression once visible content appears
+        if (slot.suppress_eog) {
+            const auto & gt = slot.generated_text;
+            bool has_think_open  = gt.find("<think>")     != std::string::npos;
+            bool has_think_close = gt.find("</think>")    != std::string::npos;
+            bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
+
+            bool has_visible_content = false;
+            if (has_tool_call) {
+                // require all tool_call tags to be closed
+                if (!has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
+                    has_visible_content = true;
+                }
+            } else if (has_think_open) {
+                // thinking without tool call: require </think> with visible content after
+                if (has_think_close && has_visible_after(gt, gt.rfind("</think>") + 8)) {
+                    has_visible_content = true;
+                }
+            } else if (slot.n_sent_text > 0) {
+                // plain text output, no think/tool tags
+                has_visible_content = true;
+            }
+
+            if (has_visible_content) {
+                slot.suppress_eog = false;
+                common_sampler_set_suppress_eog(slot.smpl.get(), false);
+                SLT_INF(slot, "%s", "visible content detected, clearing EOG suppression\n");
+            }
+        }
+
         if (incomplete) {
             slot.has_next_token = true;
         }
@@ -2133,10 +2207,58 @@ static int check_tag_boundary(
         }
 
         if (llama_vocab_is_eog(vocab, result.tok)) {
-            slot.stop           = STOP_TYPE_EOS;
-            slot.has_next_token = false;
+            // check for early stop without output
+            bool early_stop_no_output = false;
+            if (params_base.sampling.eog_retry_max > 0 && slot.eog_retry_count < params_base.sampling.eog_retry_max) {
+                if (slot.n_sent_text == 0) {
+                    early_stop_no_output = true;
+                } else {
+                    const auto & gt = slot.generated_text;
+                    bool has_think_open  = gt.find("<think>")     != std::string::npos;
+                    bool has_think_close = gt.find("</think>")    != std::string::npos;
+                    bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
 
-            SLT_DBG(slot, "%s", "stopped by EOS\n");
+                    // thinking opened but not closed (no </think> and no <tool_call>)
+                    if (has_think_open && !has_think_close && !has_tool_call) {
+                        early_stop_no_output = true;
+                    }
+
+                    // </think> present but only whitespace after it
+                    if (!early_stop_no_output) {
+                        size_t think_end = gt.rfind("</think>");
+                        if (think_end != std::string::npos && !has_visible_after(gt, think_end + 8)) {
+                            early_stop_no_output = true;
+                        }
+                    }
+
+                    // tool_call opened but not closed
+                    if (!early_stop_no_output && has_tool_call) {
+                        if (has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
+                            early_stop_no_output = true;
+                        }
+                    }
+                }
+            }
+
+            if (early_stop_no_output) {
+                slot.suppress_eog = true;
+                slot.eog_retry_count++;
+                common_sampler_set_suppress_eog(slot.smpl.get(), true);
+                if (slot.monitoring_turns == 0) {
+                    slot.monitoring_turns = 5;
+                    SLT_WRN(slot, "early stop without output detected, entering high monitoring mode for 5 turns, suppressing EOG (retry %d/%d)\n",
+                            slot.eog_retry_count, params_base.sampling.eog_retry_max);
+                } else {
+                    SLT_WRN(slot, "early stop without output detected (under monitoring, %d turns remaining), suppressing EOG (retry %d/%d)\n",
+                            slot.monitoring_turns, slot.eog_retry_count, params_base.sampling.eog_retry_max);
+                    slot.monitoring_turns = 5;
+                }
+            } else {
+                slot.stop           = STOP_TYPE_EOS;
+                slot.has_next_token = false;
+
+                SLT_DBG(slot, "%s", "stopped by EOS\n");
+            }
         }
 
         if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold * 8) {
@@ -4353,12 +4475,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
     int32_t sse_ping_interval = params.sse_ping_interval;
 
-    try {
+    auto create_tasks = [&]() {
         std::vector<server_task> tasks;
 
         const auto & prompt = data.at("prompt");
-        // TODO: this log can become very long, put it behind a flag or think about a more compact format
-        //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
 
         if (!params.path_prompts_log_dir.empty()) {
             const auto file_path = std::filesystem::path(params.path_prompts_log_dir) / string_format("%012" PRId64 ".txt", ggml_time_ms());
@@ -4370,20 +4490,14 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             }
         }
 
-        // process prompt
         std::vector<server_tokens> inputs;
 
         if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
-            // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
             inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files));
         } else {
-            // Everything else, including multimodal completions.
             inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
         }
 
-        // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
-
-        // message delimiters for checkpointing
         auto delimiters = common_chat_msg_delimiters_parse(json_value(data, "message_delimiters", json::array()));
         delimiters.tokenize(ctx_server.vocab);
 
@@ -4405,12 +4519,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.id_slot = json_value(data, "id_slot", -1);
             sse_ping_interval = task.params.sse_ping_interval;
 
-            // OAI-compat
             task.params.res_type          = res_type;
             task.params.oaicompat_cmpl_id = completion_id;
             task.params.oaicompat_model   = meta->model_name;
 
-            // prepare child tasks
             if (task.params.n_cmpl > 1) {
                 int n_children = task.params.n_cmpl - 1;
                 for (int j = 0; j < n_children; j++) {
@@ -4421,45 +4533,81 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             tasks.push_back(std::move(task));
         }
 
-        rd.post_tasks(std::move(tasks));
-    } catch (const std::exception & e) {
-        res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
+        return tasks;
+    };
 
     bool stream = json_value(data, "stream", false);
 
     if (!stream) {
         // non-stream, wait for the results
-        auto all_results = rd.wait_for_all(req.should_stop);
-        if (all_results.is_terminated) {
-            return res; // connection is closed
-        } else if (all_results.error) {
-            res->error(all_results.error->to_json());
-            return res;
-        } else {
-            json arr = json::array();
-            for (auto & res : all_results.results) {
-                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
-                arr.push_back(res->to_json());
-            }
-            GGML_ASSERT(!arr.empty() && "empty results");
-            if (arr.size() == 1) {
-                // if single request, return single object instead of array
-                res->ok(arr[0]);
-            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
-                // if multiple results in OAI format, we need to re-format them
-                json & choices = arr[0]["choices"];
-                for (size_t i = 1; i < arr.size(); i++) {
-                    choices.push_back(std::move(arr[i]["choices"][0]));
+        int http_retry = 0;
+        const int http_retry_max = params.sampling.eog_retry_max;
+
+        while (true) {
+            try {
+                auto tasks = create_tasks();
+                if (http_retry > 0) {
+                    for (auto & task : tasks) {
+                        if (http_retry >= 2) {
+                            task.params.sampling.seed += http_retry;
+                        }
+                    }
+                    SRV_WRN("empty output, retrying non-stream completion (%d/%d)\n", http_retry, http_retry_max);
                 }
-                res->ok(arr[0]);
-            } else {
-                // multi-results, non-OAI compat
-                res->ok(arr);
+                rd.post_tasks(std::move(tasks));
+            } catch (const std::exception & e) {
+                res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+                return res;
             }
+
+            auto all_results = rd.wait_for_all(req.should_stop);
+            if (all_results.is_terminated) {
+                return res;
+            } else if (all_results.error) {
+                res->error(all_results.error->to_json());
+                return res;
+            }
+
+            // check for empty output
+            bool has_output = false;
+            for (auto & result : all_results.results) {
+                auto * final_result = dynamic_cast<server_task_result_cmpl_final*>(result.get());
+                if (final_result && (!final_result->oaicompat_msg.content.empty() || !final_result->oaicompat_msg.tool_calls.empty())) {
+                    has_output = true;
+                    break;
+                }
+            }
+
+            if (has_output || http_retry >= http_retry_max) {
+                json arr = json::array();
+                for (auto & result : all_results.results) {
+                    GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr);
+                    arr.push_back(result->to_json());
+                }
+                GGML_ASSERT(!arr.empty() && "empty results");
+                if (arr.size() == 1) {
+                    res->ok(arr[0]);
+                } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
+                    json & choices = arr[0]["choices"];
+                    for (size_t i = 1; i < arr.size(); i++) {
+                        choices.push_back(std::move(arr[i]["choices"][0]));
+                    }
+                    res->ok(arr[0]);
+                } else {
+                    res->ok(arr);
+                }
+                break;
+            }
+
+            http_retry++;
         }
     } else {
+        try {
+            rd.post_tasks(create_tasks());
+        } catch (const std::exception & e) {
+            res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
         // in streaming mode, the first error must be treated as non-stream response
         // this is to match the OAI API behavior
         // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309

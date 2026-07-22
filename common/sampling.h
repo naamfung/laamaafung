@@ -49,6 +49,8 @@ void common_sampler_free(struct common_sampler * gsmpl);
 
 void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost);
 
+void common_sampler_set_suppress_eog(struct common_sampler * gsmpl, bool suppress);
+
 // if is_generated is true, the token is accepted by the sampling chain, the reasoning budget sampler, and the grammar sampler
 void                    common_sampler_accept(struct common_sampler * gsmpl, llama_token token, bool is_generated);
 void                    common_sampler_reset (struct common_sampler * gsmpl);

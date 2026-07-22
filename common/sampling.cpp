@@ -126,6 +126,8 @@ struct common_sampler {
 
     float temp_boost = 0.0f;
 
+    bool suppress_eog = false;
+
     void reset() {
         prev.clear();
 
@@ -136,6 +138,8 @@ struct common_sampler {
         }
 
         temp_boost = 0.0f;
+
+        suppress_eog = false;
 
         if (rbudget) {
             llama_sampler_reset(rbudget);
@@ -628,6 +632,12 @@ void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost) {
     }
 }
 
+void common_sampler_set_suppress_eog(struct common_sampler * gsmpl, bool suppress) {
+    if (gsmpl) {
+        gsmpl->suppress_eog = suppress;
+    }
+}
+
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
     return new common_sampler {
         /* .params         = */ gsmpl->params,
@@ -739,6 +749,21 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
         const float inv_temp = 1.0f / (1.0f + gsmpl->temp_boost);
         for (size_t i = 0; i < cur_p.size; i++) {
             cur_p.data[i].logit *= inv_temp;
+        }
+    }
+
+    if (gsmpl->suppress_eog) {
+        for (const auto & lb : gsmpl->params.logit_bias_eog) {
+            if (lb.token >= 0 && cur_p.size > (size_t) lb.token && cur_p.data[lb.token].id == lb.token) {
+                cur_p.data[lb.token].logit = -INFINITY;
+            } else {
+                for (size_t i = 0; i < cur_p.size; ++i) {
+                    if (cur_p.data[i].id == lb.token) {
+                        cur_p.data[i].logit = -INFINITY;
+                        break;
+                    }
+                }
+            }
         }
     }
 

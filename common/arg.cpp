@@ -2165,6 +2165,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sampling());
     add_opt(common_arg(
+        {"--eog-retry-max"}, "N",
+        string_format("max EOG suppression retries when model stops without visible output after thinking (default: %d, 0 = disabled)", params.sampling.eog_retry_max),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid eog-retry-max = %d\n", value));
+            }
+            params.sampling.eog_retry_max = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
         {"--dry-sequence-breaker"}, "STRING",
         string_format("add sequence breaker for DRY sampling, clearing out default breakers (%s) in the process; use \"none\" to not use any sequence breakers\n",
             params.sampling.dry_sequence_breakers.empty() ? "none" :
