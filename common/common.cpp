@@ -1371,8 +1371,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
+    // ctx_shift now controls only runtime K-shift; initial prompt truncation
+    // is handled by prompt_truncate (independently or implied by ctx_shift).
     if (params.ctx_shift && !llama_memory_can_shift(llama_get_memory(lctx))) {
-        COM_WRN("%s", "KV cache shifting is not supported for this context, disabling KV cache shifting\n");
+        COM_WRN("%s", "KV cache shifting is not supported for this context, disabling runtime context shift (initial prompt truncation is unaffected)\n");
         params.ctx_shift = false;
     }
 
