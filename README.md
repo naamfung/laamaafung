@@ -8,19 +8,13 @@
 
 ### 克隆指南
 
-推薦優先克隆穩定分支 `v5`，適合穩定使用。
+推薦優先克隆穩定分支 `v6`，適合穩定使用。
 
 如須測試最新功能，可以克隆開發分支 `master`。
 
 - **克隆穩定分支（推薦）**：
   ```sh
-  git clone -b v5 https://github.com/naamfung/laamaafung.git
-  ```
-
-- **回退版本（v3）**：
-  如須使用舊版穩定分支 `v3`，可執行：
-  ```sh
-  git clone -b v3 https://github.com/naamfung/laamaafung.git
+  git clone -b v6 https://github.com/naamfung/laamaafung.git
   ```
 
 - **克隆開發分支**：
@@ -86,6 +80,44 @@
 升溫原理與 `--repeat-line-temp-boost` 相同：對所有候選 token 的 logit 乘以 `1/(1+boost)`，等效於臨時提高採樣溫度。一旦生成的 token 不再重複，boost 立即歸零，恢復正常採樣。
 
 **與 `--repeat_penalty` / `--presence_penalty` 的區別：** 這兩個參數對已出現過的 token 施加持續性懲罰（降低其 logit），但對同一 token 連續出現的硬性失控無效。原因是：當模型對某 token（如 `</`）的 logit 遠高於所有其他候選 token 時，即使施加 1.5x 或 2.0x 的懲罰，此 token 仍然具有最高概率，模型會繼續選擇它，形成死循環。本機制不行"懲罰重複 token"的路線，而是通過升溫（壓縮所有 logit 差距）令低概率 token 獲得被選中的機會，從根本上打破循環。
+
+#### 早停檢測與 EOG 抑制（Early-Stop Detection & EOG Suppression）
+
+當模型在思考完成後未產生任何可見輸出就自動停止（例如思考結束但無正文回答，或工具調用被截斷），客戶端會收到空響應且無明顯錯誤。流式模式下此問題尤其嚴重：用戶可能完全不會察覺本回合已丟失。本機制通過雙層設計驅動模型持續生成直至出現真實內容，並對觸發此機制的 slot 開啟 5 回合高強度監控。
+
+| 參數 | 類型 | 預設值 | 描述 |
+| --- | --- | --- | --- |
+| `--eog-retry-max N` | 整數 | 3 | 早停檢測觸發後的最大重試次數（0 = 禁用）。同時控制 slot 層 EOG 抑制次數和 HTTP 層非流式重試次數。 |
+
+**雙層架構設計：**
+
+1. **Slot 層 EOG 攔截（流式透明）** - 在 `process_token()` 中，當採樣到 EOG token 時檢查 `slot.generated_text` 判斷是否為缺陷性早停。若是，則不設置 `STOP_TYPE_EOS`，而是啟用 EOG 抑制（`common_sampler_set_suppress_eog`），將所有 EOG token 的 logit 強制設為 `-INFINITY`，令 sampler 返回次優 token 以繼續生成。由於抑制發生在 sampler 內部，流式客戶端看到的是不中斷的 token 流，無需倒帶或重啟，且正常路徑與投機採樣路徑（共用 `common_sampler_sample()`）均被覆蓋。
+
+2. **HTTP 層重試（非流式）** - 對非流式請求，`handle_completions_impl()` 將任務創建封裝為 `create_tasks` lambda 並運行重試循環：若最終結果的 `oaicompat_msg.content` 與 `tool_calls` 均為空，則重新提交任務。從第 2 次重試起 bump 採樣種子（`seed += http_retry`）以避免重複採樣同一死胡同。循環受 `--eog-retry-max` 約束。
+
+**早停檢測條件（任一命中即判定）：**
+
+| 條件 | 場景說明 |
+| --- | --- |
+| `n_sent_text == 0` | 完全無任何輸出 |
+| `<think>` 已開啟但無 `</think>` 且無 `<tool_call>` | 思考未閉合（`tagged_thinking_tools` 模板允許 `<tool_call>` 作為思考結束標籤，故有 `<tool_call>` 即視為思考已閉合） |
+| `</think>` 存在其後僅空白 | 思考結束但無正文內容 |
+| `<tool_call>` 已開啟但未閉合（`#<tool_call> > #</tool_call>`） | 工具調用被截斷（模型決定調用工具，輸出部分 JSON 後早停） |
+
+**EOG 抑制清除條件：**
+
+每個 token 採樣後（不僅 EOG），若 `slot.suppress_eog` 已設置則檢查是否已出現真實內容並清除標誌：
+- 有 `<tool_call>`：要求所有 `<tool_call>` 標籤均已閉合
+- 僅有 `<think>`：要求 `</think>` 後有非空白內容
+- 純文本（無 think/tool 標籤）：`n_sent_text > 0`
+
+**Per-slot 5 回合監控：**
+
+觸發早停檢測時 `slot.monitoring_turns = 5`。此字段不被 `slot.reset()` 重置，而是在 `reset()` 中遞減，故跨同一對話的後續回合持久（`slot.id` 為天然 per-conversation 隔離鍵，免費支援並發）。若監控期間再次觸發早停，計數器重置為 5 並記錄警告。這為運維者提供了 slot 行為異常的可見信號。
+
+**重試預算：**
+- `--eog-retry-max` 同時控制 slot 層抑制次數與 HTTP 層非流式重試次數
+- `slot.eog_retry_count` 由 `slot.reset()` 重置，故預算按請求計算（`monitoring_turns` 為 per-conversation 信號）
 
 #### 上下文遷移的標籤邊界保護
 
