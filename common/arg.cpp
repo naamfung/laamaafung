@@ -1494,8 +1494,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         string_format("whether to use context shift on infinite text generation (default: %s)", params.ctx_shift ? "enabled" : "disabled"),
         [](common_params & params, bool value) {
             params.ctx_shift = value;
+            if (value) {
+                params.prompt_truncate = true;
+            }
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LLAMA_ARG_CONTEXT_SHIFT"));
+    add_opt(common_arg(
+        {"--prompt-truncate"},
+        {"--no-prompt-truncate"},
+        string_format("whether to truncate initial prompt to fit context, keeping head + tail (default: %s). Implied by --context-shift", params.prompt_truncate ? "enabled" : "disabled"),
+        [](common_params & params, bool value) {
+            params.prompt_truncate = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PROMPT_TRUNCATE"));
     add_opt(common_arg(
         {"--chunks"}, "N",
         string_format("max number of chunks to process (default: %d, -1 = all)", params.n_chunks),

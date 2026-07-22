@@ -618,6 +618,7 @@ struct common_params {
     bool no_perf           = false; // disable performance metrics
     bool show_timings      = true;  // show timing information on CLI
     bool ctx_shift         = false; // context shift on infinite text generation
+    bool prompt_truncate   = false; // truncate initial prompt to fit context (keeps head + tail)
     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
     bool kv_unified        = false; // enable unified KV cache
 
