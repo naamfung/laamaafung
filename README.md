@@ -8,19 +8,19 @@
 
 ### 克隆指南
 
-推薦優先克隆穩定分支 `v6`，適合穩定使用。
+推薦優先克隆穩定分支 `v7`，適合穩定使用。
 
 如須測試最新功能，可以克隆開發分支 `master`。
 
 - **克隆穩定分支（推薦）**：
   ```sh
-  git clone -b v6 https://github.com/naamfung/laamaafung.git
+  git clone -b v7 https://github.com/naamfung/laamaafung.git
   ```
 
-- **回退版本（v5）**：
-  如須使用舊版穩定分支 `v5`，可執行：
+- **回退版本（v6）**：
+  如須使用舊版穩定分支 `v6`，可執行：
   ```sh
-  git clone -b v5 https://github.com/naamfung/laamaafung.git
+  git clone -b v6 https://github.com/naamfung/laamaafung.git
   ```
 
 - **克隆開發分支**：
@@ -33,7 +33,7 @@
 啟動示例：
 
 ```sh
-D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "...enough. Need to give the final output now!" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --prompt-truncate --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --no-mmap --mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --prompt-truncate --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --no-mmap --mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 #### 啟動參數與工作原理說明
@@ -54,7 +54,7 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 如果須要處理可能超過上下文限制的請求，可以加入 `--prompt-truncate`（初始截斷）或 `--context-shift`（運行時 K-shift，隱含啟用初始截斷）。對於真正採用 SWA 架構的模型，若需要生成階段的運行時 K-shift 完整可用，須同時加入 `--swa-full`：
 
 ```sh
-./laamaafung/build/bin/Release/llama-server.exe --model /path/to/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "...enough. Need to give the final output now!" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --no-mmap --mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --context-shift --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --verbosity 5 --chat-template-file /path/to/iStartModel/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+./laamaafung/build/bin/Release/llama-server.exe --model /path/to/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --no-mmap --mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --context-shift --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --verbosity 5 --chat-template-file /path/to/iStartModel/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 > **注意：** Qwen3.5/3.6 系列模型（MoE 與稠密變體）採用混合注意力機制（門控 DeltaNet 線性注意力 + 門控注意力），並非標準的滑動窗口注意力架構，GGUF 模型頭中 `n_swa = 0`。因此 `--swa-full` 對這些模型無效，載入時會自動檢測並禁用同時彈出警告 `swa_full is not supported by this model, it will be disabled`，此為正確行為，llama.cpp 已自動安全降級。`--context-shift` 會因 K-shift 不可用而自動禁用並警告，但 `--prompt-truncate` 不受影響，初始 prompt 截斷仍然生效。生成階段到達 context 上限時會優雅停止（`STOP_TYPE_LIMIT`）。Qwen3.5/3.6 系列本身支援長上下文（如 256K/512K），無需依賴 SWA 即可高效處理長序列。若想消除日誌噪音，請直接移除 `--swa-full`。`--swa-full` 僅對 GGUF 文件頭中明確聲明滑動窗口注意力且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。
@@ -122,6 +122,24 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 **Per-slot 5 回合監控：**
 
 觸發早停檢測時 `slot.monitoring_turns = 5`。此字段不被 `slot.reset()` 重置，而是在 `reset()` 中遞減，故跨同一對話的後續回合持久（`slot.id` 為天然 per-conversation 隔離鍵，免費支援並發）。若監控期間再次觸發早停，計數器重置為 5 並記錄警告。這為運維者提供了 slot 行為異常的可見信號。
+
+**隱藏自檢 turn（監控增強）：**
+
+單純的早停條件檢查無法區分"模型已正常完成簡短回覆"與"模型異常截斷"兩種場景。為此監控機制在觸發早停時不直接抑制 EOG，而是先注入一個對客戶端透明的隱藏 turn，讓模型自判回覆是否完整，再根據判定結果決定是否抑制 EOG 並繼續生成。自檢使用內部協議標記 `<complete>` / `<incomplete>`，不依賴任何廠商特定標籤（如 `<think>`、`<tool_call>`），故通用於 Qwen、Gemma 等所有模型。
+
+自檢狀態機（per-slot，`SELF_CHECK_*` 階段）：
+
+```
+NONE -> PREFILL -> GENERATING -> {NONE | ROLLBACK} -> NONE
+```
+
+1. **NONE -> PREFILL**：`process_token()` 中 `early_stop_no_output` 為真且 `cached_messages` 非空時觸發。`build_self_check_prompt()` 通過 `common_chat_format_single()` 構建增量 prompt（`past_msg = cached_messages + assistant_msg(generated_text)`，`new_msg = user "Review completeness, output <complete>/<incomplete>"`），tokenize 後入隊 `self_check_prefill`。
+2. **PREFILL -> GENERATING**：`handle_last_sampled_token()` 將觸發 EOS 以 `output=false` 加入 batch，隨後追加 prefill tokens（末 token `output=true`）。保存回滾狀態（KV 位置、prompt 大小、EOS token id），sampler 同步接受每個 prefill token 以保持懲罰/repeat 狀態一致。
+3. **GENERATING**：`process_token()` 將自檢回覆 token 路由至 `handle_self_check_token()`，累積文本至 `self_check_text`（清空 `text_to_send` 對客戶端隱藏），監測 `<complete>`/`<incomplete>` 標記。安全閥：回覆超過 64 字符仍無標記時保守判定為 incomplete。
+4. **完整判定**：`<complete>` -> `STOP_TYPE_EOS`，自檢 turn 留在 cache 中由下個請求覆蓋；`<incomplete>` -> 進入 `ROLLBACK`。
+5. **ROLLBACK -> NONE**：`handle_last_sampled_token()` 通過 `common_context_seq_rm()` 從 KV cache 截斷整個自檢 turn，`keep_first()` 截斷 `prompt.tokens`，重新以 `output=true` 評估觸發 EOS，arm EOG 抑制後模型在原回覆上繼續生成。
+
+自檢全過程所有 token 的 `text_to_send` 均被清空，流式與非流式客戶端均無感知。`generated_text`、stop-word 偵測、partial response、EOG 早停邏輯在 GENERATING 階段全部旁路。
 
 **重試預算：**
 - `--eog-retry-max` 同時控制 slot 層抑制次數與 HTTP 層非流式重試次數

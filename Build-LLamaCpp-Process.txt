@@ -1,0 +1,71 @@
+编译LLAMACPP过程
+
+配置与编译：
+cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build -j --config Release
+
+
+--------------------------------------------------------------------------
+
+详情：
+
+https://visualstudio.microsoft.com/zh-hant/visual-cpp-build-tools/
+https://aka.ms/vs/stable/vs_BuildTools.exe
+
+
+必须先安装Visual Studio 2022，安装时勾选「使用C++的桌面开发」，https://aka.ms/vs/17/release/vs_community.exe
+安装CMake version 3.31.12，https://cmake.org/download/，https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-windows-x86_64.msi
+必须最后再安装CUDA 12.8.2
+https://developer.nvidia.com/cuda-toolkit-archive
+
+CUDA 12.8.2仅有林纳斯与视窗系统可选：
+https://developer.nvidia.com/cuda-12-8-2-download-archive
+
+视窗系统：
+https://developer.download.nvidia.com/compute/cuda/12.8.2/local_installers/cuda_12.8.2_572.61_windows.exe
+
+下载并解压LLAMACPP正式发行版源码，不要直接克隆仓库：
+https://github.com/ggml-org/llama.cpp/releases
+当前使用版本乃系 b8250
+在Windows开始菜单中搜索：
+x64 Native Tools Command Prompt for VS 2022
+并“以管理员身份运行”之后cd 导航到源码目录
+
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+或
+cmake -B build -DGGML_CUDA=ON
+
+编译构建：
+cmake --build build -j --config Release
+
+
+或分步执行
+创建并切换至构建目录
+mkdir build
+cd build
+配置 CMake 启用 CUDA：
+cmake .. -G "Visual Studio 17 2022" -A x64 -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+
+编译构建：
+cmake --build . --config Release -j
+
+
+测试过程：
+============================================================================
+提问标准：
+帮我写个Golang版的FIB最优算法
+
+GTX760:
+----------------------------------------------------------------------------
+./llama-cli.exe -m C:/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 5 -t 10 -c 4096 -b 65536
+[ Prompt: 26.5 t/s | Generation: 9.6 t/s ]
+----------------------------------------------------------------------------
+./llama-cli.exe -m C:/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 5 -t 10 -c 262144 -b 65536
+[ Prompt: 12.9 t/s | Generation: 9.7 t/s ]　<===============================
+----------------------------------------------------------------------------
+./llama-cli.exe -m C:/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 5 -t 10 -c 262144 -b 65536 -fa on
+[ Prompt: 14.0 t/s | Generation: 9.7 t/s ]
+----------------------------------------------------------------------------
+./llama-cli.exe -m C:/models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf -ngl 5 -t 10 -c 131072 -b 65536
+[ Prompt: 26.8 t/s | Generation: 9.6 t/s ]　<===============================
