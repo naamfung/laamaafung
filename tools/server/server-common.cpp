@@ -1116,6 +1116,11 @@ json oaicompat_chat_params_parse(
 
     llama_params["message_delimiters"] = chat_params.message_delimiters.to_json();
 
+    // cache original messages (after media_marker rewrite) so the slot can build
+    // a hidden self-check turn later without re-parsing the HTTP body
+    llama_params["original_messages"] = messages;
+    llama_params["chat_use_jinja"]    = opt.use_jinja;
+
     // Reasoning budget: pass parameters through to sampling layer
     {
         int reasoning_budget = json_value(body, "thinking_budget_tokens", -1);

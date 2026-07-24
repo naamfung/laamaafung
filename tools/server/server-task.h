@@ -94,6 +94,12 @@ struct task_params {
     // message spans for checkpointing
     common_chat_msg_spans message_spans;
 
+    // original chat messages (JSON, after media_marker rewrite) + jinja flag,
+    // used by the slot to construct a hidden self-check turn when early-stop
+    // monitoring is triggered. Empty for non-chat endpoints.
+    json original_messages;
+    bool chat_use_jinja = false;
+
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
 

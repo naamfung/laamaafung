@@ -736,6 +736,14 @@ task_params eval_llama_cmpl_schema(
                 params.sampling.reasoning_budget_forced.size());
     }
 
+    // original messages for hidden self-check turn (only present for /chat/completions)
+    if (data.contains("original_messages")) {
+        params.original_messages = data.at("original_messages");
+    }
+    if (data.contains("chat_use_jinja")) {
+        params.chat_use_jinja = data.at("chat_use_jinja").get<bool>();
+    }
+
     return params;
 }
 

@@ -211,6 +211,40 @@ struct server_slot {
     // monitoring state (persists across requests, not reset by reset())
     int monitoring_turns = 0;
 
+    // cached original chat messages + jinja flag, used to construct a hidden
+    // self-check turn when early-stop monitoring triggers. Populated at launch,
+    // cleared at reset(). tmpls pointer is NOT stored here: it lives on the
+    // server_context (chat_params.tmpls) and is accessed via the outer object.
+    std::vector<common_chat_msg> cached_messages;
+    bool                         chat_use_jinja = false;
+
+    // hidden self-check turn state (see SELF_CHECK_* phases below)
+    //   NONE        -> inactive
+    //   PREFILL     -> self-check prompt tokens queued, will be batched in
+    //                  handle_last_sampled_token() alongside the triggering EOS
+    //   GENERATING  -> self-check reply being sampled; tokens are hidden from
+    //                  the client (text_to_send cleared) until the reply ends
+    //   ROLLBACK    -> self-check ended with "incomplete"; handle_last_sampled_token()
+    //                  must truncate the self-check turn from the KV cache and
+    //                  prompt, then re-evaluate the triggering EOS with output=true
+    //                  so the model can resume the original reply under EOG suppression
+    enum self_check_phase_t {
+        SELF_CHECK_NONE,
+        SELF_CHECK_PREFILL,
+        SELF_CHECK_GENERATING,
+        SELF_CHECK_ROLLBACK,
+    };
+    self_check_phase_t self_check_phase   = SELF_CHECK_NONE;
+    llama_tokens       self_check_prefill;      // prompt tokens to prefill
+    std::string        self_check_text;         // accumulated hidden reply
+    bool               self_check_complete = false; // parsed result of last check
+
+    // rollback bookkeeping (populated when SELF_CHECK_PREFILL is entered,
+    // consumed when SELF_CHECK_ROLLBACK is processed in handle_last_sampled_token)
+    size_t      self_check_rollback_size = 0;   // prompt.tokens.size() including the triggering EOS, before prefill
+    llama_pos   self_check_rollback_pos  = -1;  // KV position of the triggering EOS
+    llama_token self_check_eos_token     = LLAMA_TOKEN_NULL;  // the EOS token to re-evaluate
+
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_processed = 0;
     int32_t n_prompt_tokens_prefix    = -1;
@@ -342,6 +376,17 @@ struct server_slot {
                 SLT_INF(*this, "%s", "slot monitoring period ended\n");
             }
         }
+
+        cached_messages.clear();
+        chat_use_jinja = false;
+
+        self_check_phase      = SELF_CHECK_NONE;
+        self_check_prefill.clear();
+        self_check_text.clear();
+        self_check_complete   = false;
+        self_check_rollback_size = 0;
+        self_check_rollback_pos  = -1;
+        self_check_eos_token     = LLAMA_TOKEN_NULL;
 
         if (can_speculate()) {
             spec_draft.clear();
@@ -480,14 +525,74 @@ struct server_slot {
     // add sampled token of this slot to the batch, optionally add the speculative draft tokens if any
     void handle_last_sampled_token(server_batch & batch) {
         bool add_ok = true;
+        // when true, this branch has already pushed the sampled token (and the
+        // self-check prefill) into prompt.tokens, so the trailing unified
+        // push_back/insert must be skipped.
+        bool self_check_managed = false;
         if (spec_draft.empty()) {
             // no speculative decoding
-            i_batch = batch.size();
+            if (self_check_phase == SELF_CHECK_PREFILL && !self_check_prefill.empty()) {
+                // Hidden self-check turn: the triggering EOS is kept in the
+                // context (output=false, no logits needed), then the prefill
+                // tokens are appended; the last prefill token carries output
+                // =true so the next sample produces the self-check reply.
+                self_check_managed = true;
 
-            add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true);
+                // save rollback bookkeeping BEFORE mutating prompt.tokens
+                self_check_rollback_pos = prompt.tokens.pos_next(); // position where EOS will land
+                self_check_eos_token    = sampled;
 
-            SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
-                    sampled, n_ctx, prompt.n_tokens(), truncated);
+                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), false);
+                prompt.tokens.push_back(sampled);
+                self_check_rollback_size = prompt.n_tokens(); // includes EOS, before prefill
+
+                for (auto token : self_check_prefill) {
+                    add_ok &= batch.add(id, token, prompt.tokens.pos_next(), false);
+                    prompt.tokens.push_back(token);
+                    // keep the sampler in sync with the injected tokens so
+                    // penalties/repeat state stay consistent
+                    if (smpl) {
+                        common_sampler_accept(smpl.get(), token, false);
+                    }
+                }
+                batch.set_output(batch.size() - 1, true);
+                i_batch = batch.size() - 1;
+
+                SLT_INF(*this, "self-check prefill appended (%zu tokens), entering hidden generation\n",
+                        self_check_prefill.size());
+                self_check_phase = SELF_CHECK_GENERATING;
+                self_check_prefill.clear();
+            } else if (self_check_phase == SELF_CHECK_ROLLBACK) {
+                // Self-check ended with "incomplete": truncate the entire
+                // self-check turn (EOS + prefill + reply) from KV cache and
+                // prompt.tokens, then re-add the triggering EOS with output=true
+                // so the next sample produces a continuation token under EOG
+                // suppression.  This mirrors the "force re-evaluation of last
+                // token" pattern used elsewhere in the file.
+                self_check_managed = true;
+
+                common_context_seq_rm(ctx_tgt, id, self_check_rollback_pos, -1);
+                if (ctx_dft) {
+                    common_context_seq_rm(ctx_dft, id, self_check_rollback_pos, -1);
+                }
+                prompt.tokens.keep_first(self_check_rollback_size - 1);
+
+                i_batch = batch.size();
+                add_ok &= batch.add(id, self_check_eos_token, self_check_rollback_pos, true);
+                prompt.tokens.push_back(self_check_eos_token);
+
+                SLT_INF(*this, "%s", "self-check rollback complete, re-evaluating EOS with output=true\n");
+                self_check_phase     = SELF_CHECK_NONE;
+                self_check_complete  = false;
+                self_check_eos_token = LLAMA_TOKEN_NULL;
+            } else {
+                i_batch = batch.size();
+
+                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true);
+
+                SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
+                        sampled, n_ctx, prompt.n_tokens(), truncated);
+            }
         } else {
             SLT_DBG(*this, "generate_draft: id=%d, #tokens=%zu, #draft=%zu, pos_next=%d\n",
                     sampled, prompt.tokens.size(), spec_draft.size(), prompt.tokens.pos_next());
@@ -509,8 +614,10 @@ struct server_slot {
 
         GGML_ASSERT(add_ok && "batch must be large enough to hold the sampled and draft tokens");
 
-        prompt.tokens.push_back(sampled);
-        prompt.tokens.insert(spec_draft);
+        if (!self_check_managed) {
+            prompt.tokens.push_back(sampled);
+            prompt.tokens.insert(spec_draft);
+        }
     }
 
     void release() {
@@ -2026,6 +2133,18 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             slot.smpl.reset();
         }
 
+        // cache original chat messages for hidden self-check turn construction
+        if (!task.params.original_messages.is_null() && task.params.original_messages.is_array()) {
+            try {
+                slot.cached_messages  = common_chat_msgs_parse_oaicompat(task.params.original_messages);
+                slot.chat_use_jinja   = task.params.chat_use_jinja;
+            } catch (const std::exception & e) {
+                SLT_WRN(slot, "failed to parse original_messages for self-check: %s\n", e.what());
+                slot.cached_messages.clear();
+                slot.chat_use_jinja = false;
+            }
+        }
+
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         slot.state = slot.task->is_child()
@@ -2039,10 +2158,126 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         return true;
     }
 
+    // Build the hidden self-check prompt as a chat-template *increment*.
+    //
+    // past_msg = cached_messages + an assistant message carrying the text the
+    //            model has produced so far this turn (generated_text)
+    // new_msg  = a user message asking the model to judge whether its prior
+    //            reply is complete
+    //
+    // common_chat_format_single returns only the delta relative to past_msg, so
+    // the result is short (just the user question + the assistant generation
+    // prompt) and can be appended to the current context without re-evaluating
+    // the whole history.
+    //
+    // The <complete>/<incomplete> markers are an internal protocol and do not
+    // depend on any vendor-specific tags (e.g. <think>, <tool_call>), so the
+    // self-check works uniformly across Qwen, Gemma, etc.
+    std::string build_self_check_prompt(const server_slot & slot) {
+        if (slot.cached_messages.empty()) {
+            return "";
+        }
+
+        std::vector<common_chat_msg> past_msg = slot.cached_messages;
+
+        common_chat_msg assistant_msg;
+        assistant_msg.role    = "assistant";
+        assistant_msg.content = slot.generated_text;
+        past_msg.push_back(std::move(assistant_msg));
+
+        common_chat_msg user_msg;
+        user_msg.role    = "user";
+        user_msg.content =
+            "Review your previous response for completeness. "
+            "If it is complete and not truncated, output <complete>. "
+            "If it is incomplete, truncated, or missing an intended tool call, "
+            "output <incomplete>. Output only the tag.";
+        return common_chat_format_single(chat_params.tmpls.get(),
+                                         past_msg,
+                                         user_msg,
+                                         /*add_ass=*/true,
+                                         slot.chat_use_jinja);
+    }
+
+    // Process one token of a hidden self-check reply. Tokens are hidden from
+    // the client (text_to_send cleared). When a <complete>/<incomplete> marker
+    // is seen, or the model emits EOS, the self-check phase ends:
+    //   - complete  -> end generation normally (STOP_TYPE_EOS); the self-check
+    //                  turn stays in cache but will be overwritten by the next
+    //                  request's prompt
+    //   - incomplete -> transition to SELF_CHECK_ROLLBACK; handle_last_sampled_token()
+    //                  will truncate the entire self-check turn (EOS + prefill +
+    //                  reply) from the KV cache and prompt, re-evaluate the EOS
+    //                  with output=true, and arm EOG suppression so the model
+    //                  resumes the original reply
+    // If no marker is found before EOS, default to incomplete (conservative).
+    bool handle_self_check_token(completion_token_output & result, server_slot & slot) {
+        const std::string token_str = result.text_to_send;
+        slot.self_check_text += token_str;
+        // hidden from the client
+        result.text_to_send = "";
+        slot.has_next_token = true;
+
+        bool got_result = false;
+        if (slot.self_check_text.find("<complete>") != std::string::npos) {
+            slot.self_check_complete = true;
+            got_result = true;
+        } else if (slot.self_check_text.find("<incomplete>") != std::string::npos) {
+            slot.self_check_complete = false;
+            got_result = true;
+        }
+
+        // safety valve: if the model rambles without producing a marker,
+        // cut it short and default to incomplete (conservative). 64 chars is
+        // ample for "<complete>" / "<incomplete>" plus a few tokens of preamble.
+        if (!got_result && slot.self_check_text.size() > 64) {
+            got_result = true;
+            slot.self_check_complete = false;
+            SLT_WRN(slot, "%s", "self-check reply exceeded 64 chars without marker, defaulting to incomplete\n");
+        }
+
+        if (got_result || llama_vocab_is_eog(vocab, result.tok)) {
+            slot.self_check_text.clear();
+
+            if (!got_result) {
+                // no marker found - be conservative, treat as incomplete
+                slot.self_check_complete = false;
+            }
+
+            if (slot.self_check_complete) {
+                SLT_INF(slot, "%s", "self-check result: complete, allowing EOS\n");
+                slot.self_check_phase = server_slot::SELF_CHECK_NONE;
+                slot.stop           = STOP_TYPE_EOS;
+                slot.has_next_token = false;
+            } else {
+                SLT_WRN(slot, "%s", "self-check result: incomplete, will rollback and resume under EOG suppression\n");
+                // Defer the actual truncation to handle_last_sampled_token(),
+                // which runs next and owns the batch + KV cache.
+                // suppress_eog is armed here so the sampler (restored or not)
+                // has it set before the next sample.
+                slot.suppress_eog = true;
+                common_sampler_set_suppress_eog(slot.smpl.get(), true);
+                slot.self_check_phase = server_slot::SELF_CHECK_ROLLBACK;
+                slot.has_next_token = true;
+            }
+        }
+
+        return slot.has_next_token;
+    }
+
     bool process_token(completion_token_output & result, server_slot & slot) {
         // remember which tokens were sampled - used for repetition penalties during sampling
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
+
+        // Hidden self-check reply: route tokens through a dedicated handler that
+        // accumulates them internally (hidden from the client) and watches for
+        // <complete>/<incomplete> markers. Skip all normal processing so the
+        // self-check reply never pollutes generated_text, stop-word detection,
+        // partial responses, or the EOS early-stop logic.
+        if (slot.self_check_phase == server_slot::SELF_CHECK_GENERATING) {
+            return handle_self_check_token(result, slot);
+        }
 
         if (result.tok == slot.last_repeated_tok) {
             slot.n_consecutive_repeat++;
@@ -2288,17 +2523,42 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             }
 
             if (early_stop_no_output) {
-                slot.suppress_eog = true;
                 slot.eog_retry_count++;
-                common_sampler_set_suppress_eog(slot.smpl.get(), true);
-                if (slot.monitoring_turns == 0) {
-                    slot.monitoring_turns = 5;
-                    SLT_WRN(slot, "early stop without output detected, entering high monitoring mode for 5 turns, suppressing EOG (retry %d/%d)\n",
-                            slot.eog_retry_count, params_base.sampling.eog_retry_max);
-                } else {
-                    SLT_WRN(slot, "early stop without output detected (under monitoring, %d turns remaining), suppressing EOG (retry %d/%d)\n",
-                            slot.monitoring_turns, slot.eog_retry_count, params_base.sampling.eog_retry_max);
-                    slot.monitoring_turns = 5;
+
+                // arm monitoring regardless of which path is taken below
+                slot.monitoring_turns = 5;
+
+                // Try a hidden self-check turn first: ask the model whether its
+                // reply is complete.  This gates the EOS decision on the model's
+                // own judgement rather than blindly suppressing EOG.  The
+                // self-check prompt is an internal protocol using generic
+                // <complete>/<incomplete> markers that work across all vendors.
+                bool self_check_armed = false;
+                if (!slot.cached_messages.empty() && slot.self_check_phase == server_slot::SELF_CHECK_NONE) {
+                    std::string sc_prompt = build_self_check_prompt(slot);
+                    if (!sc_prompt.empty()) {
+                        llama_tokens sc_tokens = common_tokenize(ctx_tgt, sc_prompt, false, true);
+                        if (!sc_tokens.empty()) {
+                            slot.self_check_prefill  = std::move(sc_tokens);
+                            slot.self_check_phase    = server_slot::SELF_CHECK_PREFILL;
+                            slot.self_check_complete = false;
+                            slot.self_check_text.clear();
+                            self_check_armed = true;
+                            SLT_WRN(slot, "early stop detected, triggering hidden self-check (retry %d/%d, %zu prefill tokens)\n",
+                                    slot.eog_retry_count, params_base.sampling.eog_retry_max,
+                                    slot.self_check_prefill.size());
+                        }
+                    }
+                }
+
+                if (!self_check_armed) {
+                    // Fallback: no cached messages or tokenization failed -
+                    // suppress EOG directly so the model continues generating
+                    slot.suppress_eog = true;
+                    common_sampler_set_suppress_eog(slot.smpl.get(), true);
+                    SLT_WRN(slot, "early stop without output detected, suppressing EOG directly (retry %d/%d, monitoring %d turns)\n",
+                            slot.eog_retry_count, params_base.sampling.eog_retry_max,
+                            slot.monitoring_turns);
                 }
             } else {
                 slot.stop           = STOP_TYPE_EOS;
