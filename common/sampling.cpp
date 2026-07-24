@@ -875,9 +875,7 @@ bool common_sampler_reasoning_was_forced(const struct common_sampler * gsmpl) {
         return false;
     }
 
-    // DONE with no natural end match means budget was exhausted or manually forced
-    return common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_DONE
-        && common_reasoning_budget_get_end_match(gsmpl->rbudget) == nullptr;
+    return common_reasoning_budget_was_forced(gsmpl->rbudget);
 }
 
 // helpers

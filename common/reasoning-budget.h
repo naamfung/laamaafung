@@ -47,6 +47,11 @@ common_reasoning_budget_state common_reasoning_budget_get_state(const struct lla
 // was recorded. Cleared when a new start sequence re-arms the sampler.
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);
 
+// Returns true if the DONE state was reached via FORCING (budget exhausted
+// or manual force), false if reached via a natural end sequence match.
+// Cleared when a new start sequence re-arms the sampler.
+bool common_reasoning_budget_was_forced(const struct llama_sampler * smpl);
+
 // Manually transition the reasoning budget sampler into the FORCING state.
 // Returns true if the transition occurred.
 bool common_reasoning_budget_force(struct llama_sampler * smpl);
