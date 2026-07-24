@@ -65,6 +65,7 @@ struct common_reasoning_budget_ctx {
     size_t force_pos;         // next position in forced_tokens to force
 
     int32_t end_match;        // index into end_matcher.seqs of the sequence that transitioned to DONE, -1 if none
+    bool   was_forced;        // true if the DONE state was reached via FORCING (budget exhausted or manual)
 };
 
 static const char * common_reasoning_budget_name(const struct llama_sampler * /*smpl*/) {
@@ -97,6 +98,7 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
             if (match >= 0) {
                 ctx->state = REASONING_BUDGET_DONE;
                 ctx->end_match = match;
+                ctx->was_forced = false;
                 COM_TRC("%s", "deactivated (natural end)\n");
                 break;
             }
@@ -139,6 +141,7 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
             if (ctx->force_pos >= ctx->forced_tokens.size()) {
                 ctx->state = REASONING_BUDGET_DONE;
                 ctx->end_match = match;
+                ctx->was_forced = true;
                 COM_TRC("%s", "forced sequence complete, done\n");
             }
             break;
@@ -151,6 +154,7 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
                 ctx->remaining = ctx->budget;
                 ctx->end_matcher.reset();
                 ctx->end_match = -1;
+                ctx->was_forced = false;
                 COM_TRC("re-activated on new start tag, budget=%d tokens\n", ctx->budget);
 
                 if (ctx->remaining <= 0) {
@@ -193,6 +197,7 @@ static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
     ctx->end_matcher.reset();
     ctx->force_pos = 0;
     ctx->end_match = -1;
+    ctx->was_forced = false;
 }
 
 static struct llama_sampler * common_reasoning_budget_init_state(
@@ -252,6 +257,7 @@ static struct llama_sampler * common_reasoning_budget_init_state(
             /* .state         = */ initial_state,
             /* .force_pos     = */ 0,
             /* .end_match     = */ -1,
+            /* .was_forced    = */ false,
         }
     );
 }
@@ -284,6 +290,13 @@ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sa
     }
 
     return &ctx->end_matcher.seqs[ctx->end_match];
+}
+
+bool common_reasoning_budget_was_forced(const struct llama_sampler * smpl) {
+    if (!smpl) {
+        return false;
+    }
+    return ((const common_reasoning_budget_ctx *) smpl->ctx)->was_forced;
 }
 
 bool common_reasoning_budget_force(struct llama_sampler * smpl) {
