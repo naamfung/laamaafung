@@ -102,6 +102,15 @@ uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl);
 // force the reasoning budget sampler (if any) to begin forcing its end sequence now.
 bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl);
 
+// returns true if the reasoning budget sampler exists and is currently counting
+// (i.e. the model is inside a reasoning block and has not yet emitted the end sequence)
+bool common_sampler_is_reasoning_active(const struct common_sampler * gsmpl);
+
+// returns true if the reasoning budget sampler exists, has completed (DONE state),
+// and was force-ended (budget exhausted or manual force) rather than ending naturally
+// via an end sequence match
+bool common_sampler_reasoning_was_forced(const struct common_sampler * gsmpl);
+
 // helpers
 
 // access the internal list of current candidate tokens

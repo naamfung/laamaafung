@@ -205,6 +205,9 @@ struct server_slot {
     int32_t eog_retry_count = 0;
     bool    suppress_eog    = false;
 
+    // tokens generated after reasoning was force-ended (-1 = not forced)
+    int32_t n_tokens_after_reasoning = -1;
+
     // monitoring state (persists across requests, not reset by reset())
     int monitoring_turns = 0;
 
@@ -328,6 +331,8 @@ struct server_slot {
 
         eog_retry_count = 0;
         suppress_eog    = false;
+
+        n_tokens_after_reasoning = -1;
 
         if (monitoring_turns > 0) {
             monitoring_turns--;
@@ -512,7 +517,16 @@ struct server_slot {
         if (is_processing()) {
             GGML_ASSERT(task);
 
-            SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d\n", prompt.n_tokens(), truncated);
+            const char * stop_reason_str = "none";
+            switch (stop) {
+                case STOP_TYPE_NONE:  stop_reason_str = "none";  break;
+                case STOP_TYPE_EOS:   stop_reason_str = "eos";   break;
+                case STOP_TYPE_WORD:  stop_reason_str = "word";  break;
+                case STOP_TYPE_LIMIT: stop_reason_str = "limit"; break;
+            }
+
+            SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d, stop = %s, n_sent_text = %zu, n_decoded = %d\n",
+                    prompt.n_tokens(), truncated, stop_reason_str, n_sent_text, n_decoded);
 
             t_last_used        =  ggml_time_us();
             t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
@@ -2061,6 +2075,14 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         }
         slot.has_next_token = true;
 
+        // track tokens generated after reasoning is force-ended
+        if (common_sampler_reasoning_was_forced(slot.smpl.get())) {
+            if (slot.n_tokens_after_reasoning < 0) {
+                slot.n_tokens_after_reasoning = 0;
+            }
+            slot.n_tokens_after_reasoning++;
+        }
+
         // check if there is incomplete UTF-8 character at the end
         bool incomplete = validate_utf8(slot.generated_text) < slot.generated_text.size();
 
@@ -2105,26 +2127,43 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             bool has_think_close = gt.find("</think>")    != std::string::npos;
             bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
 
+            // <think> may have been pre-injected into the prompt (via --reasoning on
+            // or preserve_thinking template), so generated_text lacks the opening tag;
+            // rbudget COUNTING means we are still inside a reasoning block
+            if (!has_think_open && common_sampler_is_reasoning_active(slot.smpl.get())) {
+                has_think_open = true;
+            }
+
             bool has_visible_content = false;
             if (has_tool_call) {
                 // require all tool_call tags to be closed
                 if (!has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
                     has_visible_content = true;
                 }
-            } else if (has_think_open) {
-                // thinking without tool call: require </think> with visible content after
-                if (has_think_close && has_visible_after(gt, gt.rfind("</think>") + 8)) {
+            } else if (has_think_close) {
+                // </think> present (whether or not <think> is in generated_text or was
+                // pre-injected by chat template): require visible content after it
+                if (has_visible_after(gt, gt.rfind("</think>") + 8)) {
                     has_visible_content = true;
                 }
+            } else if (has_think_open) {
+                // <think> opened but not yet closed: keep suppressing
             } else if (slot.n_sent_text > 0) {
                 // plain text output, no think/tool tags
                 has_visible_content = true;
             }
 
             if (has_visible_content) {
-                slot.suppress_eog = false;
-                common_sampler_set_suppress_eog(slot.smpl.get(), false);
-                SLT_INF(slot, "%s", "visible content detected, clearing EOG suppression\n");
+                // when reasoning was force-ended, require a minimum number of tokens
+                // before clearing suppression, to avoid premature EOG on brief transition text
+                if (slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
+                    SLT_INF(slot, "visible content detected but reasoning was forced, keeping EOG suppression (%d/20 tokens)\n",
+                            slot.n_tokens_after_reasoning);
+                } else {
+                    slot.suppress_eog = false;
+                    common_sampler_set_suppress_eog(slot.smpl.get(), false);
+                    SLT_INF(slot, "%s", "visible content detected, clearing EOG suppression\n");
+                }
             }
         }
 
@@ -2212,6 +2251,13 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     bool has_think_close = gt.find("</think>")    != std::string::npos;
                     bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
 
+                    // <think> may have been pre-injected into the prompt (via --reasoning on
+                    // or preserve_thinking template), so generated_text lacks the opening tag;
+                    // rbudget COUNTING means we are still inside a reasoning block
+                    if (!has_think_open && common_sampler_is_reasoning_active(slot.smpl.get())) {
+                        has_think_open = true;
+                    }
+
                     // thinking opened but not closed (no </think> and no <tool_call>)
                     if (has_think_open && !has_think_close && !has_tool_call) {
                         early_stop_no_output = true;
@@ -2230,6 +2276,13 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         if (has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
                             early_stop_no_output = true;
                         }
+                    }
+
+                    // reasoning was force-ended (budget exhausted) but model produced too
+                    // few tokens after </think> - likely about to call a tool or produce
+                    // a full answer but stopped prematurely
+                    if (!early_stop_no_output && slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
+                        early_stop_no_output = true;
                     }
                 }
             }

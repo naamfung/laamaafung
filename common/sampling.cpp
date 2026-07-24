@@ -862,6 +862,24 @@ bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl) {
     return common_reasoning_budget_force(gsmpl->rbudget);
 }
 
+bool common_sampler_is_reasoning_active(const struct common_sampler * gsmpl) {
+    if (!gsmpl || !gsmpl->rbudget) {
+        return false;
+    }
+
+    return common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_COUNTING;
+}
+
+bool common_sampler_reasoning_was_forced(const struct common_sampler * gsmpl) {
+    if (!gsmpl || !gsmpl->rbudget) {
+        return false;
+    }
+
+    // DONE with no natural end match means budget was exhausted or manually forced
+    return common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_DONE
+        && common_reasoning_budget_get_end_match(gsmpl->rbudget) == nullptr;
+}
+
 // helpers
 
 llama_token_data_array * common_sampler_get_candidates(struct common_sampler * gsmpl, bool do_sort) {
