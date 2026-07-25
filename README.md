@@ -28,6 +28,19 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
+### 推荐模型
+
+unsloth/Qwen-AgentWorld-35B-A3B 二零二六年六月廿五 / 原版 / 推荐IQ4及以上质量：
+https://huggingface.co/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/tree/main
+
+mudler/Qwen-AgentWorld-35B-A3B-APEX / 原版 / 建议 APEX-I-Compact 或 APEX-Compact 及以上质量：
+https://huggingface.co/mudler/Qwen-AgentWorld-35B-A3B-APEX-GGUF/tree/main
+
+
+### 推荐模板
+
+千问 3.5/3.6/AgentWorld 及以其为基座的衍生模型，建议使用「tmpl」目录内的「Qwen-Agentic-EN / Qwen-Agentic-HON(S/T) 」模板。
+
 ---
 
 啟動示例：
