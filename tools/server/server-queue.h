@@ -193,6 +193,10 @@ struct server_response_reader {
     void post_tasks(std::vector<server_task> && tasks, bool front = false);
     bool has_next() const;
 
+    // reset the reader so it can accept a new batch of tasks
+    // requires all previous tasks to be fully received
+    void reset();
+
     // return nullptr if should_stop() is true before receiving a result
     // note: if one error is received, it will stop further processing and return error result
     server_task_result_ptr next(const std::function<bool()> & should_stop);

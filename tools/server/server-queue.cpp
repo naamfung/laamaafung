@@ -351,8 +351,21 @@ void server_response::terminate() {
 // server_response_reader
 //
 
+void server_response_reader::reset() {
+    GGML_ASSERT(received_count >= id_tasks.size() && "cannot reset: pending tasks remain");
+    if (!id_tasks.empty()) {
+        queue_results.remove_waiting_task_ids(id_tasks);
+    }
+    id_tasks.clear();
+    states.clear();
+    received_count = 0;
+    cancelled = false;
+}
+
 void server_response_reader::post_task(server_task && task, bool front) {
-    GGML_ASSERT(id_tasks.empty() && "post_task() can only be called once per reader");
+    if (!id_tasks.empty()) {
+        reset();
+    }
     GGML_ASSERT(!task.is_parent() && "not supported, use post_tasks() instead");
     task.index = 0;
     id_tasks.insert(task.id);
@@ -362,7 +375,9 @@ void server_response_reader::post_task(server_task && task, bool front) {
 }
 
 void server_response_reader::post_tasks(std::vector<server_task> && tasks, bool front) {
-    GGML_ASSERT(id_tasks.empty() && "post_tasks() can only be called once per reader");
+    if (!id_tasks.empty()) {
+        reset();
+    }
     id_tasks = server_task::get_list_id(tasks);
     states.reserve(tasks.size());
     size_t index = 0;
