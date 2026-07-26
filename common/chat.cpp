@@ -16,6 +16,7 @@
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -63,7 +64,9 @@ static std::string string_diff(const std::string & last, const std::string & cur
             // and the current ended on a stop word (erased).
             return "";
         }
-        throw std::runtime_error("Invalid diff: '" + last + "' not found at start of '" + current + "'");
+        throw std::runtime_error("invalid diff, last not found at start of current "
+                                 "(last: " + std::to_string(last.size()) +
+                                 " bytes, current: " + std::to_string(current.size()) + " bytes)");
     }
     return current.substr(last.size());
 }
@@ -3227,27 +3230,52 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             if (first_close != std::string::npos) {
                 const size_t second_close = effective_input.find(THINK_END, first_close + THINK_END.size());
                 if (second_close != std::string::npos) {
-                    // Multiple </think> found: re-split at the last one.
+                    // Multiple </think> found.
                     const size_t last_close = effective_input.rfind(THINK_END);
-                    const size_t reason_start = ts + 7; // length of "<think>"
-                    const std::string new_reasoning = effective_input.substr(
-                        reason_start, last_close - reason_start);
-                    const size_t content_start = last_close + THINK_END.size();
-                    const std::string new_content = content_start < effective_input.size()
-                        ? effective_input.substr(content_start)
-                        : "";
-                    // Preserve tool_calls: only override reasoning/content when
-                    // the model didn't emit a tool_call (tool_calls would have
-                    // been parsed from content after </think>, so a multi-</think>
-                    // reasoning quote scenario implies no tool_call this turn).
-                    if (msg.tool_calls.empty()) {
-                        LOG_WRN("rfind correction: multiple </think> tags detected, re-splitting at last occurrence "
-                                "(reasoning: %zu -> %zu bytes, content: %zu -> %zu bytes)\n",
-                                msg.reasoning_content.size(), new_reasoning.size(),
-                                msg.content.size(), new_content.size());
-                        msg.reasoning_content = new_reasoning;
-                        msg.content           = new_content;
-                        rfind_corrected = true;
+                    const size_t after_last = last_close + THINK_END.size();
+
+                    // Special case: when the last </think> is followed only by
+                    // whitespace (or nothing), the model emitted a spurious
+                    // closing tag inside content and then stopped. The first
+                    // </think> is the real reasoning boundary; strip the stray
+                    // tag from content instead of re-splitting.
+                    bool only_ws_after_last = true;
+                    for (size_t i = after_last; i < effective_input.size(); i++) {
+                        if (!std::isspace((unsigned char) effective_input[i])) {
+                            only_ws_after_last = false;
+                            break;
+                        }
+                    }
+
+                    if (only_ws_after_last && msg.tool_calls.empty()) {
+                        size_t content_tag_pos = msg.content.rfind(THINK_END);
+                        if (content_tag_pos != std::string::npos) {
+                            LOG_WRN("rfind correction: spurious </think> at end of content, removing "
+                                    "(reasoning: %zu bytes, content: %zu -> %zu bytes)\n",
+                                    msg.reasoning_content.size(),
+                                    msg.content.size(), content_tag_pos);
+                            msg.content.resize(content_tag_pos);
+                            rfind_corrected = true;
+                        }
+                    } else {
+                        // Re-split at the last </think>: reasoning quotes the
+                        // tag as a literal, so the last occurrence is the real
+                        // close tag.
+                        const size_t reason_start = ts + 7; // length of "<think>"
+                        const std::string new_reasoning = effective_input.substr(
+                            reason_start, last_close - reason_start);
+                        const std::string new_content = after_last < effective_input.size()
+                            ? effective_input.substr(after_last)
+                            : "";
+                        if (msg.tool_calls.empty()) {
+                            LOG_WRN("rfind correction: multiple </think> tags detected, re-splitting at last occurrence "
+                                    "(reasoning: %zu -> %zu bytes, content: %zu -> %zu bytes)\n",
+                                    msg.reasoning_content.size(), new_reasoning.size(),
+                                    msg.content.size(), new_content.size());
+                            msg.reasoning_content = new_reasoning;
+                            msg.content           = new_content;
+                            rfind_corrected = true;
+                        }
                     }
                 }
             }

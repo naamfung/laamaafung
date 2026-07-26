@@ -238,6 +238,7 @@ struct server_slot {
     llama_tokens       self_check_prefill;      // prompt tokens to prefill
     std::string        self_check_text;         // accumulated hidden reply
     bool               self_check_complete = false; // parsed result of last check
+    std::string        self_check_reason;       // why self-check was armed (drives prompt wording)
 
     // rollback bookkeeping (populated when SELF_CHECK_PREFILL is entered,
     // consumed when SELF_CHECK_ROLLBACK is processed in handle_last_sampled_token)
@@ -384,6 +385,7 @@ struct server_slot {
         self_check_prefill.clear();
         self_check_text.clear();
         self_check_complete   = false;
+        self_check_reason.clear();
         self_check_rollback_size = 0;
         self_check_rollback_pos  = -1;
         self_check_eos_token     = LLAMA_TOKEN_NULL;
@@ -2137,11 +2139,19 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
         common_chat_msg user_msg;
         user_msg.role    = "user";
-        user_msg.content =
-            "Review your previous response for completeness. "
-            "If it is complete and not truncated, output <complete>. "
-            "If it is incomplete, truncated, or missing an intended tool call, "
-            "output <incomplete>. Output only the tag.";
+        if (slot.self_check_reason == "multiple_think_close") {
+            user_msg.content =
+                "Your previous response contains multiple </think> tags, "
+                "but only one is allowed. If the response is otherwise complete "
+                "and not truncated, output <complete>. Otherwise output <incomplete>. "
+                "Output only the tag.";
+        } else {
+            user_msg.content =
+                "Review your previous response for completeness. "
+                "If it is complete and not truncated, output <complete>. "
+                "If it is incomplete, truncated, or missing an intended tool call, "
+                "output <incomplete>. Output only the tag.";
+        }
         return common_chat_format_single(chat_params.tmpls.get(),
                                          past_msg,
                                          user_msg,
@@ -2468,6 +2478,20 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     // a full answer but stopped prematurely
                     if (!early_stop_no_output && slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
                         early_stop_no_output = true;
+                    }
+
+                    // multiple </think> tags: the model emitted a spurious closing
+                    // tag inside content. PEG parser splits at the first one, so
+                    // content after the first </think> (including the stray tag)
+                    // reaches the client. Trigger self-check so the model can
+                    // confirm whether its reply is actually complete.
+                    if (!early_stop_no_output && has_think_close) {
+                        size_t first_close = gt.find("</think>");
+                        if (first_close != std::string::npos &&
+                            gt.find("</think>", first_close + 8) != std::string::npos) {
+                            early_stop_no_output = true;
+                            slot.self_check_reason = "multiple_think_close";
+                        }
                     }
                 }
             }
