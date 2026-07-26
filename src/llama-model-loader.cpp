@@ -545,6 +545,7 @@ llama_model_loader::llama_model_loader(
     tensor_buft_overrides = param_tensor_buft_overrides_p;
 
     this->use_mmap      = load_mode == LLAMA_LOAD_MODE_MMAP || load_mode == LLAMA_LOAD_MODE_MLOCK;
+    this->use_mlock     = load_mode == LLAMA_LOAD_MODE_MLOCK;
     this->use_direct_io = load_mode == LLAMA_LOAD_MODE_DIRECT_IO;
 
     if (!fname.empty()) {
@@ -1161,10 +1162,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                     if (overrides->buft == ggml_backend_cpu_buffer_type()) {
                         // when overriding to a CPU buffer, consider the extra buffer types
                         buft = select_weight_buft(hparams, t_meta, op, buft_list_cpu);
-                        if (use_mmap) {
+                        if (use_mmap && !use_mlock) {
                             static std::once_flag once;
                             std::call_once(once, [] {
-                                LLAMA_LOG_WARN("llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --no-mmap for better performance\n");
+                                LLAMA_LOG_WARN("llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance\n");
                             });
                         }
                     } else {

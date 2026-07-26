@@ -76,6 +76,7 @@ struct llama_model_loader {
     size_t   n_bytes    = 0;
 
     bool use_mmap = false;
+    bool use_mlock = false;
     bool use_direct_io = false;
     bool check_tensors;
     bool no_alloc;
