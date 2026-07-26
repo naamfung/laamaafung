@@ -69,10 +69,12 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 | --- | --- | --- |
 | `none` | `--no-mmap` | 不使用 mmap（慢載入，但可減少 page-out） |
 | `mmap` | `--mmap` | memory-map 模型（默認值） |
-| `mlock` | `--mlock` | mmap + 強制系統將模型駐留 RAM，禁止 swap/壓縮 |
+| `mlock` | `--mmap --mlock` | mmap + 強制系統將模型駐留 RAM，禁止 swap/壓縮 |
 | `dio` | `--direct-io` | 使用 DirectIO 載入（若可用） |
 
-> **注意：** 切勿將 `--load-mode` 與舊參數 `--mlock`/`--mmap`/`--direct-io` 混用，否則會觸發警告，且僅命令行最後一個 flag 生效。舊參數僅為向後兼容保留，後續版本可能移除。
+> **注意：** 切勿將 `--load-mode` 與舊參數 `--mlock`/`--mmap`/`--no-mmap`/`--direct-io`/`--no-direct-io` 混用，否則會觸發警告，且僅命令行最後一個 flag 生效。舊參數僅為向後兼容保留，後續版本可能移除。
+
+> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。新版 `--load-mode` 合併為單枚舉，不再支持此組合。最接近的替代是 `--load-mode mlock`（mmap + mlock），同樣保證模型駐留 RAM，且載入更快（lazy page fault 替代 eager read）。此為更標準高效的配置，建議直接遷移。若因特殊原因（如 `vm.overcommit_memory` 限制）必須規避 mmap，請改用 `--load-mode none`（但無 mlock 駐留）。
 
 #### 啟用上下文容量管理的啟動示例
 
