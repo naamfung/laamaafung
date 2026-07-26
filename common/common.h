@@ -6,6 +6,7 @@
 
 #include "ggml-opt.h"
 #include "ggml.h"
+#include "llama.h"
 
 #include <set>
 #include <sstream>
@@ -14,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <fstream>
 
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
 #define _WIN32_WINNT 0x0A00
@@ -104,6 +106,7 @@ enum llama_example {
     LLAMA_EXAMPLE_RESULTS,
     LLAMA_EXAMPLE_EXPORT_GRAPH_OPS,
     LLAMA_EXAMPLE_DOWNLOAD,
+    LLAMA_EXAMPLE_TOKENIZE,
 
     LLAMA_EXAMPLE_COUNT,
 };
@@ -532,6 +535,7 @@ struct common_params {
     std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
+    enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_MMAP; // how to load the model
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;
@@ -623,9 +627,6 @@ struct common_params {
     bool kv_unified        = false; // enable unified KV cache
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
-    bool use_mmap          = true;  // enable mmap to use filesystem cache
-    bool use_direct_io     = false; // read from disk without buffering
-    bool use_mlock         = false; // use mlock to keep model in memory
     bool verbose_prompt    = false; // print prompt tokens before generation
     bool display_prompt    = true;  // print prompt before generation
     bool no_kv_offload     = false; // disable KV offloading
@@ -704,6 +705,9 @@ struct common_params {
 
     std::map<std::string, std::string> default_template_kwargs;
 
+    // CLI params
+    std::string server_base; // if set, connect to this server instead of starting a new one
+
     // UI configs
     bool ui = true;
     bool ui_mcp_proxy = false;
@@ -772,6 +776,12 @@ struct common_params {
 
     // batched-bench params
     bool batched_bench_output_jsonl = false;
+
+    // tokenize params
+    bool tokenize_ids        = false; // if true, only print the token IDs
+    bool tokenize_stdin      = false; // if true, read the prompt from stdin
+    bool tokenize_no_bos     = false; // if true, do not add the BOS token
+    bool tokenize_show_count = false; // if true, print the total token count
 
     // common params
     std::string out_file; // output filename for all example programs
@@ -1137,6 +1147,9 @@ enum ggml_opt_optimizer_type common_opt_get_optimizer(const char *);
 
 struct common_prompt_checkpoint {
     int64_t n_tokens;
+
+    // (optional) id of the task that created the checkpoint
+    int id_task = -1;
 
     llama_pos pos_min;
     llama_pos pos_max;

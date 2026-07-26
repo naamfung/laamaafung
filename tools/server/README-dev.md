@@ -57,7 +57,7 @@ The core architecture consists of the following components:
 - `server_tokens`: Unified representation of token sequences (supports both text and multimodal tokens); used by `server_task` and `server_slot`.
 - `server_prompt_checkpoint`: For recurrent (e.g., RWKV) and SWA models, stores snapshots of KV cache state. Enables reuse when subsequent requests share the same prompt prefix, saving redundant computation.
 - `server_models`: Standalone component for managing multiple backend instances (used in router mode). It is completely independent of `server_context`.
-- `stream_session_manager`: Process wide owner of resumable SSE stream sessions (`g_stream_sessions`), keyed by conversation id. Backs the replay buffer that lets a client reattach to a generation after an HTTP disconnect. See the "Resumable streaming" section below.
+- `stream_session_manager`: process wide owner of resumable SSE stream sessions, keyed by conversation id. A file-static singleton inside `server-stream.cpp`, driven through `server_stream_session_manager_start/stop`. Backs the replay buffer that lets a client reattach to a generation after an HTTP disconnect. See the "Resumable streaming" section below.
 
 ```mermaid
 graph TD
@@ -126,8 +126,8 @@ It is opt in via the `X-Conversation-Id` header on `POST /v1/chat/completions`. 
 
 The feature lives entirely in `server-stream.{h,cpp}` and rests on three types:
 
-- `stream_session`: a bounded ring buffer (4 MiB cap, oldest bytes drop first) plus a condvar. `append` pushes raw SSE bytes, `read_from` drains from any offset and blocks for live bytes or finalize, `finalize` wakes readers, `cancel` stops the producer. One conv maps to at most one live session.
-- `stream_session_manager` (`g_stream_sessions`): owns all sessions keyed by conv id, enforces the one conv one session invariant via `create_or_replace`, and runs a GC thread that drops completed sessions past their TTL.
+- `stream_session`: a bounded ring buffer (4 MiB cap, oldest bytes drop first) plus a condvar. `append` pushes raw SSE bytes, `read_from` drains from any offset and blocks for live bytes or finalize, `finalize` wakes readers, `cancel` sets the flag the producer polls. One conv maps to at most one live session.
+- `stream_session_manager`: a file-static singleton (`g_stream_sessions`) inside `server-stream.cpp`, owns all sessions keyed by conv id, enforces the one conv one session invariant via `create_or_replace`, and runs a GC thread that drops completed sessions past their TTL. Exposed to main only through `server_stream_session_manager_start/stop`.
 - `stream_pipe_producer` / `stream_pipe_consumer`: the write and read ends. The producer owns the session lifetime and finalizes it on destruction; the consumer is read only and never finalizes, so a reader detaching cannot kill a running generation.
 
 Producer side: `server_res_generator` extends `server_res_spipe`, which wraps the response with stream-replay support. `set_req` attaches a producer pipe when the `X-Conversation-Id` header is present. `set_next` wraps the response generator so each chunk is teed into the ring buffer transparently. `should_stop()` reports the session cancel state when a pipe is attached, so a dropped socket does not stop generation: only an explicit `DELETE` does. When the peer leaves early, `on_complete` drains the rest of the generation into the ring on the http worker.
@@ -144,7 +144,7 @@ Routes:
 
 Router mode binds the same paths to proxy handlers. A `conv_id -> child` map (`conv_models`), populated when a POST is routed, resolves the owning child in one lookup with no polling. The lookup groups ids per child; GET and DELETE proxy straight to the owner. This loopback REST hop is expected to move to a websocket IPC later, swapping only the transport.
 
-Lifecycle: `g_stream_sessions.start_gc()` runs in main after common init, `stop_gc()` runs first in `clean_up()` and finalizes every live session so no reader hangs. Reader blocking and the post drop drain both run on httplib worker threads, which block on a condvar rather than spin.
+Lifecycle: `server_stream_session_manager_start()` runs in main after common init, `server_stream_session_manager_stop()` runs first in `clean_up()` and finalizes every live session so no reader hangs. Reader blocking and the post drop drain both run on httplib worker threads, which block on a condvar rather than spin.
 
 | Constant | Value | Role |
 | --- | --- | --- |
@@ -232,6 +232,29 @@ That requires `JSON.stringify` when formatted to message content:
     "content": "{\"error\":\"cannot open this file\"}"
 }
 ```
+
+Set `stream: true` in the request body to stream a tool's output as it runs, instead of waiting for it to finish. Only certain tools accept this (for ex. `exec_shell_command`);
+returns 404 if tool doesn't support it.
+
+Response is SSE stream, one `data: <json>` line per chunk:
+
+```json
+{"chunk": "hello\n"}
+```
+
+followed by a final event once the tool returns:
+
+```json
+{"done": true}
+```
+
+or, if `invoke()` threw:
+
+```json
+{"done": true, "error": "..."}
+```
+
+There is no `[DONE]` sentinel (unlike `/chat/completions`), the stream ends after the `done`
 
 ### Router mode: how child <--> router communicates
 

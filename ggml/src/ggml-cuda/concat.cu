@@ -146,21 +146,13 @@ static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml
         const T * src1_d = (const T *) src1->data;
         T *       dst_d  = (T *) dst->data;
 
-        if (dim != 3) {
-            for (int64_t i3 = 0; i3 < dst->ne[3]; i3++) {
-                concat_cont_cuda(
-                        src0_d + i3*(src0->nb[3] / sizeof(T)),
-                        src1_d + i3*(src1->nb[3] / sizeof(T)),
-                        dst_d  + i3*( dst->nb[3] / sizeof(T)),
-                        ggml_row_size(src0->type, src0->ne[0])/sizeof(T), src0->ne[1], src0->ne[2],
-                        ggml_row_size(dst->type, dst->ne[0])/sizeof(T),  dst->ne[1],  dst->ne[2], dim, stream);
-            }
-        } else {
-            const size_t size0 = ggml_nbytes(src0);
-            const size_t size1 = ggml_nbytes(src1);
-
-            CUDA_CHECK(cudaMemcpyAsync((char *) dst->data,         src0->data, size0, cudaMemcpyDeviceToDevice, stream));
-            CUDA_CHECK(cudaMemcpyAsync((char *) dst->data + size0, src1->data, size1, cudaMemcpyDeviceToDevice, stream));
+        for (int64_t i3 = 0; i3 < dst->ne[3]; i3++) {
+            concat_cont_cuda(
+                    src0_d + i3*(src0->nb[3] / sizeof(T)),
+                    src1_d + i3*(src1->nb[3] / sizeof(T)),
+                    dst_d  + i3*( dst->nb[3] / sizeof(T)),
+                    ggml_row_size(src0->type, src0->ne[0])/sizeof(T), src0->ne[1], src0->ne[2],
+                    ggml_row_size(dst->type, dst->ne[0])/sizeof(T),  dst->ne[1],  dst->ne[2], dim, stream);
         }
     } else if (dim == 3 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1)) {
         const size_t size0 = ggml_nbytes(src0);

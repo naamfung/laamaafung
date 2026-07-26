@@ -17,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 //
 // llm_fused_op_probe
@@ -45,6 +46,30 @@ static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     }
     throw std::runtime_error("Unsupported ctx type");
 }
+
+static const llm_fused_op_probe llm_fused_op_lid_probe = {
+    /*.op               =*/ LLM_FUSED_OP_LIGHTNING_INDEXER,
+    /*.name             =*/ "Lightning Indexer",
+    /*.n_tokens_per_seq =*/ 1,
+};
+
+static const llm_fused_op_probe llm_fused_op_dsv4_hc_pre_probe = {
+    /*.op               =*/ LLM_FUSED_OP_DSV4_HC_PRE,
+    /*.name             =*/ "fused DeepSeek V4 HC pre",
+    /*.n_tokens_per_seq =*/ 1,
+};
+
+static const llm_fused_op_probe llm_fused_op_dsv4_hc_comb_probe = {
+    /*.op               =*/ LLM_FUSED_OP_DSV4_HC_COMB,
+    /*.name             =*/ "fused DeepSeek V4 HC comb",
+    /*.n_tokens_per_seq =*/ 1,
+};
+
+static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
+    /*.op               =*/ LLM_FUSED_OP_DSV4_HC_POST,
+    /*.name             =*/ "fused DeepSeek V4 HC post",
+    /*.n_tokens_per_seq =*/ 1,
+};
 
 llama_context::llama_context(
         const llama_model & model,
@@ -216,6 +241,14 @@ llama_context::llama_context(
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
     cparams.auto_fgdn    = true;
+
+    cparams.fused_lid    = true;
+    cparams.auto_flid    = true;
+
+    cparams.fused_dsv4_hc_pre  = true;
+    cparams.fused_dsv4_hc_comb = true;
+    cparams.fused_dsv4_hc_post = true;
+    cparams.auto_fhc           = true;
 
     // with causal attention, the batch size is limited by the context size
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
@@ -452,6 +485,91 @@ llama_context::~llama_context() {
     ggml_opt_free(opt_ctx);
 }
 
+void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
+    const char * func = __func__;
+    auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled) {
+        if (!enabled) {
+            return;
+        }
+
+        const uint32_t n_tokens_probe = probe.n_tokens_per_seq*n_seqs;
+
+        auto * gf = graph_reserve(n_tokens_probe, n_seqs, n_tokens_probe, mctx, true);
+        if (!gf) {
+            throw std::runtime_error(std::string("failed to reserve graph for ") + probe.name + " check");
+        }
+
+        bool device_mismatch = false;
+        for (const auto & node : get_gf_res_reserve()->get_fused_nodes()) {
+            if (node.op != probe.op) {
+                continue;
+            }
+
+            GGML_ASSERT(node.il >= 0);
+
+            ggml_backend_t backend_fused = ggml_backend_sched_get_tensor_backend(sched.get(), node.tensor);
+            ggml_backend_dev_t device_fused = backend_fused ? ggml_backend_get_device(backend_fused) : nullptr;
+
+            // TODO: make this descriptor-specific; model.dev_layer() preserves the current behavior,
+            // but is still wrong for cases like --no-kv-offload.
+            ggml_backend_dev_t device_layer = model.dev_layer(node.il);
+
+            if (device_fused != device_layer) {
+                const char * name_layer = device_layer ? ggml_backend_dev_name(device_layer) : "none";
+                const char * name_fused = device_fused ? ggml_backend_dev_name(device_fused) : "none";
+                LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but %s "
+                               "is assigned to device %s (usually due to missing support)\n",
+                               func, node.il, name_layer, probe.name, name_fused);
+
+                // hint for RPC device mismatch caused by -ot / -ts configuration mismatch
+                bool rpc_mismatch = (std::string(name_layer).find("RPC") != std::string::npos) ||
+                                    (std::string(name_fused).find("RPC") != std::string::npos);
+                if (rpc_mismatch) {
+                    LLAMA_LOG_WARN("%s: RPC device mismatch detected. This may be caused by a configuration "
+                                   "mismatch between --override-tensor (-ot) and --tensor-split (-ts).\n", func);
+                }
+
+                device_mismatch = true;
+                break;
+            }
+        }
+
+        if (device_mismatch) {
+            enabled = false;
+            LLAMA_LOG_WARN("%s: %s not supported, set to disabled\n", func, probe.name);
+        } else {
+            enabled = true;
+            LLAMA_LOG_INFO("%s: %s enabled\n", func, probe.name);
+        }
+    };
+
+    if (cparams.auto_fa) {
+        resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
+        cparams.auto_fa = false;
+    }
+
+    if (cparams.auto_fgdn) {
+        LLAMA_LOG_INFO("%s: resolving fused Gated Delta Net support:\n", func);
+        resolve(llm_fused_op_gdn_ar_probe, cparams.fused_gdn_ar);
+        resolve(llm_fused_op_gdn_ch_probe, cparams.fused_gdn_ch);
+        cparams.auto_fgdn = false;
+    }
+
+    if (cparams.auto_flid) {
+        LLAMA_LOG_INFO("%s: resolving fused Lightning Indexer support:\n", func);
+        resolve(llm_fused_op_lid_probe, cparams.fused_lid);
+        cparams.auto_flid = false;
+    }
+
+    if (cparams.auto_fhc) {
+        LLAMA_LOG_INFO("%s: resolving fused DeepSeek V4 HC support:\n", func);
+        resolve(llm_fused_op_dsv4_hc_pre_probe,  cparams.fused_dsv4_hc_pre);
+        resolve(llm_fused_op_dsv4_hc_comb_probe, cparams.fused_dsv4_hc_comb);
+        resolve(llm_fused_op_dsv4_hc_post_probe, cparams.fused_dsv4_hc_post);
+        cparams.auto_fhc = false;
+    }
+}
+
 void llama_context::sched_reserve() {
     if (!sched_need_reserve) {
         return;
@@ -575,78 +693,6 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_INFO("%s: reserve took %.2f ms, sched copies = %d\n",
             __func__, (t_end_us - t_start_us)/1000.0, ggml_backend_sched_get_n_copies(sched.get()));
-}
-
-void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
-    const char * func = __func__;
-    auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled) {
-        if (!enabled) {
-            return;
-        }
-
-        const uint32_t n_tokens_probe = probe.n_tokens_per_seq*n_seqs;
-
-        auto * gf = graph_reserve(n_tokens_probe, n_seqs, n_tokens_probe, mctx, true);
-        if (!gf) {
-            throw std::runtime_error(std::string("failed to reserve graph for ") + probe.name + " check");
-        }
-
-        bool device_mismatch = false;
-        for (const auto & node : gf_res_reserve->get_fused_nodes()) {
-            if (node.op != probe.op) {
-                continue;
-            }
-
-            GGML_ASSERT(node.il >= 0);
-
-            ggml_backend_t backend_fused = ggml_backend_sched_get_tensor_backend(sched.get(), node.tensor);
-            ggml_backend_dev_t device_fused = backend_fused ? ggml_backend_get_device(backend_fused) : nullptr;
-
-            // TODO: make this descriptor-specific; model.dev_layer() preserves the current behavior,
-            // but is still wrong for cases like --no-kv-offload.
-            ggml_backend_dev_t device_layer = model.dev_layer(node.il);
-
-            if (device_fused != device_layer) {
-                const char * name_layer = device_layer ? ggml_backend_dev_name(device_layer) : "none";
-                const char * name_fused = device_fused ? ggml_backend_dev_name(device_fused) : "none";
-                LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but %s "
-                               "is assigned to device %s (usually due to missing support)\n",
-                               func, node.il, name_layer,
-                               probe.name, name_fused);
-                
-                // Check if RPC devices are involved to provide helpful hint about -ot and -ts mismatch
-                bool rpc_mismatch = (std::string(name_layer).find("RPC") != std::string::npos) || 
-                                    (std::string(name_fused).find("RPC") != std::string::npos);
-                if (rpc_mismatch) {
-                    LLAMA_LOG_WARN("%s: WARNING: RPC device mismatch detected. This may be caused by a configuration mismatch between --override-tensor (-ot) and --tensor-split (-ts). "
-                                   "Please ensure that the layer boundaries set by -ot match the layer distribution computed by -ts to avoid CROSS-ENDPOINT MISMATCH errors.\n", func);
-                }
-                
-                device_mismatch = true;
-                break;
-            }
-        }
-
-        if (device_mismatch) {
-            enabled = false;
-            LLAMA_LOG_WARN("%s: %s not supported, set to disabled\n", func, probe.name);
-        } else {
-            enabled = true;
-            LLAMA_LOG_INFO("%s: %s enabled\n", func, probe.name);
-        }
-    };
-
-    if (cparams.auto_fa) {
-        resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
-        cparams.auto_fa = false;
-    }
-
-    if (cparams.auto_fgdn) {
-        LLAMA_LOG_INFO("%s: resolving fused Gated Delta Net support:\n", func);
-        resolve(llm_fused_op_gdn_ar_probe, cparams.fused_gdn_ar);
-        resolve(llm_fused_op_gdn_ch_probe, cparams.fused_gdn_ch);
-        cparams.auto_fgdn = false;
-    }
 }
 
 void llama_context::synchronize() {

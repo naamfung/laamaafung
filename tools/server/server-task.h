@@ -123,6 +123,7 @@ struct task_result_state {
     bool text_block_started = false;
 
     // for OpenAI Responses streaming API
+    bool oai_resp_created = false;
     const std::string oai_resp_id;
     const std::string oai_resp_reasoning_id;
     const std::string oai_resp_message_id;
@@ -450,6 +451,7 @@ struct server_task_result_cmpl_partial : server_task_result {
     bool text_block_started     = false;
 
     // for OpenAI Responses API
+    bool oai_resp_created = false;
     std::string oai_resp_id;
     std::string oai_resp_reasoning_id;
     std::string oai_resp_message_id;
@@ -593,15 +595,6 @@ struct server_task_result_apply_lora : server_task_result {
     virtual json to_json() override;
 };
 
-struct server_prompt_data {
-    std::vector<uint8_t> main;
-    std::vector<uint8_t> drft;
-
-    size_t size() const {
-        return main.size() + drft.size();
-    }
-};
-
 struct server_prompt {
     server_tokens tokens;
 
@@ -640,6 +633,15 @@ struct server_prompt {
 };
 
 // KV cache state data paired with its logical prompt
+struct server_prompt_data {
+    std::vector<uint8_t> main;
+    std::vector<uint8_t> drft;
+
+    size_t size() const {
+        return main.size() + drft.size();
+    }
+};
+
 struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
@@ -667,7 +669,7 @@ struct server_prompt_cache {
 
     size_t n_tokens() const;
 
-    server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
+    server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft);
 
     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_main, llama_context * ctx_drft, int32_t id_slot);
 
