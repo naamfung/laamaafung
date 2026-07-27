@@ -2796,7 +2796,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--mlock"},
         "DEPRECATED in favor of `--load-mode`: mmap + force system to keep model in RAM rather than swapping or compressing",
         [](common_params & params) {
-            LOG_WRN("DEPRECATED: --mlock is deprecated. use --load-mode mlock instead\n");
+            LOG_WRN("DEPRECATED: --mlock is deprecated. use --load-mode mlock (mmap+mlock) or --load-mode mlock-ram (read+mlock, no mmap) instead\n");
             params.load_mode = LLAMA_LOAD_MODE_MLOCK;
         }
     ).set_env("LLAMA_ARG_MLOCK"));
@@ -2828,12 +2828,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "- none: no special loading mode\n"
         "- mmap: memory-map model (if mmap disabled, slower load but may reduce pageouts if not using mlock)\n"
         "- mlock: mmap + force system to keep model in RAM rather than swapping or compressing\n"
+        "- mlock-ram: read model into RAM + mlock (no mmap); avoids mmap page-fault stalls during inference\n"
         "- dio: use DirectIO if available\n",
         [](common_params & params, const std::string & value) {
-            /**/ if (value == "none")  { params.load_mode = LLAMA_LOAD_MODE_NONE;      }
-            else if (value == "mmap")  { params.load_mode = LLAMA_LOAD_MODE_MMAP;      }
-            else if (value == "mlock") { params.load_mode = LLAMA_LOAD_MODE_MLOCK;     }
-            else if (value == "dio")   { params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO; }
+            /**/ if (value == "none")      { params.load_mode = LLAMA_LOAD_MODE_NONE;      }
+            else if (value == "mmap")      { params.load_mode = LLAMA_LOAD_MODE_MMAP;      }
+            else if (value == "mlock")     { params.load_mode = LLAMA_LOAD_MODE_MLOCK;     }
+            else if (value == "mlock-ram") { params.load_mode = LLAMA_LOAD_MODE_MLOCK_RAM; }
+            else if (value == "dio")       { params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO; }
             else { throw std::invalid_argument("invalid value"); }
         }
     ).set_env("LLAMA_ARG_LOAD_MODE"));

@@ -61,7 +61,7 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 | `--prompt-truncate` | 啟用初始 prompt 截斷（當請求 tokens 超過 `--ctx-size` 時自動截斷中間部分並保留頭尾）。對所有模型架構均生效，無需 KV cache 位移支援。由 `--context-shift` 隱含啟用，亦可單獨使用。 | 適合處理超長 prompt 提交、對話歷史較長的場景，避免 HTTP 400 錯誤。 |
 | `--swa-full` | 使用與 base cache 等大的全尺寸 SWA cache。僅對 GGUF 模型頭中明確聲明滑動窗口注意力（SWA）且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。預設關閉時 SWA cache 僅為 `min(size_base, n_swa + n_ubatch)`，會導致 `llama_kv_cache_iswa::get_can_shift()` 回傳 false，使 `--context-shift` 的運行時 K-shift 失效（初始截斷不受影響）。啟用後 SWA 與 base 等大，K-shift 完全可用。 | 真正採用 SWA 架構的模型需要 `--context-shift` 完整功能（含生成階段運行時 K-shift）時必須配合使用。 |
 | `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閱導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
-| `--load-mode MODE` | 模型載入模式（默認 `mmap`）。取代舊參數 `--mmap`/`--no-mmap`/`--mlock`/`--direct-io`，四者互斥，僅能選一個 mode。 | 控制模型載入時的記憶體映射與駐留策略，見下表。 |
+| `--load-mode MODE` | 模型載入模式（默認 `mmap`）。取代舊參數 `--mmap`/`--no-mmap`/`--mlock`/`--direct-io`，五者互斥，僅能選一個 mode。 | 控制模型載入時的記憶體映射與駐留策略，見下表。 |
 
 #### `--load-mode` 可選值一覽
 
@@ -70,11 +70,12 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 | `none` | `--no-mmap` | 不使用 mmap（慢載入，但可減少 page-out） |
 | `mmap` | `--mmap` | memory-map 模型（默認值） |
 | `mlock` | `--mmap --mlock` | mmap + 強制系統將模型駐留 RAM，禁止 swap/壓縮 |
+| `mlock-ram` | `--no-mmap --mlock` | 直接讀取模型到 RAM + mlock（不用 mmap）；避免推理時 mmap page-fault 導致的性能下降 |
 | `dio` | `--direct-io` | 使用 DirectIO 載入（若可用） |
 
 > **注意：** 切勿將 `--load-mode` 與舊參數 `--mlock`/`--mmap`/`--no-mmap`/`--direct-io`/`--no-direct-io` 混用，否則會觸發警告，且僅命令行最後一個 flag 生效。舊參數僅為向後兼容保留，後續版本可能移除。
 
-> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。新版 `--load-mode` 合併為單枚舉，不再支持此組合。最接近的替代是 `--load-mode mlock`（mmap + mlock），同樣保證模型駐留 RAM，且載入更快（lazy page fault 替代 eager read）。此為更標準高效的配置，建議直接遷移。若因特殊原因（如 `vm.overcommit_memory` 限制）必須規避 mmap，請改用 `--load-mode none`（但無 mlock 駐留）。
+> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降（在 Windows 上尤其明顯）。建議需要 mlock 且追求穩定推理性能的場景使用 `mlock-ram` 而非 `mlock`。
 
 #### 啟用上下文容量管理的啟動示例
 
