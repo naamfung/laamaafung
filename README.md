@@ -62,6 +62,16 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 | `--swa-full` | 使用與 base cache 等大的全尺寸 SWA cache。僅對 GGUF 模型頭中明確聲明滑動窗口注意力（SWA）且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。預設關閉時 SWA cache 僅為 `min(size_base, n_swa + n_ubatch)`，會導致 `llama_kv_cache_iswa::get_can_shift()` 回傳 false，使 `--context-shift` 的運行時 K-shift 失效（初始截斷不受影響）。啟用後 SWA 與 base 等大，K-shift 完全可用。 | 真正採用 SWA 架構的模型需要 `--context-shift` 完整功能（含生成階段運行時 K-shift）時必須配合使用。 |
 | `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閱導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
 
+#### TurboQuant 键值缓存 與 MMA 融合路徑
+
+透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；Volta 及更早架構會自動回退到 VEC 路徑。
+
+| 環境變數 | 預設值 | 描述 |
+| --- | --- | --- |
+| `GGML_TURBO_MMA_FUSED` | `1`（開啟） | 控制 CUDA fused turbo MMA 路徑。設為 `0` 可關閉，回退到 VEC 路徑（功能完整，僅失去 tensor core 加速）。 |
+
+MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`、`Q->ne[1] <= 4`（解碼場景）、`Q->ne[0]` 為 128 或 256。條件不滿足時自動回退到 VEC 路徑，無需手動干預。
+
 #### 啟用上下文容量管理的啟動示例
 
 如果須要處理可能超過上下文限制的請求，可以加入 `--prompt-truncate`（初始截斷）或 `--context-shift`（運行時 K-shift，隱含啟用初始截斷）。對於真正採用 SWA 架構的模型，若需要生成階段的運行時 K-shift 完整可用，須同時加入 `--swa-full`：
