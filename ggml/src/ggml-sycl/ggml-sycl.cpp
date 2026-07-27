@@ -74,6 +74,7 @@
 #include "ggml-sycl/solve_tri.hpp"
 #include "ggml-sycl/gated_delta_net.hpp"
 #include "ggml-sycl/pool.hpp"
+#include "ggml-sycl/turbo-wht.hpp"
 
 #define MEM_SIZE_2M	0x00200000
 #define MEM_SIZE_1G	0x40000000
@@ -4862,6 +4863,9 @@ static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct gg
         case GGML_OP_SET_ROWS:
             ggml_sycl_op_set_rows(ctx, dst);
             break;
+        case GGML_OP_TURBO_WHT:
+            ggml_sycl_turbo_wht(ctx, dst);
+            break;
         case GGML_OP_DUP:
             ggml_sycl_dup(ctx, dst);
             break;
@@ -5686,12 +5690,25 @@ static bool do_ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, cons
 
         case GGML_OP_SET_ROWS:
             {
-
+#ifdef GGML_SYCL_TURBO_QUANT
+                // turbo types require head_dim divisible by appropriate group size
+                if ((op->type == GGML_TYPE_TURBO3_0 || op->type == GGML_TYPE_TURBO2_0) && op->src[0]->ne[0] % 64 != 0) {
+                    return false;
+                }
+                // turbo4 block size is 128, so head_dim must be divisible by 128
+                if (op->type == GGML_TYPE_TURBO4_0 && op->src[0]->ne[0] % 128 != 0) {
+                    return false;
+                }
+#endif // GGML_SYCL_TURBO_QUANT
                 auto res = ((op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                          op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q5_0 ||
                          op->type == GGML_TYPE_Q1_0 ||
                          op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_IQ4_NL ||
-                         op->type == GGML_TYPE_MXFP4 || op->type == GGML_TYPE_NVFP4) &&
+                         op->type == GGML_TYPE_MXFP4 || op->type == GGML_TYPE_NVFP4
+#ifdef GGML_SYCL_TURBO_QUANT
+                         || op->type == GGML_TYPE_TURBO3_0 || op->type == GGML_TYPE_TURBO2_0 || op->type == GGML_TYPE_TURBO4_0
+#endif // GGML_SYCL_TURBO_QUANT
+                         ) &&
                         op->src[0]->type == GGML_TYPE_F32 &&
                         (op->src[1]->type == GGML_TYPE_I64 || op->src[1]->type == GGML_TYPE_I32));
                 return res;
@@ -5788,6 +5805,9 @@ static bool do_ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, cons
         case GGML_OP_DIV:
         case GGML_OP_REPEAT:
             return true;
+        case GGML_OP_TURBO_WHT:
+            return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                   op->src[0]->ne[0] % 32 == 0;
         case GGML_OP_PAD_REFLECT_1D:
             return ggml_is_contiguous(op->src[0]) && op-> type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_SQR:

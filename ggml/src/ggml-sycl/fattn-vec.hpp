@@ -100,6 +100,8 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
     constexpr int nthreads_V_q  = (D/4 < warp_size ? D/4 : warp_size);
 
     constexpr int nthreads    = ggml_sycl_fattn_vec_get_nthreads_device();
+    // Turbo K uses the float Q path (like f16), not q8_1 integer path
+    constexpr bool K_is_turbo = (type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0);
     constexpr int nthreads_KQ = type_K == GGML_TYPE_F16 ? 128 / cpy_nb : nthreads_KQ_q;
     constexpr int nthreads_V  = type_V == GGML_TYPE_F16 ? 128 / cpy_nb : nthreads_V_q;
 
@@ -110,7 +112,7 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
     constexpr int V_cols_per_iter   = warp_size / nthreads_V;
 
     constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, nthreads_KQ, warp_size>();
-    constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16;
+    constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16 && !K_is_turbo;
 #ifdef GGML_SYCL_F16
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, sycl::half, V_rows_per_thread>();
 #else
@@ -670,5 +672,49 @@ EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q8_0)
+
+#ifdef GGML_SYCL_TURBO_QUANT
+// TurboQuant extern declarations -- all D values per (type_K, type_V) pair
+#define EXTERN_DECL_FATTN_VEC_TURBO(type_K, type_V) \
+    extern DECL_FATTN_VEC_CASE( 64, type_K, type_V); \
+    extern DECL_FATTN_VEC_CASE(128, type_K, type_V); \
+    extern DECL_FATTN_VEC_CASE(256, type_K, type_V); \
+    extern DECL_FATTN_VEC_CASE(512, type_K, type_V);
+
+// f16 K + turbo V
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_F16,       GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_F16,       GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_F16,       GGML_TYPE_TURBO4_0)
+
+// q8_0 K + turbo V
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_Q8_0,      GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_Q8_0,      GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_Q8_0,      GGML_TYPE_TURBO4_0)
+
+// turbo K + f16 V
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO2_0,  GGML_TYPE_F16)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO3_0,  GGML_TYPE_F16)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO4_0,  GGML_TYPE_F16)
+
+// turbo K + q8_0 V
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO2_0,  GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO3_0,  GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO4_0,  GGML_TYPE_Q8_0)
+
+// turbo K + same turbo V
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO2_0,  GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO3_0,  GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO4_0,  GGML_TYPE_TURBO4_0)
+
+// cross-turbo K/V combos
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO2_0,  GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO3_0,  GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO2_0,  GGML_TYPE_TURBO4_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO4_0,  GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO3_0,  GGML_TYPE_TURBO4_0)
+EXTERN_DECL_FATTN_VEC_TURBO(GGML_TYPE_TURBO4_0,  GGML_TYPE_TURBO3_0)
+
+#undef EXTERN_DECL_FATTN_VEC_TURBO
+#endif // GGML_SYCL_TURBO_QUANT
 
 #endif // GGML_SYCL_FATTN_VEC_HPP
