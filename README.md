@@ -46,7 +46,7 @@ https://huggingface.co/mudler/Qwen-AgentWorld-35B-A3B-APEX-GGUF/tree/main
 啟動示例：
 
 ```sh
-D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --prompt-truncate --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --load-mode mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --prompt-truncate --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 128 --load-mode mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 #### 啟動參數與工作原理說明
@@ -75,7 +75,17 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 
 > **注意：** 切勿將 `--load-mode` 與舊參數 `--mlock`/`--mmap`/`--no-mmap`/`--direct-io`/`--no-direct-io` 混用，否則會觸發警告，且僅命令行最後一個 flag 生效。舊參數僅為向後兼容保留，後續版本可能移除。
 
-> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降（在 Windows 上尤其明顯）。建議需要 mlock 且追求穩定推理性能的場景使用 `mlock-ram` 而非 `mlock`。
+> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。上游新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現 Laamaafung 已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降。建議根据自身设备的实际参数性能表现选用 `mlock-ram` 或者 `mlock`。
+
+#### TurboQuant 键值缓存 與 MMA 融合路徑
+
+透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；Volta 及更早架構會自動回退到 VEC 路徑。
+
+| 環境變數 | 預設值 | 描述 |
+| --- | --- | --- |
+| `GGML_TURBO_MMA_FUSED` | `1`（開啟） | 控制 CUDA fused turbo MMA 路徑。設為 `0` 可關閉，回退到 VEC 路徑（功能完整，僅失去 tensor core 加速）。 |
+
+MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`、`Q->ne[1] <= 4`（解碼場景）、`Q->ne[0]` 為 128 或 256。條件不滿足時自動回退到 VEC 路徑，無需手動干預。
 
 #### 啟用上下文容量管理的啟動示例
 
