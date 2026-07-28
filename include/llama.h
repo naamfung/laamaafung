@@ -1486,19 +1486,23 @@ extern "C" {
                                float   decay,
                             uint32_t   seed);
 
-    /// periodic-repeat: detect and penalize cyclic/alternating token patterns (e.g., ababab..., abcabc...)
+    /// periodic-repeat: detect cyclic/alternating token patterns (e.g., ababab..., abcabc...) and apply action
     ///
     /// the periodic-repeat sampler checks for cyclic/alternating patterns in the recent token sequence
-    /// and applies penalties when detected.
+    /// and applies boost (temp boost) or penalty when detected.
     ///
-    /// @param last_n    number of recent tokens to check for cyclic patterns (0 = disabled)
-    /// @param min_period minimum period length to detect
-    /// @param max_period maximum period length to detect
-    /// @param penalty_repeat repetition penalty factor when cyclic pattern is detected (1.0 = disabled)
+    /// @param last_n       number of recent tokens to check for cyclic patterns (0 = disabled)
+    /// @param min_period   minimum period length to detect
+    /// @param max_period   maximum period length to detect
+    /// @param action       action when cyclic pattern detected: 0 = boost (temp boost), 1 = penalty (repetition penalty)
+    /// @param boost_factor temperature boost factor when cyclic pattern is detected (boost mode)
+    /// @param penalty_repeat repetition penalty factor when cyclic pattern is detected (penalty mode, 1.0 = disabled)
     LLAMA_API struct llama_sampler * llama_sampler_init_periodic_repeat(
                              int32_t   last_n,
                              int32_t   min_period,
                              int32_t   max_period,
+                             int32_t   action,
+                               float   boost_factor,
                                float   penalty_repeat);
 
     LLAMA_API struct llama_sampler * llama_sampler_init_logit_bias(

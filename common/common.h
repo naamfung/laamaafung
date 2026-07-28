@@ -267,7 +267,9 @@ struct common_params_sampling {
     int32_t cycle_detect_last_n    = 64;            // number of recent tokens to check for cyclic patterns (0 = disabled)
     int32_t cycle_detect_min_period = 2;            // minimum period length to detect
     int32_t cycle_detect_max_period = 8;            // maximum period length to detect
-    float   cycle_penalty_repeat   = 1.00f;         // repetition penalty factor when cyclic pattern is detected (1.0 = disabled)
+    int32_t cycle_detect_action    = 0;             // action when cyclic pattern detected: 0 = boost (temp boost), 1 = penalty (repetition penalty)
+    float   cycle_boost_factor     = 0.50f;         // temperature boost factor when cyclic pattern is detected (boost mode)
+    float   cycle_penalty_repeat   = 1.00f;         // repetition penalty factor when cyclic pattern is detected (penalty mode, 1.0 = disabled)
     int32_t eog_retry_max          = 3;             // max EOG suppression retries for think-only early stop (0 = disabled)
     float   adaptive_target    = -1.0f;  // select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
     float   adaptive_decay     = 0.90f;  // EMA decay for adaptation; history ≈ 1/(1-decay) tokens (0.0 - 0.99)

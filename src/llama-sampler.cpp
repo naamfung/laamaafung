@@ -3563,14 +3563,18 @@ struct llama_sampler_periodic_repeat {
     const int32_t last_n;
     const int32_t min_period;
     const int32_t max_period;
-    const float   penalty_repeat;
+    const int32_t action;         // 0 = boost (temp boost), 1 = penalty (repetition penalty)
+    const float   boost_factor;   // temperature boost factor when cyclic pattern is detected (boost mode)
+    const float   penalty_repeat; // repetition penalty factor when cyclic pattern is detected (penalty mode, 1.0 = disabled)
 
     std::vector<llama_token> last_tokens;
 
-    llama_sampler_periodic_repeat(int32_t last_n, int32_t min_period, int32_t max_period, float penalty_repeat)
+    llama_sampler_periodic_repeat(int32_t last_n, int32_t min_period, int32_t max_period, int32_t action, float boost_factor, float penalty_repeat)
         : last_n(last_n > 0 ? last_n : 64),
           min_period(min_period > 0 ? min_period : 2),
           max_period(max_period > min_period ? max_period : 8),
+          action(action >= 0 && action <= 1 ? action : 0), // 0 = boost (default), 1 = penalty
+          boost_factor(boost_factor >= 0.0f ? boost_factor : 0.5f),
           penalty_repeat(penalty_repeat > 0.0f ? penalty_repeat : 1.0f) {}
 };
 
@@ -3632,7 +3636,7 @@ static void llama_sampler_periodic_repeat_accept(struct llama_sampler * smpl, ll
 
 static void llama_sampler_periodic_repeat_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
     auto * ctx = (llama_sampler_periodic_repeat *) smpl->ctx;
-    if (ctx->last_n <= 0 || ctx->penalty_repeat <= 1.0f || ctx->last_tokens.size() < 2 * ctx->min_period) {
+    if (ctx->last_n <= 0 || ctx->last_tokens.size() < 2 * ctx->min_period) {
         return;
     }
 
@@ -3641,33 +3645,32 @@ static void llama_sampler_periodic_repeat_apply(struct llama_sampler * smpl, lla
         return;
     }
 
-    // Periodic pattern detected, apply penalty to tokens that would continue the cycle
-    // The cycle is of the form: [x0, x1, ..., x_{p-1}, x0, x1, ..., x_{p-1}, ...]
-    // The next token in the cycle would be ctx->last_tokens.back() % p == ?
-    // Actually, the next token to continue the cycle is ctx->last_tokens.back() + 1 (in terms of period index)
-    // If last_tokens has a period of length p, the next token in the cycle is:
-    // next_token_in_cycle = ctx->last_tokens[ctx->last_tokens.size() % p]
-
-    llama_token next_token_in_cycle = ctx->last_tokens[ctx->last_tokens.size() % ctx->last_n];
-    // But we need to find the actual next token in the cycle:
-    // If the period is p, and we have tokens[t], tokens[t+1], ..., tokens[t+p-1] as the period
-    // The last token is ctx->last_tokens.back(), which is ctx->last_tokens[ctx->last_tokens.size()-1]
-    // The next token in the cycle would be ctx->last_tokens[(ctx->last_tokens.size()-1 + 1) % p] if we consider the period starting from the right position
-
-    // Actually, let's compute the expected next token in the cycle:
+    // Periodic pattern detected, apply action (boost or penalty)
     size_t n = ctx->last_tokens.size();
-    llama_token expected_next_token = ctx->last_tokens[(n - 1 + 1) % found_period == 0 ? found_period : (n - 1 + 1) % found_period];
-    // Wait, (n-1+1) % p = n % p. So expected_next_token = ctx->last_tokens[n % found_period]
+    llama_token expected_next_token = ctx->last_tokens[n % found_period];
 
-    expected_next_token = ctx->last_tokens[n % found_period];
-
-    // Apply penalty to the expected next token
-    for (size_t i = 0; i < cur_p->size; ++i) {
-        if (cur_p->data[i].id == expected_next_token) {
-            if (cur_p->data[i].logit <= 0) {
-                cur_p->data[i].logit *= ctx->penalty_repeat;
-            } else {
-                cur_p->data[i].logit /= ctx->penalty_repeat;
+    if (ctx->action == 0) {
+        // Boost mode: apply temperature boost (reduce effective temperature)
+        const float inv_temp = 1.0f / (1.0f + ctx->boost_factor);
+        LLAMA_LOG_DEBUG("periodic-repeat: boost mode detected period=%d, applying boost factor=%.2f inv_temp=%.3f\n",
+            found_period, (double)ctx->boost_factor, (double)inv_temp);
+        for (size_t i = 0; i < cur_p->size; i++) {
+            cur_p->data[i].logit *= inv_temp;
+        }
+    } else {
+        // Penalty mode: apply repetition penalty
+        if (ctx->penalty_repeat <= 1.0f) {
+            return;
+        }
+        LLAMA_LOG_DEBUG("periodic-repeat: penalty mode detected period=%d, penalty_repeat=%.2f\n",
+            found_period, (double)ctx->penalty_repeat);
+        for (size_t i = 0; i < cur_p->size; ++i) {
+            if (cur_p->data[i].id == expected_next_token) {
+                if (cur_p->data[i].logit <= 0) {
+                    cur_p->data[i].logit *= ctx->penalty_repeat;
+                } else {
+                    cur_p->data[i].logit /= ctx->penalty_repeat;
+                }
             }
         }
     }
@@ -3682,7 +3685,7 @@ static void llama_sampler_periodic_repeat_reset(struct llama_sampler * smpl) {
 
 static struct llama_sampler * llama_sampler_periodic_repeat_clone(const struct llama_sampler * smpl) {
     const auto * ctx = (const llama_sampler_periodic_repeat *) smpl->ctx;
-    auto * result = llama_sampler_init_periodic_repeat(ctx->last_n, ctx->min_period, ctx->max_period, ctx->penalty_repeat);
+    auto * result = llama_sampler_init_periodic_repeat(ctx->last_n, ctx->min_period, ctx->max_period, ctx->action, ctx->boost_factor, ctx->penalty_repeat);
     // copy the state
     {
         auto * result_ctx = (llama_sampler_periodic_repeat *) result->ctx;
@@ -3712,12 +3715,14 @@ struct llama_sampler * llama_sampler_init_periodic_repeat(
         int32_t   last_n,
         int32_t   min_period,
         int32_t   max_period,
+        int32_t   action,
+        float   boost_factor,
         float   penalty_repeat) {
-    LLAMA_LOG_DEBUG("periodic-repeat: init last_n=%d min_period=%d max_period=%d penalty_repeat=%.2f\n",
-        last_n, min_period, max_period, (double)penalty_repeat);
+    LLAMA_LOG_DEBUG("periodic-repeat: init last_n=%d min_period=%d max_period=%d action=%d boost_factor=%.2f penalty_repeat=%.2f\n",
+        last_n, min_period, max_period, action, (double)boost_factor, (double)penalty_repeat);
     return new llama_sampler {
         /* .iface = */ &llama_sampler_periodic_repeat_i,
-        /* .ctx   = */ new llama_sampler_periodic_repeat(last_n, min_period, max_period, penalty_repeat),
+        /* .ctx   = */ new llama_sampler_periodic_repeat(last_n, min_period, max_period, action, boost_factor, penalty_repeat),
     };
 }
 
