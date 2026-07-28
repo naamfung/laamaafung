@@ -2271,6 +2271,63 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sampling());
     add_opt(common_arg(
+        {"--cycle-detect-last-n"}, "N",
+        string_format("set number of recent tokens to check for cyclic patterns (default: %d, 0 = disabled)", params.sampling.cycle_detect_last_n),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-last-n = %d\n", value));
+            }
+            params.sampling.cycle_detect_last_n = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-min-period"}, "N",
+        string_format("set minimum period length to detect (default: %d)", params.sampling.cycle_detect_min_period),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-min-period = %d\n", value));
+            }
+            params.sampling.cycle_detect_min_period = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-max-period"}, "N",
+        string_format("set maximum period length to detect (default: %d)", params.sampling.cycle_detect_max_period),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-max-period = %d\n", value));
+            }
+            params.sampling.cycle_detect_max_period = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-action"}, "TYPE",
+        string_format("set action when cyclic pattern is detected (default: \"boost\", options: boost, penalty)", "boost"),
+        [](common_params & params, const std::string & value) {
+            if (value == "boost") {
+                params.sampling.cycle_detect_action = 0;
+            } else if (value == "penalty") {
+                params.sampling.cycle_detect_action = 1;
+            } else {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-action = %s (expected: boost or penalty)\n", value.c_str()));
+            }
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-boost-factor"}, "F",
+        string_format("set temperature boost factor when cyclic pattern is detected (default: %.2f)", (double)params.sampling.cycle_boost_factor),
+        [](common_params & params, const std::string & value) {
+            params.sampling.cycle_boost_factor = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-penalty-repeat"}, "F",
+        string_format("set repetition penalty factor when cyclic pattern is detected (default: %.2f)", (double)params.sampling.cycle_penalty_repeat),
+        [](common_params & params, const std::string & value) {
+            params.sampling.cycle_penalty_repeat = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
         {"--runaway-threshold"}, "N",
         string_format("set consecutive identical token count to trigger runaway temp boost (default: %d, 0 = disabled)", params.sampling.runaway_threshold),
         [](common_params & params, int value) {
