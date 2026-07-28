@@ -127,6 +127,35 @@ MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`�
 
 **與 `--repeat_penalty` / `--presence_penalty` 的區別：** 這兩個參數對已出現過的 token 施加持續性懲罰（降低其 logit），但對同一 token 連續出現的硬性失控無效。原因是：當模型對某 token（如 `</`）的 logit 遠高於所有其他候選 token 時，即使施加 1.5x 或 2.0x 的懲罰，此 token 仍然具有最高概率，模型會繼續選擇它，形成死循環。本機制不行"懲罰重複 token"的路線，而是通過升溫（壓縮所有 logit 差距）令低概率 token 獲得被選中的機會，從根本上打破循環。
 
+#### 週期性 Token 循環檢測機制（Periodic Token Loop Detection）
+
+當模型生成呈現週期性或交替性的 token 死循環模式（例如「ababab...」、「abcabc...」等，其中 a、b、c 代表不同的獨立 token），內建的連續 token 失控檢測（針對連續相同 token，如 `aaaaaaaa...`）無法有效偵測此類模式。本機制提供專門的週期性重複檢測 sampler，用於檢查最近 token 序列中的循環/交替模式，並在檢測到時應用懲罰或升溫以打破死循環。
+
+| 參數 | 類型 | 預設值 | 描述 |
+| --- | --- | --- | --- |
+| `--cycle-detect-last-n N` | 整數 | 64 | 要檢查循環模式的最近 token 數量（0 = 停用） |
+| `--cycle-detect-min-period N` | 整數 | 2 | 要檢測的最小週期長度 |
+| `--cycle-detect-max-period N` | 整數 | 8 | 要檢測的最大週期長度 |
+| `--cycle-detect-action TYPE` | 字符串 | `"boost"` | 檢測到循環模式時的動作：`"boost"`（溫度升溫，預設）或 `"penalty"`（重複懲罰） |
+| `--cycle-boost-factor F` | 浮點數 | 0.5 | 檢測到循環模式時的升溫因子（僅當 action = `"boost"` 時生效。等效於臨時將採樣溫度提高，壓縮所有 logit 差距） |
+| `--cycle-penalty-repeat F` | 浮點數 | 1.00 | 檢測到循環模式時的重複懲罰因子（僅當 action = `"penalty"` 時生效。1.0 = 停用懲罰） |
+
+示例（啟用週期性重複採樣器並採用升溫機制打破死循環）：
+
+```sh
+./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action boost --cycle-boost-factor 0.5
+```
+
+示例（啟用週期性重複採樣器並採用懲罰機制打破死循環）：
+
+```sh
+./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action penalty --cycle-penalty-repeat 1.5
+```
+
+**升溫原理：** 當選擇 `"boost"` 動作時，對所有候選 token 的 logit 乘以 `1/(1+boost_factor)`，等效於臨時提高採樣溫度。一旦生成的 token 不再呈現週期循環，檢測機制會重置，恢復正常採樣。
+
+**與連續 Token 失控檢測的區別：** 內建的連續 token 失控檢測僅針對「連續相同 token」的硬性失控（如 `aaaaaaaa...` 或 `</</</...`）。而本機制專門針對 token-level 的交替/週期性循環模式（如 `ababab...`、`abcabc...`），透過週期檢測演算法（基於字串最小週期匹配屬性）識別並打破此類死循環。
+
 #### 早停檢測與 EOG 抑制（Early-Stop Detection & EOG Suppression）
 
 當模型在思考完成後未產生任何可見輸出就自動停止（例如思考結束但無正文回答，或工具調用被截斷），客戶端會收到空響應且無明顯錯誤。流式模式下此問題尤其嚴重：用戶可能完全不會察覺本回合已丟失。本機制通過雙層設計驅動模型持續生成直至出現真實內容，並對觸發此機制的 slot 開啟 5 回合高強度監控。
