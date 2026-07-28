@@ -125,6 +125,7 @@ enum common_sampler_type {
     COMMON_SAMPLER_TYPE_PENALTIES   = 10,
     COMMON_SAMPLER_TYPE_TOP_N_SIGMA = 11,
     COMMON_SAMPLER_TYPE_ADAPTIVE_P  = 12,
+    COMMON_SAMPLER_TYPE_PERIODIC_REPEAT = 13,
 };
 
 // dimensionality reduction methods, used by cvector-generator
@@ -263,6 +264,10 @@ struct common_params_sampling {
     int32_t runaway_threshold      = 8;             // consecutive identical tokens to trigger temp boost (0 = disabled)
     float   runaway_boost          = 2.0f;          // mild temp boost at threshold
     float   runaway_boost_strong   = 3.0f;          // strong temp boost at 2x threshold
+    int32_t cycle_detect_last_n    = 64;            // number of recent tokens to check for cyclic patterns (0 = disabled)
+    int32_t cycle_detect_min_period = 2;            // minimum period length to detect
+    int32_t cycle_detect_max_period = 8;            // maximum period length to detect
+    float   cycle_penalty_repeat   = 1.00f;         // repetition penalty factor when cyclic pattern is detected (1.0 = disabled)
     int32_t eog_retry_max          = 3;             // max EOG suppression retries for think-only early stop (0 = disabled)
     float   adaptive_target    = -1.0f;  // select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
     float   adaptive_decay     = 0.90f;  // EMA decay for adaptation; history ≈ 1/(1-decay) tokens (0.0 - 0.99)

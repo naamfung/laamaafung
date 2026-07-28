@@ -3557,6 +3557,170 @@ struct llama_sampler * llama_sampler_init_repeat_line(
     };
 }
 
+// periodic-repeat
+
+struct llama_sampler_periodic_repeat {
+    const int32_t last_n;
+    const int32_t min_period;
+    const int32_t max_period;
+    const float   penalty_repeat;
+
+    std::vector<llama_token> last_tokens;
+
+    llama_sampler_periodic_repeat(int32_t last_n, int32_t min_period, int32_t max_period, float penalty_repeat)
+        : last_n(last_n > 0 ? last_n : 64),
+          min_period(min_period > 0 ? min_period : 2),
+          max_period(max_period > min_period ? max_period : 8),
+          penalty_repeat(penalty_repeat > 0.0f ? penalty_repeat : 1.0f) {}
+};
+
+static bool has_periodic_pattern(const std::vector<llama_token> & tokens, int32_t p) {
+    size_t n = tokens.size();
+    if (n < 2 * p) {
+        return false;
+    }
+    // Check if s[0..n-p-1] == s[p..n-1]
+    for (size_t i = 0; i < n - p; ++i) {
+        if (tokens[i] != tokens[i + p]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool detect_periodic_pattern(const std::vector<llama_token> & tokens, int32_t min_period, int32_t max_period, int32_t & found_period) {
+    size_t n = tokens.size();
+    if (n < 2 * min_period) {
+        return false;
+    }
+
+    // Check only the last 'len' tokens, where len is at least 2*max_period
+    size_t check_start = (n > static_cast<size_t>(max_period * 2)) ? n - max_period * 2 : 0;
+    size_t check_len = n - check_start;
+
+    for (int32_t p = min_period; p <= max_period; ++p) {
+        if (check_len < 2 * p) {
+            continue;
+        }
+        // Check if tokens[check_start .. check_start+check_len-p-1] == tokens[check_start+p .. check_start+check_len-1]
+        bool periodic = true;
+        for (size_t i = 0; i < check_len - p; ++i) {
+            if (tokens[check_start + i] != tokens[check_start + i + p]) {
+                periodic = false;
+                break;
+            }
+        }
+        if (periodic) {
+            found_period = p;
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char * llama_sampler_periodic_repeat_name(const struct llama_sampler * /*smpl*/) {
+    return "periodic-repeat";
+}
+
+static void llama_sampler_periodic_repeat_accept(struct llama_sampler * smpl, llama_token token) {
+    auto * ctx = (llama_sampler_periodic_repeat *) smpl->ctx;
+    ctx->last_tokens.push_back(token);
+    if ((int)ctx->last_tokens.size() > ctx->last_n) {
+        ctx->last_tokens.erase(ctx->last_tokens.begin());
+    }
+}
+
+static void llama_sampler_periodic_repeat_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (llama_sampler_periodic_repeat *) smpl->ctx;
+    if (ctx->last_n <= 0 || ctx->penalty_repeat <= 1.0f || ctx->last_tokens.size() < 2 * ctx->min_period) {
+        return;
+    }
+
+    int32_t found_period = -1;
+    if (!detect_periodic_pattern(ctx->last_tokens, ctx->min_period, ctx->max_period, found_period)) {
+        return;
+    }
+
+    // Periodic pattern detected, apply penalty to tokens that would continue the cycle
+    // The cycle is of the form: [x0, x1, ..., x_{p-1}, x0, x1, ..., x_{p-1}, ...]
+    // The next token in the cycle would be ctx->last_tokens.back() % p == ?
+    // Actually, the next token to continue the cycle is ctx->last_tokens.back() + 1 (in terms of period index)
+    // If last_tokens has a period of length p, the next token in the cycle is:
+    // next_token_in_cycle = ctx->last_tokens[ctx->last_tokens.size() % p]
+
+    llama_token next_token_in_cycle = ctx->last_tokens[ctx->last_tokens.size() % ctx->last_n];
+    // But we need to find the actual next token in the cycle:
+    // If the period is p, and we have tokens[t], tokens[t+1], ..., tokens[t+p-1] as the period
+    // The last token is ctx->last_tokens.back(), which is ctx->last_tokens[ctx->last_tokens.size()-1]
+    // The next token in the cycle would be ctx->last_tokens[(ctx->last_tokens.size()-1 + 1) % p] if we consider the period starting from the right position
+
+    // Actually, let's compute the expected next token in the cycle:
+    size_t n = ctx->last_tokens.size();
+    llama_token expected_next_token = ctx->last_tokens[(n - 1 + 1) % found_period == 0 ? found_period : (n - 1 + 1) % found_period];
+    // Wait, (n-1+1) % p = n % p. So expected_next_token = ctx->last_tokens[n % found_period]
+
+    expected_next_token = ctx->last_tokens[n % found_period];
+
+    // Apply penalty to the expected next token
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        if (cur_p->data[i].id == expected_next_token) {
+            if (cur_p->data[i].logit <= 0) {
+                cur_p->data[i].logit *= ctx->penalty_repeat;
+            } else {
+                cur_p->data[i].logit /= ctx->penalty_repeat;
+            }
+        }
+    }
+
+    cur_p->sorted = false;
+}
+
+static void llama_sampler_periodic_repeat_reset(struct llama_sampler * smpl) {
+    auto * ctx = (llama_sampler_periodic_repeat *) smpl->ctx;
+    ctx->last_tokens.clear();
+}
+
+static struct llama_sampler * llama_sampler_periodic_repeat_clone(const struct llama_sampler * smpl) {
+    const auto * ctx = (const llama_sampler_periodic_repeat *) smpl->ctx;
+    auto * result = llama_sampler_init_periodic_repeat(ctx->last_n, ctx->min_period, ctx->max_period, ctx->penalty_repeat);
+    // copy the state
+    {
+        auto * result_ctx = (llama_sampler_periodic_repeat *) result->ctx;
+        result_ctx->last_tokens = ctx->last_tokens;
+    }
+    return result;
+}
+
+static void llama_sampler_periodic_repeat_free(struct llama_sampler * smpl) {
+    delete (llama_sampler_periodic_repeat *) smpl->ctx;
+}
+
+static struct llama_sampler_i llama_sampler_periodic_repeat_i = {
+    /* .name              = */ llama_sampler_periodic_repeat_name,
+    /* .accept            = */ llama_sampler_periodic_repeat_accept,
+    /* .apply             = */ llama_sampler_periodic_repeat_apply,
+    /* .reset             = */ llama_sampler_periodic_repeat_reset,
+    /* .clone             = */ llama_sampler_periodic_repeat_clone,
+    /* .free              = */ llama_sampler_periodic_repeat_free,
+    /* .backend_init      = */ nullptr,
+    /* .backend_accept    = */ nullptr,
+    /* .backend_apply     = */ nullptr,
+    /* .backend_set_input = */ nullptr,
+};
+
+struct llama_sampler * llama_sampler_init_periodic_repeat(
+        int32_t   last_n,
+        int32_t   min_period,
+        int32_t   max_period,
+        float   penalty_repeat) {
+    LLAMA_LOG_DEBUG("periodic-repeat: init last_n=%d min_period=%d max_period=%d penalty_repeat=%.2f\n",
+        last_n, min_period, max_period, (double)penalty_repeat);
+    return new llama_sampler {
+        /* .iface = */ &llama_sampler_periodic_repeat_i,
+        /* .ctx   = */ new llama_sampler_periodic_repeat(last_n, min_period, max_period, penalty_repeat),
+    };
+}
+
 // logit-bias
 
 struct llama_sampler_logit_bias : public llama_sampler_backend {

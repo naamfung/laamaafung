@@ -278,6 +278,9 @@ static llama_sampler * common_sampler_chain_build(const struct llama_model * mod
                     // so we know to add the sampler at the very end.
                     use_adaptive_p = true;
                     break;
+                case COMMON_SAMPLER_TYPE_PERIODIC_REPEAT:
+                    samplers.push_back(llama_sampler_init_periodic_repeat(params.cycle_detect_last_n, params.cycle_detect_min_period, params.cycle_detect_max_period, params.cycle_penalty_repeat));
+                    break;
                 default:
                     GGML_ASSERT(false && "unknown sampler type");
             }
