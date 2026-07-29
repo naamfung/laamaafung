@@ -653,8 +653,16 @@ std::string common_chat_format_single(const struct common_chat_templates * tmpls
     inputs.messages.push_back(new_msg);
     inputs.add_generation_prompt = add_ass;
     auto fmt_new_msg             = common_chat_templates_apply(tmpls, inputs).prompt;
-    // get the diff part
-    ss << fmt_new_msg.substr(fmt_past_msg.size(), fmt_new_msg.size() - fmt_past_msg.size());
+    // get the diff part - find common prefix rather than assuming fmt_past_msg is
+    // a prefix of fmt_new_msg; templates with conditional rendering (e.g. thinking
+    // content toggled by message position) can cause the same messages to render
+    // differently when the message list changes
+    size_t prefix_len = 0;
+    const size_t min_len = std::min(fmt_past_msg.size(), fmt_new_msg.size());
+    while (prefix_len < min_len && fmt_past_msg[prefix_len] == fmt_new_msg[prefix_len]) {
+        prefix_len++;
+    }
+    ss << fmt_new_msg.substr(prefix_len);
     return ss.str();
 }
 
