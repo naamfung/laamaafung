@@ -2117,10 +2117,15 @@ static bool has_visible_after(const std::string & text, size_t offset) {
     // new_msg  = a user message asking the model to judge whether its prior
     //            reply is complete
     //
-    // common_chat_format_single returns only the delta relative to past_msg, so
-    // the result is short (just the user question + the assistant generation
-    // prompt) and can be appended to the current context without re-evaluating
-    // the whole history.
+    // We render the template twice and return the delta, so the result is short
+    // (just the user question + the assistant generation prompt) and can be
+    // appended to the current context without re-evaluating the whole history.
+    //
+    // We pass preserve_reasoning=true so the template always includes the
+    // assistant's reasoning content regardless of message position.  Without
+    // this, templates that conditionally hide thinking based on the last user
+    // query index would strip it when a new user message is added, causing the
+    // two renders to diverge and the diff to be incorrect.
     //
     // The <complete>/<incomplete> markers are an internal protocol and do not
     // depend on any vendor-specific tags (e.g. <think>, <tool_call>), so the
@@ -2152,11 +2157,47 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 "If it is incomplete, truncated, or missing an intended tool call, "
                 "output <incomplete>. Output only the tag.";
         }
-        return common_chat_format_single(chat_params.tmpls.get(),
-                                         past_msg,
-                                         user_msg,
-                                         /*add_ass=*/true,
-                                         slot.chat_use_jinja);
+        if (!slot.chat_use_jinja) {
+            return common_chat_format_single(chat_params.tmpls.get(),
+                                             past_msg,
+                                             user_msg,
+                                             /*add_ass=*/true,
+                                             /*use_jinja=*/false);
+        }
+
+        // Jinja path: render the template ourselves so we can inject
+        // preserve_reasoning=true, which triggers caps_apply_preserve_reasoning
+        // and ensures the template includes reasoning content in both renders.
+        auto kwargs = chat_params.chat_template_kwargs;
+        kwargs["preserve_reasoning"] = "true";
+
+        common_chat_templates_inputs inputs;
+        inputs.use_jinja            = true;
+        inputs.chat_template_kwargs = kwargs;
+
+        // Render 1: past_msg only (no generation prompt)
+        inputs.messages              = past_msg;
+        inputs.add_generation_prompt = false;
+        std::string fmt_past = common_chat_templates_apply(chat_params.tmpls.get(), inputs).prompt;
+
+        // Render 2: past_msg + user_msg (with generation prompt)
+        inputs.messages.push_back(user_msg);
+        inputs.add_generation_prompt = true;
+        std::string fmt_full = common_chat_templates_apply(chat_params.tmpls.get(), inputs).prompt;
+
+        // Find common prefix and return the delta
+        size_t prefix_len = 0;
+        const size_t min_len = std::min(fmt_past.size(), fmt_full.size());
+        while (prefix_len < min_len && fmt_past[prefix_len] == fmt_full[prefix_len]) {
+            prefix_len++;
+        }
+
+        std::ostringstream ss;
+        if (!fmt_past.empty() && fmt_past.back() == '\n') {
+            ss << "\n";
+        }
+        ss << fmt_full.substr(prefix_len);
+        return ss.str();
     }
 
     // Process one token of a hidden self-check reply. Tokens are hidden from
