@@ -77,6 +77,38 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 
 > **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。上游新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現 Laamaafung 已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降。建議根据自身设备的实际参数性能表现选用 `mlock-ram` 或者 `mlock`。
 
+### v11 分支特色：自動 Batch Size 調優（Auto Batch Size Tuning）
+
+在 v11 分支中，引入了對 `--batch-size` 和 `--ubatch-size` 參數的自動調優支持。此功能為 v11 分支獨有，上游官方分支尚未支援。透過自動調優，程序可在啟動時根據 `n_ctx`（上下文大小）與硬件特徵（如 NUMA 架構狀態）自動計算並選擇最佳的邏輯 batch size (`n_batch`) 與物理 batch size (`n_ubatch`)，以充分發揮硬件並行計算能力並避免內存/Cache 瓶頸。
+
+| 參數 | 說明 |
+| --- | --- |
+| `--batch-size auto` 或 `--batch-size -1` | 啟用邏輯 batch size (`n_batch`) 自動調優。程序會根據 `n_ctx` 和硬件特徵自動計算最佳值，最大上限為 8192。若系統為 NUMA 架構，則上限降低至 4096。確保最小值 `>= 32`（BLAS 要求）。 |
+| `--ubatch-size auto` 或 `--ubatch-size -1` | 啟用物理 batch size (`n_ubatch`) 自動調優。程序會根據 `n_ctx` 和硬件特徵自動計算最佳值，最大上限為 4096。若系統為 NUMA 架構，則上限降低至 2048。確保最小值 `>= 64`（以觸發 Tiled Flash Attention 優化，對應 `Q_TILE_SZ` 閾值）。 |
+
+**調優邏輯說明：**
+- **基於 Context Length 的動態縮放**：自動計算時，會根據 `n_ctx` 進行縮放，避免過大的 batch 導致 KV cache 溢出或 intermediate tensors 過大。
+- **NUMA 架構適應**：若檢測到系統為 NUMA 架構（多 CPU 插槽），則降低 `n_batch` 與 `n_ubatch` 的上限，以避免跨 NUMA 節點的內存訪問延遲增加和 L3 cache miss 率飆升。
+- **觸發 Tiled Flash Attention 優化**：確保 `n_ubatch >= 64`，以滿足 `neq1 >= Q_TILE_SZ` 的條件，從而觸發 `ggml_compute_forward_flash_attn_ext_tiled` 中的 SIMD/GEMM tile 並行優化，避免回退到效率較低的 `one_chunk` 路徑。
+
+**使用示例：**
+
+```sh
+# 啟用邏輯與物理 batch size 自動調優
+./llama-server --model models/llama3.gguf --batch-size auto --ubatch-size auto ...
+
+# 或使用 -1 值觸發自動調優
+./llama-server --model models/llama3.gguf --batch-size -1 --ubatch-size -1 ...
+```
+
+當設置為 `auto` 或 `-1` 時，程序會在啟動時根據上述規則自動計算並輸出選擇的 `n_batch` 和 `n_ubatch` 值，例如：
+```
+llama_context::from_params: n_batch set to auto, selected value: 4096 based on n_ctx=131072 and hardware
+llama_context::from_params: n_ubatch set to auto, selected value: 4096 based on n_ctx=131072 and hardware
+```
+
+---
+
 #### TurboQuant 键值缓存 與 MMA 融合路徑
 
 透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；Volta 及更早架構會自動回退到 VEC 路徑。
