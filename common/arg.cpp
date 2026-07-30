@@ -1538,16 +1538,24 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_N_PREDICT"));
     add_opt(common_arg(
         {"-b", "--batch-size"}, "N",
-        string_format("logical maximum batch size (default: %d)", params.n_batch),
-        [](common_params & params, int value) {
-            params.n_batch = value;
+        string_format("logical maximum batch size (default: %d, -1 or 'auto' for auto-tune)", params.n_batch),
+        [](common_params & params, const std::string & value_str) {
+            if (value_str == "auto" || value_str == "-1") {
+                params.n_batch = -1;
+            } else {
+                params.n_batch = std::stoi(value_str);
+            }
         }
     ).set_env("LLAMA_ARG_BATCH"));
     add_opt(common_arg(
         {"-ub", "--ubatch-size"}, "N",
-        string_format("physical maximum batch size (default: %d)", params.n_ubatch),
-        [](common_params & params, int value) {
-            params.n_ubatch = value;
+        string_format("physical maximum batch size (default: %d, -1 or 'auto' for auto-tune)", params.n_ubatch),
+        [](common_params & params, const std::string & value_str) {
+            if (value_str == "auto" || value_str == "-1") {
+                params.n_ubatch = -1;
+            } else {
+                params.n_ubatch = std::stoi(value_str);
+            }
         }
     ).set_env("LLAMA_ARG_UBATCH"));
     add_opt(common_arg(
