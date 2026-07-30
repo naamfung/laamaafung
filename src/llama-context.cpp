@@ -250,6 +250,31 @@ llama_context::llama_context(
     cparams.fused_dsv4_hc_post = true;
     cparams.auto_fhc           = true;
 
+    // Auto-tune n_batch and n_ubatch if enabled
+    if (params.n_batch_auto) {
+        // Calculate auto n_batch based on n_ctx and hardware features
+        int32_t n_batch_auto = cparams.causal_attn ? std::min((int32_t)cparams.n_ctx, 8192) : 8192;
+        if (ggml_is_numa()) {
+            n_batch_auto = std::min(n_batch_auto, 4096); // Reduce for NUMA architectures
+        }
+        // Ensure minimum batch size for BLAS (>=32)
+        n_batch_auto = std::max(n_batch_auto, 32);
+        params.n_batch = n_batch_auto;
+        LLAMA_LOG_INFO("%s: n_batch set to auto, selected value: %d based on n_ctx=%u and hardware\n", __func__, params.n_batch, cparams.n_ctx);
+    }
+
+    if (params.n_ubatch_auto) {
+        // Calculate auto n_ubatch based on n_ctx and hardware features
+        int32_t n_ubatch_auto = std::min((int32_t)cparams.n_ctx, 4096);
+        if (ggml_is_numa()) {
+            n_ubatch_auto = std::min(n_ubatch_auto, 2048); // Reduce for NUMA architectures
+        }
+        // Ensure minimum ubatch size for tiled attention (>= 64 to trigger Q_TILE_SZ optimization)
+        n_ubatch_auto = std::max(n_ubatch_auto, 64);
+        params.n_ubatch = n_ubatch_auto;
+        LLAMA_LOG_INFO("%s: n_ubatch set to auto, selected value: %d based on n_ctx=%u and hardware\n", __func__, params.n_ubatch, cparams.n_ctx);
+    }
+
     // with causal attention, the batch size is limited by the context size
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
