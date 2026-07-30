@@ -1544,26 +1544,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_BATCH"));
     add_opt(common_arg(
-        {"--batch-size-auto"},
-        "Enable auto-tuning for logical batch size",
-        [](common_params & params) {
-            params.n_batch_auto = true;
-        }
-    ));
-    add_opt(common_arg(
         {"-ub", "--ubatch-size"}, "N",
         string_format("physical maximum batch size (default: %d)", params.n_ubatch),
         [](common_params & params, int value) {
             params.n_ubatch = value;
         }
     ).set_env("LLAMA_ARG_UBATCH"));
-    add_opt(common_arg(
-        {"--ubatch-size-auto"},
-        "Enable auto-tuning for physical batch size",
-        [](common_params & params) {
-            params.n_ubatch_auto = true;
-        }
-    ));
     add_opt(common_arg(
         {"--keep"}, "N",
         string_format("number of tokens to keep from the initial prompt (default: %d, -1 = all)", params.n_keep),

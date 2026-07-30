@@ -250,8 +250,8 @@ llama_context::llama_context(
     cparams.fused_dsv4_hc_post = true;
     cparams.auto_fhc           = true;
 
-    // Auto-tune n_batch and n_ubatch if enabled
-    if (params.n_batch_auto) {
+    // Auto-tune n_batch and n_ubatch if set to -1
+    if (params.n_batch == -1) {
         // Calculate auto n_batch based on n_ctx and hardware features
         int32_t n_batch_auto = cparams.causal_attn ? std::min((int32_t)cparams.n_ctx, 8192) : 8192;
         if (ggml_is_numa()) {
@@ -263,7 +263,7 @@ llama_context::llama_context(
         LLAMA_LOG_INFO("%s: n_batch set to auto, selected value: %d based on n_ctx=%u and hardware\n", __func__, params.n_batch, cparams.n_ctx);
     }
 
-    if (params.n_ubatch_auto) {
+    if (params.n_ubatch == -1) {
         // Calculate auto n_ubatch based on n_ctx and hardware features
         int32_t n_ubatch_auto = std::min((int32_t)cparams.n_ctx, 4096);
         if (ggml_is_numa()) {
@@ -278,7 +278,7 @@ llama_context::llama_context(
     // with causal attention, the batch size is limited by the context size
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
-    cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
+    cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 || params.n_ubatch == -1 ? params.n_batch : params.n_ubatch);
 
     cparams.n_outputs_max = params.n_outputs_max == 0 || llama_model_has_encoder(&model) ? cparams.n_batch : params.n_outputs_max;
 
