@@ -251,28 +251,140 @@ llama_context::llama_context(
     cparams.auto_fhc           = true;
 
     // Auto-tune n_batch and n_ubatch if set to -1
-    if (params.n_batch == -1) {
-        // Calculate auto n_batch based on n_ctx and hardware features
-        int32_t n_batch_auto = cparams.causal_attn ? std::min((int32_t)cparams.n_ctx, 8192) : 8192;
-        if (ggml_is_numa()) {
-            n_batch_auto = std::min(n_batch_auto, 4096); // Reduce for NUMA architectures
-        }
-        // Ensure minimum batch size for BLAS (>=32)
-        n_batch_auto = std::max(n_batch_auto, 32);
-        params.n_batch = n_batch_auto;
-        LLAMA_LOG_INFO("%s: n_batch set to auto, selected value: %d based on n_ctx=%u and hardware\n", __func__, params.n_batch, cparams.n_ctx);
-    }
+    if (params.n_batch == -1 || params.n_ubatch == -1) {
+        // Get free memory from all accelerator devices to prevent OOM
+        size_t free_mem_total = 0;
+        size_t total_mem_total = 0;
 
-    if (params.n_ubatch == -1) {
-        // Calculate auto n_ubatch based on n_ctx and hardware features
-        int32_t n_ubatch_auto = std::min((int32_t)cparams.n_ctx, 4096);
-        if (ggml_is_numa()) {
-            n_ubatch_auto = std::min(n_ubatch_auto, 2048); // Reduce for NUMA architectures
+        for (auto & backend : backends) {
+            auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
+            if (dev_type == GGML_BACKEND_DEVICE_TYPE_CPU || dev_type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                // skip CPU and generic ACCEL devices for GPU memory check
+                continue;
+            }
+            auto * dev = ggml_backend_get_device(backend.get());
+            if (dev) {
+                size_t free_mem = 0;
+                size_t total_mem = 0;
+                ggml_backend_dev_memory(dev, &free_mem, &total_mem);
+                if (free_mem > 0) {
+                    free_mem_total += free_mem;
+                    total_mem_total += total_mem;
+                }
+            }
         }
-        // Ensure minimum ubatch size for tiled attention (>= 64 to trigger Q_TILE_SZ optimization)
-        n_ubatch_auto = std::max(n_ubatch_auto, 64);
-        params.n_ubatch = n_ubatch_auto;
-        LLAMA_LOG_INFO("%s: n_ubatch set to auto, selected value: %d based on n_ctx=%u and hardware\n", __func__, params.n_ubatch, cparams.n_ctx);
+
+        // Calculate safe n_ubatch based on free memory if available
+        int32_t n_ubatch_calc = -1;
+        if (free_mem_total > 0 && params.n_ubatch == -1) {
+            // Convert to MB for easier calculation
+            size_t free_mem_mb = free_mem_total / (1024 * 1024);
+            size_t total_mem_mb = total_mem_total / (1024 * 1024);
+
+            LLAMA_LOG_INFO("%s: GPU memory - free: %zu MB, total: %zu MB\n", __func__, free_mem_mb, total_mem_mb);
+
+            // Calculate safe n_ubatch based on free memory
+            // Each n_ubatch token requires approximately: 2 * n_layers * n_embd_k_gqa * type_size bytes for KV cache
+            // plus intermediate tensor memory for batch operations
+            // As a conservative estimate, assume ~2-4 bytes per token per layer for KV cache + intermediates
+            const uint32_t n_layers = model.hparams.n_layer();
+            const uint32_t n_embd_k_gqa = model.hparams.n_embd_k_gqa_max();
+            const size_t type_size_v = ggml_type_size(params.type_v);
+            const size_t type_size_k = ggml_type_size(params.type_k);
+
+            // Estimate memory per n_ubatch token: KV cache (2 tensors: K and V) + intermediate tensors
+            // KV cache per token: 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2)
+            size_t kv_cache_per_ubatch_token_bytes = 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2);
+
+            // Add intermediate tensor estimate (roughly 4-8x kv_cache_per_ubatch_token_bytes for attention intermediates)
+            size_t total_per_ubatch_token_bytes = kv_cache_per_ubatch_token_bytes * 6;
+
+            // Ensure we keep at least 20% of GPU memory free for other applications and safety margin
+            size_t safe_free_mem_bytes = free_mem_total * 0.8;
+
+            if (total_per_ubatch_token_bytes > 0 && safe_free_mem_bytes > 0) {
+                n_ubatch_calc = static_cast<int32_t>(safe_free_mem_bytes / total_per_ubatch_token_bytes);
+
+                // Apply bounds
+                n_ubatch_calc = std::max(n_ubatch_calc, static_cast<int32_t>(64)); // Minimum for tiled attention
+                n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(cparams.n_ctx)); // Cannot exceed n_ctx
+                if (ggml_is_numa()) {
+                    n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(2048)); // Reduce for NUMA architectures
+                }
+
+                LLAMA_LOG_INFO("%s: n_ubatch adjusted to auto (based on free memory): %d (free: %zu MB, est. per token: %zu bytes)\n",
+                    __func__, n_ubatch_calc, free_mem_mb, total_per_ubatch_token_bytes);
+            } else {
+                // Fallback to hardware-based calculation if memory estimation fails
+                n_ubatch_calc = std::min((int32_t)cparams.n_ctx, 4096);
+                if (ggml_is_numa()) {
+                    n_ubatch_calc = std::min(n_ubatch_calc, 2048); // Reduce for NUMA architectures
+                }
+                n_ubatch_calc = std::max(n_ubatch_calc, 64);
+                LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u and hardware): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
+            }
+        } else if (params.n_ubatch == -1) {
+            // Fallback to hardware-based calculation if no GPU memory info available
+            // For large context sizes, use more conservative ubatch limits to prevent OOM during CUDA graph construction
+            int32_t max_ubatch = 4096;
+            if (cparams.n_ctx >= 65536) {
+                max_ubatch = 1024; // Conservative limit for 64K+ context
+            } else if (cparams.n_ctx >= 32768) {
+                max_ubatch = 2048; // Conservative limit for 32K+ context
+            }
+
+            n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch);
+            if (ggml_is_numa()) {
+                n_ubatch_calc = std::min(n_ubatch_calc, 1024); // Reduce for NUMA architectures
+            }
+            n_ubatch_calc = std::max(n_ubatch_calc, 64);
+            LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u and hardware): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
+        }
+
+        if (params.n_ubatch == -1 && n_ubatch_calc != -1) {
+            params.n_ubatch = n_ubatch_calc;
+        }
+
+        // Calculate auto n_batch based on n_ctx, hardware features, and free memory
+        if (params.n_batch == -1) {
+            int32_t n_batch_calc;
+            if (params.n_ubatch != -1) {
+                // n_batch is typically >= n_ubatch and limited by n_ctx
+                // For large context sizes, use more conservative batch limits
+                int32_t max_n_batch = 8192;
+                if (cparams.n_ctx >= 65536) {
+                    max_n_batch = 2048; // Conservative limit for 64K+ context
+                } else if (cparams.n_ctx >= 32768) {
+                    max_n_batch = 4096; // Conservative limit for 32K+ context
+                }
+                n_batch_calc = std::min(static_cast<int32_t>(cparams.n_ctx), std::max(static_cast<int32_t>(params.n_ubatch), static_cast<int32_t>(512)));
+                n_batch_calc = std::min(n_batch_calc, max_n_batch);
+            } else {
+                // Calculate based on n_ctx and hardware features
+                int32_t max_n_batch = 8192;
+                if (cparams.n_ctx >= 65536) {
+                    max_n_batch = 2048; // Conservative limit for 64K+ context
+                } else if (cparams.n_ctx >= 32768) {
+                    max_n_batch = 4096; // Conservative limit for 32K+ context
+                }
+                n_batch_calc = cparams.causal_attn ? std::min((int32_t)cparams.n_ctx, max_n_batch) : max_n_batch;
+            }
+            if (ggml_is_numa()) {
+                // Reduce for NUMA architectures
+                int32_t numa_limit = 4096;
+                if (cparams.n_ctx >= 65536) {
+                    numa_limit = 1024;
+                } else if (cparams.n_ctx >= 32768) {
+                    numa_limit = 2048;
+                }
+                n_batch_calc = std::min(n_batch_calc, numa_limit);
+            }
+            // Ensure minimum batch size for BLAS (>=32)
+            n_batch_calc = std::max(n_batch_calc, static_cast<int32_t>(32));
+
+            params.n_batch = n_batch_calc;
+            LLAMA_LOG_INFO("%s: n_batch set to auto, selected value: %d based on n_ctx=%u, n_ubatch=%d and hardware\n", __func__, params.n_batch, cparams.n_ctx, params.n_ubatch);
+        }
     }
 
     // with causal attention, the batch size is limited by the context size

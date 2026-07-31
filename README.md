@@ -6,6 +6,8 @@
 
 优质输出 = （优质模型 + 优质模板 + 优质代理 + 优质引擎）* 正确参数
 
+---
+
 ### 克隆指南
 
 推薦優先克隆穩定分支 `v7`，適合穩定使用。
@@ -28,6 +30,8 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
+---
+
 ### 推荐模型
 
 unsloth/Qwen-AgentWorld-35B-A3B 二零二六年六月廿五 / 原版 / 推荐IQ4及以上质量：
@@ -36,6 +40,7 @@ https://huggingface.co/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/tree/main
 mudler/Qwen-AgentWorld-35B-A3B-APEX / 原版 / 建议 APEX-I-Compact 或 APEX-Compact 及以上质量：
 https://huggingface.co/mudler/Qwen-AgentWorld-35B-A3B-APEX-GGUF/tree/main
 
+---
 
 ### 推荐模板
 
@@ -43,11 +48,21 @@ https://huggingface.co/mudler/Qwen-AgentWorld-35B-A3B-APEX-GGUF/tree/main
 
 ---
 
-啟動示例：
+### 啟動示例
+
+Q80 + Q80 + MTP4：
 
 ```sh
-D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --prompt-truncate --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 128 --load-mode mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+D:/Programs/llama-cpp-repos/laamaafung/build-v11/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-repeat-penalty 1.1 --reasoning-repeat-last-n 256 --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --load-mode mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action boost --cycle-boost-factor 0.5 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
+
+Q80 + TURBO4 + MTP4：
+
+```sh
+D:/Programs/llama-cpp-repos/laamaafung/build-v11/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all -ngld all --n-cpu-moe 33 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v turbo4 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+```
+
+---
 
 #### 啟動參數與工作原理說明
 
@@ -77,9 +92,11 @@ D:/Programs/llama-cpp-repos/laamaafung/build-master/bin/Release/llama-server.exe
 
 > **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。上游新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現 Laamaafung 已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降。建議根据自身设备的实际参数性能表现选用 `mlock-ram` 或者 `mlock`。
 
-### v11 分支特色：自動 Batch Size 調優（Auto Batch Size Tuning）
+---
 
-在 v11 分支中，引入了對 `--batch-size` 和 `--ubatch-size` 參數的自動調優支持。此功能為 v11 分支獨有，上游官方分支尚未支援。透過自動調優，程序可在啟動時根據 `n_ctx`（上下文大小）與硬件特徵（如 NUMA 架構狀態）自動計算並選擇最佳的邏輯 batch size (`n_batch`) 與物理 batch size (`n_ubatch`)，以充分發揮硬件並行計算能力並避免內存/Cache 瓶頸。
+### 自動 Batch Size 調優（Auto Batch Size Tuning）
+
+引入了對 `--batch-size` 和 `--ubatch-size` 參數的自動調優支持。此功能為本分支獨有，上游官方分支尚未支援。透過自動調優，程序可在啟動時根據 `n_ctx`（上下文大小）與硬件特徵（如 NUMA 架構狀態）自動計算並選擇最佳的邏輯 batch size (`n_batch`) 與物理 batch size (`n_ubatch`)，以充分發揮硬件並行計算能力並避免內存/Cache 瓶頸。
 
 | 參數 | 說明 |
 | --- | --- |
@@ -119,6 +136,8 @@ llama_context::from_params: n_ubatch set to auto, selected value: 4096 based on 
 
 MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`、`Q->ne[1] <= 4`（解碼場景）、`Q->ne[0]` 為 128 或 256。條件不滿足時自動回退到 VEC 路徑，無需手動干預。
 
+---
+
 #### 啟用上下文容量管理的啟動示例
 
 如果須要處理可能超過上下文限制的請求，可以加入 `--prompt-truncate`（初始截斷）或 `--context-shift`（運行時 K-shift，隱含啟用初始截斷）。對於真正採用 SWA 架構的模型，若需要生成階段的運行時 K-shift 完整可用，須同時加入 `--swa-full`：
@@ -128,6 +147,8 @@ MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`�
 ```
 
 > **注意：** Qwen3.5/3.6 系列模型（MoE 與稠密變體）採用混合注意力機制（門控 DeltaNet 線性注意力 + 門控注意力），並非標準的滑動窗口注意力架構，GGUF 模型頭中 `n_swa = 0`。因此 `--swa-full` 對這些模型無效，載入時會自動檢測並禁用同時彈出警告 `swa_full is not supported by this model, it will be disabled`，此為正確行為，llama.cpp 已自動安全降級。`--context-shift` 會因 K-shift 不可用而自動禁用並警告，但 `--prompt-truncate` 不受影響，初始 prompt 截斷仍然生效。生成階段到達 context 上限時會優雅停止（`STOP_TYPE_LIMIT`）。Qwen3.5/3.6 系列本身支援長上下文（如 256K/512K），無需依賴 SWA 即可高效處理長序列。若想消除日誌噪音，請直接移除 `--swa-full`。`--swa-full` 僅對 GGUF 文件頭中明確聲明滑動窗口注意力且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。
+
+---
 
 #### 段級重複循環檢測參數說明
 
@@ -145,6 +166,8 @@ MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`�
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --repeat-line-window 10 --repeat-line-min-length 20 --repeat-line-delimiters "\n.!?:。！？：" --repeat-line-temp-boost 0.5
 ```
 
+---
+
 #### 連續 Token 重複失控檢測（內建，無須配置）
 
 當模型陷入同一 token 反覆生成的死循環（例如 `</</</...`），系統會自動偵測並以分級升溫打破循環，無需手動啟用任何參數。此機制與段級重複檢測（`--repeat-line-*`）互補：前者針對行/段級語義重複，本機制針對 token 級的硬性失控。
@@ -158,6 +181,8 @@ MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`�
 升溫原理與 `--repeat-line-temp-boost` 相同：對所有候選 token 的 logit 乘以 `1/(1+boost)`，等效於臨時提高採樣溫度。一旦生成的 token 不再重複，boost 立即歸零，恢復正常採樣。
 
 **與 `--repeat_penalty` / `--presence_penalty` 的區別：** 這兩個參數對已出現過的 token 施加持續性懲罰（降低其 logit），但對同一 token 連續出現的硬性失控無效。原因是：當模型對某 token（如 `</`）的 logit 遠高於所有其他候選 token 時，即使施加 1.5x 或 2.0x 的懲罰，此 token 仍然具有最高概率，模型會繼續選擇它，形成死循環。本機制不行"懲罰重複 token"的路線，而是通過升溫（壓縮所有 logit 差距）令低概率 token 獲得被選中的機會，從根本上打破循環。
+
+---
 
 #### 週期性 Token 循環檢測機制（Periodic Token Loop Detection）
 
@@ -187,6 +212,8 @@ MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`�
 **升溫原理：** 當選擇 `"boost"` 動作時，對所有候選 token 的 logit 乘以 `1/(1+boost_factor)`，等效於臨時提高採樣溫度。一旦生成的 token 不再呈現週期循環，檢測機制會重置，恢復正常採樣。
 
 **與連續 Token 失控檢測的區別：** 內建的連續 token 失控檢測僅針對「連續相同 token」的硬性失控（如 `aaaaaaaa...` 或 `</</</...`）。而本機制專門針對 token-level 的交替/週期性循環模式（如 `ababab...`、`abcabc...`），透過週期檢測演算法（基於字串最小週期匹配屬性）識別並打破此類死循環。
+
+---
 
 #### 早停檢測與 EOG 抑制（Early-Stop Detection & EOG Suppression）
 
@@ -244,9 +271,13 @@ NONE -> PREFILL -> GENERATING -> {NONE | ROLLBACK} -> NONE
 - `--eog-retry-max` 同時控制 slot 層抑制次數與 HTTP 層非流式重試次數
 - `slot.eog_retry_count` 由 `slot.reset()` 重置，故預算按請求計算（`monitoring_turns` 為 per-conversation 信號）
 
+---
+
 #### 上下文容量管理的標籤邊界保護
 
 啟用 `--context-shift` 時，截斷操作會檢查截斷邊界是否切斷了多 token 組成的特殊標籤（如 `</function>`、`<function=...>`），並自動調整邊界避免割裂標籤，防止模型因看到殘缺標籤而產生異常輸出。
+
+---
 
 #### DRY 采样防重复参数说明
 
@@ -267,6 +298,7 @@ DRY (Don't Repeat Yourself) 是一种防止模型生成重复内容的采样机�
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --dry-multiplier 1.5 --dry-base 1.75 --dry-allowed-length 2 --dry-penalty-last-n 2048 --dry-sequence-breaker "none"
 ```
 
+---
 
 #### 推理塊採樣參數覆蓋（Reasoning Sampling Overrides）
 
@@ -331,6 +363,7 @@ Anthropic 客戶端範例（`/v1/messages`）：
 }
 ```
 
+---
 
 ## 编程代理
 
@@ -339,6 +372,7 @@ Anthropic 客戶端範例（`/v1/messages`）：
 此乃适配本地模型服务的 Klaude Code 版本：https://github.com/naamfung/klaude/releases
 
 默认设置上下文长度为 128k 容量，可使用 `ANTHROPIC_MODEL="Agentic-Turbo-Coder[256k]"` 等方式设置为你本地模型服务开启的容量上限。
+
 
 ### 简单配置
 
@@ -363,6 +397,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="Agentic-Turbo-Coder"
 
 Glash 是另外一個选择，提供终端環境下的编程代理能力：https://github.com/naamfung/glash
 
+---
 
 ## llama.cpp
 
