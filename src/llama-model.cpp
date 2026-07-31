@@ -85,6 +85,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_stablelm(params);
         case LLM_ARCH_MELLUM:
             return new llama_model_mellum(params);
+        case LLM_ARCH_NANBEIGE:
+            return new llama_model_nanbeige(params);
         case LLM_ARCH_QWEN:
             return new llama_model_qwen(params);
         case LLM_ARCH_QWEN2:
@@ -829,6 +831,7 @@ const char * llm_type_name(llm_type type) {
         case LLM_TYPE_100B_A6B:      return "100B.A6B";
         case LLM_TYPE_102B_A12B:     return "102B.A12B";
         case LLM_TYPE_106B_A12B:     return "106B.A12B";
+        case LLM_TYPE_118B_A8B:      return "118B.A8B";
         case LLM_TYPE_120B_A12B:     return "120B.A12B";
         case LLM_TYPE_122B_A10B:     return "122B.A10B";
         case LLM_TYPE_196B_A11B:     return "196B.A11B";
@@ -1102,8 +1105,8 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     // n_layer_all drives writes into fixed-size per-layer arrays (std::array<..., LLAMA_MAX_LAYERS>,
     // e.g. is_swa_impl in set_swa_pattern). Reject a model that declares more layers than those
     // arrays hold, otherwise an out-of-range block_count causes an out-of-bounds write during load.
-    if (hparams.n_layer_all > LLAMA_MAX_LAYERS) {
-        throw std::runtime_error(format("invalid n_layer = %u (exceeds LLAMA_MAX_LAYERS = %d)",
+    if (hparams.n_layer_all <= 0 || hparams.n_layer_all > LLAMA_MAX_LAYERS) {
+        throw std::runtime_error(format("invalid n_layer = %u (must be in [1, %d])",
                     hparams.n_layer_all, LLAMA_MAX_LAYERS));
     }
     ml.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,        false);
@@ -1268,7 +1271,7 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
 
 bool llama_model_base::load_tensors(llama_model_loader & ml) {
     const auto & split_mode   = params.split_mode;
-    const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MLOCK_RAM;
+    const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MLOCK_RAM;
     const auto & tensor_split = params.tensor_split;
 
     const int n_layer_all = hparams.n_layer_all;
@@ -2088,7 +2091,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 res = nullptr;
             } break;
         case LLM_ARCH_DEEPSEEK32:
-        case LLM_ARCH_GLM_DSA:
             {
                 res = new llama_kv_cache_dsa(
                         *this,
@@ -2104,6 +2106,56 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         hparams.swa_type,
                         nullptr,
                         nullptr);
+            } break;
+        case LLM_ARCH_GLM_DSA:
+            {
+                if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && hparams.n_layer_nextn > 0) {
+                    // The NextN/MTP draft head runs dense MLA (no DSA indexer), so the
+                    // MTP context uses a plain attention KV cache holding only the
+                    // nextn layer(s) - same pattern as the hybrid Qwen3.5 MTP context.
+                    llama_kv_cache::layer_filter_cb filter =
+                        [&](uint32_t il) { return il >= hparams.n_layer(); };
+
+                    res = new llama_kv_cache(
+                            *this,
+                            hparams,
+                            params.type_k,
+                            params.type_v,
+                            !cparams.flash_attn,
+                            cparams.offload_kqv,
+                            cparams.kv_unified,
+                            cparams.n_ctx_seq,
+                            cparams.n_seq_max,
+                            1,
+                            hparams.n_swa,
+                            hparams.swa_type,
+                            nullptr,
+                            filter,
+                            nullptr,
+                            nullptr);
+                } else {
+                    // Main context: DSA cache for the trunk layers only - the nextn
+                    // layer(s) are never attended by the trunk graph.
+                    llama_kv_cache::layer_filter_cb filter = nullptr;
+                    if (hparams.n_layer_nextn > 0) {
+                        filter = [&](uint32_t il) { return il < hparams.n_layer(); };
+                    }
+
+                    res = new llama_kv_cache_dsa(
+                            *this,
+                            params.type_k,
+                            params.type_v,
+                            !cparams.flash_attn,
+                            cparams.offload_kqv,
+                            cparams.kv_unified,
+                            cparams.n_ctx_seq,
+                            cparams.n_seq_max,
+                            1,
+                            hparams.n_swa,
+                            hparams.swa_type,
+                            filter,
+                            nullptr);
+                }
             } break;
         // Models that need standard caching should rely on recurrent/hybrid
         // checks
@@ -2210,7 +2262,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
                     }
 
-                    if ((arch == LLM_ARCH_STEP35 || arch == LLM_ARCH_HY_V3) && hparams.n_layer_nextn > 0) {
+                    if ((arch == LLM_ARCH_STEP35 || arch == LLM_ARCH_HY_V3 || arch == LLM_ARCH_GLM_DSA ||
+                            arch == LLM_ARCH_MIMO2) &&
+                            hparams.n_layer_nextn > 0) {
                         if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
                             filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
                         } else {
@@ -2511,6 +2565,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_LLAMA_EMBED:
         case LLM_ARCH_MAINCODER:
         case LLM_ARCH_GLM_DSA:
+        case LLM_ARCH_NANBEIGE:
             return LLAMA_ROPE_TYPE_NORM;
 
         // the pairs of head values are offset by n_rot/2

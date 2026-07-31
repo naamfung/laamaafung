@@ -8,6 +8,8 @@ common_trie::match_result common_trie::check_at(std::string_view sv, size_t star
     size_t current = 0; // Start at root
     size_t pos = start_pos;
 
+    // LOG_DBG("%s: checking at pos %zu, sv='%s'\n", __func__, start_pos, std::string(sv).c_str());
+
     while (pos < sv.size()) {
         auto result = common_parse_utf8_codepoint(sv, pos);
         if (result.status != utf8_parse_result::SUCCESS) {
@@ -16,21 +18,26 @@ common_trie::match_result common_trie::check_at(std::string_view sv, size_t star
 
         auto it = nodes[current].children.find(result.codepoint);
         if (it == nodes[current].children.end()) {
+            // Can't continue matching
             return match_result{match_result::NO_MATCH};
         }
 
         current = it->second;
         pos += result.bytes_consumed;
 
+        // Check if we've matched a complete word
         if (nodes[current].pattern >= 0) {
             return match_result{match_result::COMPLETE_MATCH};
         }
     }
 
+    // Reached end of input while still in the trie (not at root)
     if (current != 0) {
+        // We're in the middle of a potential match
         return match_result{match_result::PARTIAL_MATCH};
     }
 
+    // Reached end at root (no match)
     return match_result{match_result::NO_MATCH};
 }
 
@@ -92,6 +99,8 @@ common_aho_corasick::common_aho_corasick(common_trie trie) : t(std::move(trie)) 
         }
     }
 
+    // fail[u] points to a strictly shorter suffix, so the first pattern found on
+    // the fail chain (including u itself) is the longest pattern ending at u
     match.assign(n, -1);
     for (size_t u : order) {
         match[u] = nodes[u].pattern >= 0 ? nodes[u].pattern : (u != 0 ? match[fail[u]] : -1);

@@ -317,6 +317,7 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_hard_limits(0.0f, 1.0f)
         ->set_desc("Minimum speculative decoding probability for draft tokens (0 = greedy)"));
 
+
     add((new field_str("speculative.type"))
         ->set_desc("Speculative decoding method (for debugging and research purposes)")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
@@ -503,21 +504,29 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
 
     add((new field_json("reasoning_budget_end_tags"))
         ->add_alias("reasoning_budget_end_tag")
-        ->set_desc("Token string(s) marking the end of the reasoning budget section. Accepts a single string or an array of strings")
+        ->set_desc("Token strings marking the end of the reasoning budget section; the first is forced when the budget expires. Accepts a single string or an array of strings")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
             ctx.params.sampling.reasoning_budget_end.clear();
-            json val;
             if (data.contains("reasoning_budget_end_tags")) {
-                val = data.at("reasoning_budget_end_tags");
-            } else {
-                val = data.at("reasoning_budget_end_tag");
-            }
-            if (val.is_string()) {
-                ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, val.get<std::string>(), false, true));
-            } else if (val.is_array()) {
-                for (const auto & el : val) {
-                    ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, el.get<std::string>(), false, true));
+                const auto & val = data.at("reasoning_budget_end_tags");
+                if (val.is_string()) {
+                    std::string tag = val.get<std::string>();
+                    if (!tag.empty()) {
+                        ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
+                    }
+                } else if (val.is_array()) {
+                    for (const auto & el : val) {
+                        std::string tag = el.get<std::string>();
+                        if (!tag.empty()) {
+                            ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
+                        }
+                    }
+                }
+            } else if (data.contains("reasoning_budget_end_tag")) {
+                std::string tag = data.at("reasoning_budget_end_tag").get<std::string>();
+                if (!tag.empty()) {
+                    ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
                 }
             }
         }));
@@ -526,12 +535,15 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Message to prepend to the reasoning budget end tag when forcing it")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
-            std::string end_tag;
             if (!ctx.params.sampling.reasoning_budget_end.empty()) {
-                end_tag = common_detokenize(ctx.vocab, ctx.params.sampling.reasoning_budget_end.front(), true);
+                llama_tokens end_tag = ctx.params.sampling.reasoning_budget_end.front();
+                std::string message = json_value(data, "reasoning_budget_message", std::string());
+                if (!message.empty()) {
+                    llama_tokens message_tokens = common_tokenize(ctx.vocab, message, false, true);
+                    end_tag.insert(end_tag.begin(), message_tokens.begin(), message_tokens.end());
+                }
+                ctx.params.sampling.reasoning_budget_forced = std::move(end_tag);
             }
-            std::string message = data.at("reasoning_budget_message").get<std::string>();
-            ctx.params.sampling.reasoning_budget_forced = common_tokenize(ctx.vocab, message + end_tag, false, true);
         }));
 
     add((new field_json("logit_bias"))

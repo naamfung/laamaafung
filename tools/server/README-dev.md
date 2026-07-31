@@ -134,13 +134,13 @@ Producer side: `server_res_generator` extends `server_res_spipe`, which wraps th
 
 Lifetime safety: the producer pipe is owned by `server_res_spipe` via `unique_ptr`. `cancel()` on the session is a pure atomic flag flip, polled by `should_stop()` - no stop hook or alive guard is needed, so teardown ordering is no longer fragile.
 
-Consumer side: `GET /v1/stream/<conv_id>?from=N` opens a `text/event-stream` that replays buffered bytes from offset `N` and blocks for live bytes, so the browser reattaches like a fresh EventSource. An offset below the dropped prefix returns 400.
+Consumer side: `GET /v1/stream?conv_id=<id>&from=N` opens a `text/event-stream` that replays buffered bytes from offset `N` and blocks for live bytes, so the browser reattaches like a fresh EventSource. An offset below the dropped prefix returns 400.
 
 Routes:
 
-- `GET /v1/stream/:conv_id?from=N`: replay or live reattach.
+- `GET /v1/stream?conv_id=<id>&from=N`: replay or live reattach. The id travels in the query string because it can embed a model name containing slashes.
 - `POST /v1/streams/lookup` with `{"conversation_ids": [...]}`: returns session status only for ids the caller already owns. There is no listing route, so live sessions cannot be enumerated (an earlier `GET /v1/streams` was removed for exactly this reason).
-- `DELETE /v1/stream/:conv_id`: explicit Stop, idempotent (`evict_and_cancel`).
+- `DELETE /v1/stream?conv_id=<id>`: explicit Stop, idempotent (`evict_and_cancel`).
 
 Router mode binds the same paths to proxy handlers. A `conv_id -> child` map (`conv_models`), populated when a POST is routed, resolves the owning child in one lookup with no polling. The lookup groups ids per child; GET and DELETE proxy straight to the owner. This loopback REST hop is expected to move to a websocket IPC later, swapping only the transport.
 
@@ -164,8 +164,8 @@ graph TD
         GC[GC thread] -- drop after TTL --> Sess
     end
     Sess -- read_from offset --> Cons[stream_pipe_consumer]
-    Cons -- "GET /v1/stream/:id?from=N" --> Client
-    DEL[DELETE /v1/stream/:id] -- evict_and_cancel --> Sess
+    Cons -- "GET /v1/stream?conv_id=id&from=N" --> Client
+    DEL[DELETE /v1/stream?conv_id=id] -- evict_and_cancel --> Sess
 ```
 
 The diagram shows the buffer touch points. The live wire (chunks streamed to the original client during a normal generation) is the producer's default output, described under "Producer side" above.
