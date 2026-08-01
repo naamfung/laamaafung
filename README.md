@@ -76,6 +76,40 @@ D:/Programs/llama-cpp-repos/laamaafung/build-v11/bin/Release/llama-server.exe --
 | `--prompt-truncate` | 啟用初始 prompt 截斷（當請求 tokens 超過 `--ctx-size` 時自動截斷中間部分並保留頭尾）。對所有模型架構均生效，無需 KV cache 位移支援。由 `--context-shift` 隱含啟用，亦可單獨使用。 | 適合處理超長 prompt 提交、對話歷史較長的場景，避免 HTTP 400 錯誤。 |
 | `--swa-full` | 使用與 base cache 等大的全尺寸 SWA cache。僅對 GGUF 模型頭中明確聲明滑動窗口注意力（SWA）且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。預設關閉時 SWA cache 僅為 `min(size_base, n_swa + n_ubatch)`，會導致 `llama_kv_cache_iswa::get_can_shift()` 回傳 false，使 `--context-shift` 的運行時 K-shift 失效（初始截斷不受影響）。啟用後 SWA 與 base 等大，K-shift 完全可用。 | 真正採用 SWA 架構的模型需要 `--context-shift` 完整功能（含生成階段運行時 K-shift）時必須配合使用。 |
 | `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閱導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
+| `LLAMA_THREADS_RATIO` (環境變數) | 當 `--threads` 為 auto 模式（N <= 0）時，按此比例縮放線程數（範圍 0.1 - 1.0，默認 1.0 即不縮放）。**適用於 GPU + CPU 混合推理場景**（如 MoE 專家層透過 `-ncmoe` 卸載到 CPU），留出部分 CPU 核心給 CUDA driver/sync 工作，可顯著提升 decode 吞吐量。見下方案例。 | GPU + CPU 混合推理（`-ncmoe > 0` 且 `-ngl > 0`）場景。純 CPU 推理或純 GPU 推理無需設置。 |
+
+#### GPU + CPU 混合推理線程調優案例
+
+當 MoE 專家層透過 `-ncmoe` 卸載到 CPU 時，CPU 與 GPU 之間每層都有同步開銷。若 CPU 使用全部物理核心做 MoE 計算，會與 CUDA driver 的 sync 調度競爭，反而降低 decode 吞吐量。設置 `LLAMA_THREADS_RATIO` 留出部分核心可顯著提升性能。
+
+以下為 **Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP**（Qwen35MOE 架構）在 **Xeon E5-2696 v3（18 核/18 線程）+ RTX 3060 Ti 8GB** 上的實測數據（`-ngl 99 -ncmoe 33 -ctk turbo4 -ctv turbo4 -ub 1024`）：
+
+| threads | ratio | tg128 (tok/s) | 變化 |
+| :---: | :---: | :---: | :---: |
+| 4  | 0.22 | 26.80 | -5% |
+| 6  | 0.33 | 31.60 | +11% |
+| 8  | 0.44 | 31.83 | +12% |
+| **10** | **0.56** | **33.47** | **+18%** |
+| 12 | 0.67 | 33.29 | +17% |
+| 18 (預設) | 1.00 | 28.34 | baseline |
+| 24 | -    | 29.26 | +3% |
+| 32 | -    | 28.23 | -0.4% |
+
+**最佳配置**：`LLAMA_THREADS_RATIO=0.56`（即 `-t 10`），比預設全核快 **+18%**。
+
+> **注意：** 最優比例取決於 CPU 架構、GPU 算力、MoE 卸載比例、模型大小等多個因素，上表數據僅供參考。建議用戶通過 `llama-bench` 實測自身硬件的最優值。設置方式：
+>
+> ```sh
+> # Linux/macOS
+> export LLAMA_THREADS_RATIO=0.56
+>
+> # Windows PowerShell
+> $env:LLAMA_THREADS_RATIO=0.56
+>
+> # Windows CMD
+> set LLAMA_THREADS_RATIO=0.56
+> ```
+
 | `--load-mode MODE` | 模型載入模式（默認 `mmap`）。取代舊參數 `--mmap`/`--no-mmap`/`--mlock`/`--direct-io`，五者互斥，僅能選一個 mode。 | 控制模型載入時的記憶體映射與駐留策略，見下表。 |
 
 #### `--load-mode` 可選值一覽

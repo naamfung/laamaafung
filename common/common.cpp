@@ -202,10 +202,7 @@ static int cpu_count_math_cpus(int n_cpu) {
 
 #endif // __x86_64__ && __linux__
 
-/**
- * Returns number of CPUs on system that are useful for math.
- */
-int32_t common_cpu_get_num_math() {
+static int32_t common_cpu_get_num_math_raw() {
 #if defined(__x86_64__) && defined(__linux__) && !defined(__ANDROID__)
     int n_cpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (n_cpu < 1) {
@@ -231,6 +228,32 @@ int32_t common_cpu_get_num_math() {
     return phy_cpus * std::min(smt_factor, 2);
 #endif
     return common_cpu_get_num_physical_cores();
+}
+
+/**
+ * Returns number of CPUs on system that are useful for math.
+ *
+ * When LLAMA_THREADS_RATIO is set (0.1 - 1.0), the result is scaled by this
+ * factor. Useful for GPU+CPU mixed inference (e.g. MoE offloaded via -ncmoe)
+ * where leaving some CPU cores free for CUDA driver/sync work improves decode
+ * throughput. Default is 1.0 (no scaling).
+ */
+int32_t common_cpu_get_num_math() {
+    int32_t n_math = common_cpu_get_num_math_raw();
+
+    if (const char * ratio_str = std::getenv("LLAMA_THREADS_RATIO")) {
+        try {
+            float ratio = std::stof(ratio_str);
+            if (ratio > 0.0f && ratio <= 1.0f) {
+                int32_t scaled = std::max(1, (int32_t)(n_math * ratio + 0.5f));
+                return scaled;
+            }
+        } catch (...) {
+            // ignore invalid ratio
+        }
+    }
+
+    return n_math;
 }
 
 // Helper for setting process priority
