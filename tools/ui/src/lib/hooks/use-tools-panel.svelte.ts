@@ -4,6 +4,7 @@ import { ToolSource } from '$lib/enums';
 import { conversationsStore } from '$lib/stores/conversations.svelte';
 import { mcpStore } from '$lib/stores/mcp.svelte';
 import { toolsStore } from '$lib/stores/tools.svelte';
+import { serverStore } from '$lib/stores/server.svelte';
 import type { ToolGroup } from '$lib/types';
 
 export interface UseToolsPanelReturn {
@@ -92,8 +93,9 @@ export function useToolsPanel(): UseToolsPanelReturn {
 	}
 
 	function handleOpen(): void {
+		const builtinToolsEnabled = serverStore.props?.builtin_tools_enabled;
 		if (toolsStore.builtinTools.length === 0 && !toolsStore.loading) {
-			toolsStore.fetchBuiltinTools();
+			toolsStore.fetchBuiltinTools(builtinToolsEnabled);
 		}
 		mcpStore.runHealthChecksForServers(mcpStore.getServers().filter((s) => s.enabled));
 	}

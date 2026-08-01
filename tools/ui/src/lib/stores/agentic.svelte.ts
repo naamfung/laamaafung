@@ -26,6 +26,7 @@ import { mcpStore } from '$lib/stores/mcp.svelte';
 import { modelsStore } from '$lib/stores/models.svelte';
 import { toolsStore } from '$lib/stores/tools.svelte';
 import { permissionsStore } from '$lib/stores/permissions.svelte';
+import { serverStore } from '$lib/stores/server.svelte';
 import { BuiltInTool, ToolSource, ToolPermissionDecision } from '$lib/enums';
 import { SvelteMap } from 'svelte/reactivity';
 import { ToolsService } from '$lib/services/tools.service';
@@ -397,8 +398,10 @@ class AgenticStore {
 		this._steeringMessages.delete(conversationId);
 
 		// Ensure built-in tools are fetched before checking if agentic is enabled
+		// Only fetch if the server has built-in tools enabled to avoid 403 errors in MODEL mode
+		const builtinToolsEnabled = serverStore.props?.builtin_tools_enabled;
 		if (toolsStore.builtinTools.length === 0 && !toolsStore.loading) {
-			await toolsStore.fetchBuiltinTools();
+			await toolsStore.fetchBuiltinTools(builtinToolsEnabled);
 		}
 
 		const agenticConfig = this.getConfig(config(), perChatOverrides);
