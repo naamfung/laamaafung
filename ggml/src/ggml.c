@@ -5473,7 +5473,7 @@ struct ggml_tensor * ggml_flash_attn_ext(
     int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
-    float params[] = { scale, max_bias, logit_softcap };
+    float params[] = { scale, max_bias, logit_softcap, 0.0f, 0.0f }; // [3] = prec, [4] = causal flag
     ggml_set_op_params(result, params, sizeof(params));
 
     result->op     = GGML_OP_FLASH_ATTN_EXT;
@@ -5519,6 +5519,13 @@ void ggml_flash_attn_ext_add_sinks(
     GGML_ASSERT(sinks->type == GGML_TYPE_F32);
 
     a->src[4] = sinks;
+}
+
+void ggml_flash_attn_ext_set_causal(
+        struct ggml_tensor * a) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    ggml_set_op_params_i32(a, 4, 1);
 }
 
 // ggml_flash_attn_back

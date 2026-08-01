@@ -38,9 +38,10 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb01, const int32_t nb02, const int32_t nb03,
         const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
-                            const int32_t nb21, const int32_t nb22, const int64_t nb23,
-                            const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33);
+        const int32_t nb21, const int32_t nb22, const int64_t nb23,
+        const int32_t ne31, const int32_t ne32, const int32_t ne33,
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int32_t causal);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -1333,10 +1334,17 @@ void launch_fattn(
 
     const bool V_is_K_view = V->view_src && (V->view_src == K || (V->view_src == K->view_src && V->view_offs == K->view_offs));
 
+    ggml_tensor * KQV = dst;
+
+    // Read causal flag early: when built-in causal masking is enabled, the MMA kernel
+    // ignores the mask and computes causal masking inline. Other kernels (VEC, tile)
+    // still use the mask, so we keep mask non-null for correctness on non-MMA paths.
+    float causal_flag = 0.0f;
+    memcpy(&causal_flag, (const float *) KQV->op_params + 4, sizeof(float));
+    const int causal = causal_flag != 0.0f ? 1 : 0;
+
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
-
-    ggml_tensor * KQV = dst;
 
     GGML_ASSERT(Q->type == GGML_TYPE_F32);
     GGML_ASSERT(KQV->type == GGML_TYPE_F32);
@@ -1573,7 +1581,8 @@ void launch_fattn(
         K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
+        causal
     );
     CUDA_CHECK(cudaGetLastError());
 
