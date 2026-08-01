@@ -2601,13 +2601,20 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
             const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
             const int mmvq_mmid_max = get_mmvq_mmid_max_batch(node->src[0]->type, cc);
             if (!ggml_is_quantized(node->src[0]->type) || is_tq_w || node->ne[2] > mmvq_mmid_max) {
-                // under these conditions, the mul_mat_id operation will need to synchronize the stream, so we cannot use CUDA graphs
-                // TODO: figure out a way to enable for larger batch sizes, without hurting performance
-                // ref: https://github.com/ggml-org/llama.cpp/pull/18958
-                use_cuda_graph = false;
+                // The vec-quant path (MMVQ) is unavailable, but MMQ and MMF paths also avoid
+                // the stream-synchronizing fallback and are CUDA-graph safe. Only disable
+                // graphs if none of these graph-safe paths would be taken.
+                const int64_t ne12 = node->src[1]->ne[2];
+                const int64_t ne02 = node->src[0]->ne[2];
+                const bool mmq_ok = ggml_cuda_should_use_mmq(node->src[0]->type, cc, ne12, ne02);
+                const bool mmf_ok = ggml_cuda_should_use_mmf(node->src[0]->type, cc, WARP_SIZE,
+                        node->src[0]->ne, node->src[0]->nb, (int) ne12, /*mul_mat_id=*/true);
+                if (!mmq_ok && !mmf_ok) {
+                    use_cuda_graph = false;
 #ifndef NDEBUG
-                GGML_LOG_DEBUG("%s: disabling CUDA graphs due to unsupported node type\n", __func__);
+                    GGML_LOG_DEBUG("%s: disabling CUDA graphs due to unsupported MUL_MAT_ID fallback path\n", __func__);
 #endif
+                }
             }
         }
 
