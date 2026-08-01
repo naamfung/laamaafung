@@ -177,14 +177,57 @@ static void ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2(ggml_backend_cuda_c
     ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 8, 1, type_K, type_V>(ctx, dst); // ncols2 = 1 -> (8,1)
 }
 
-// Turbo MMA prefill dispatch for MHA (gqa_ratio == 1, ncols2 == 1).
-// Q->ne[1] > 4: pick ncols1 to bound Q->ne[1] from above, capping at 64.
-// (8,1) is shared with decode; (16,1),(32,1),(64,1) are prefill-only instances.
-// nstages=0 (synchronous dequant load, no cp.async pipeline) means large-batch
-// throughput should be benchmarked vs the f16 conversion fallback.
+// Turbo MMA prefill dispatch: MHA (gqa_ratio == 1) + GQA-packed (gqa_ratio >= 8).
+//
+// Mirrors decode's switch_ncols2: when use_gqa_opt && gqa_ratio >= 8, pack 8 Q heads
+// per K/V row (ncols2 == 8) to keep the K/V tile hot across the GQA group and avoid
+// the f16 conversion fallback that doubles KV bandwidth. Otherwise fall through to
+// the ncols2 == 1 unpacked path (MHA-style), which handles any gqa_ratio via the
+// Q->ne[2] head loop inside the kernel.
+//
+// GQA-packed prefill is capped at ncols1 = 16 (ncols = 128) and DKQ = 128 only:
+// shared_Q = ncols*(DKQ/2+4)*sizeof(half2) stays within Turing's 64 KB limit at
+// DKQ=128 (34 KB) but exceeds it at DKQ=256 (66 KB). Ampere's 100 KB limit would
+// allow DKQ=256 but the instance is not compiled to keep the config matrix simple.
+// Q->ne[1] > 16 or DKQ > 128 falls through to the MHA ladder below. nstages=0
+// (synchronous dequant load) means large-batch throughput should be benchmarked
+// vs the f16 conversion fallback.
 template <int DKQ, int DV, ggml_type type_K, ggml_type type_V>
-static void ggml_cuda_flash_attn_ext_mma_turbo_prefill_mha(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * Q = dst->src[0];
+static void ggml_cuda_flash_attn_ext_mma_turbo_prefill(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * KQV  = dst;
+    const ggml_tensor * Q    = dst->src[0];
+    const ggml_tensor * K    = dst->src[1];
+    const ggml_tensor * V    = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+
+    float max_bias = 0.0f;
+    memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
+
+    // Mirror decode's use_gqa_opt: skip quantized tensors in the nb%16 loop (their
+    // pitch is the raw byte pitch, not a half-stride). K/V are turbo-quantized here.
+    bool use_gqa_opt = mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    for (const ggml_tensor * t : {Q, V, mask}) {
+        if (t == nullptr || ggml_is_quantized(t->type)) {
+            continue;
+        }
+        for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
+            if (t->nb[i] % 16 != 0) {
+                use_gqa_opt = false;
+                break;
+            }
+        }
+    }
+
+    GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
+    const int gqa_ratio = Q->ne[2] / K->ne[2];
+
+    if constexpr (DKQ <= 128) {
+        if (use_gqa_opt && gqa_ratio >= 8 && Q->ne[1] <= 16) {
+            ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 16, 8, type_K, type_V>(ctx, dst);
+            return;
+        }
+    }
+
     if (Q->ne[1] <= 8)  { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV,  8, 1, type_K, type_V>(ctx, dst); return; }
     if (Q->ne[1] <= 16) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 16, 1, type_K, type_V>(ctx, dst); return; }
     if (Q->ne[1] <= 32) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 32, 1, type_K, type_V>(ctx, dst); return; }
@@ -798,20 +841,22 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                         default: break;
                     }
                 }
-            } else if (Q->ne[2] == K->ne[2]) {
-                // Prefill: MHA only (gqa_ratio == 1). ncols2 > 1 prefill instances not compiled.
+            } else {
+                // Prefill: unified dispatch covers MHA (gqa_ratio == 1) and GQA-packed
+                // (gqa_ratio >= 8). Intermediate ratios {2,4} fall through to ncols2 == 1
+                // inside prefill(), handled by the kernel's Q->ne[2] head loop.
                 if (Q->ne[0] == 128) {
                     switch (K->type) {
-                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill_mha<128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
-                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill_mha<128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
-                        case GGML_TYPE_TURBO2_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill_mha<128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO2_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0>(ctx, dst); return;
                         default: break;
                     }
                 }
                 if (Q->ne[0] == 256) {
                     switch (K->type) {
-                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill_mha<256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
-                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill_mha<256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
                         // turbo2 + head_dim 256: same exclusion as decode (see comment above).
                         default: break;
                     }
