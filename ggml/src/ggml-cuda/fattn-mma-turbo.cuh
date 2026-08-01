@@ -99,8 +99,8 @@ void ggml_cuda_flash_attn_ext_mma_turbo_case(ggml_backend_cuda_context & ctx, gg
     template void ggml_cuda_flash_attn_ext_mma_turbo_case                           \
     <DKQ, DV, ncols1, ncols2, tK, tV>(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
 
-// The reachable (ncols1, ncols2) set for Q->ne[1] in {1..4} with turing_mma_available
-// is exactly: (1,8),(2,8),(4,8),(2,4),(4,4),(4,2),(8,1). Declare those externs only.
+// Decode (Q->ne[1] <= 4) reachable (ncols1, ncols2) set with turing_mma_available:
+// (1,8),(2,8),(4,8),(2,4),(4,4),(4,2),(8,1).
 #define DECL_FATTN_MMA_TURBO_ALL(DKQ, DV, tK, tV)        \
     extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 1, 8, tK, tV); \
     extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 2, 8, tK, tV); \
@@ -110,9 +110,22 @@ void ggml_cuda_flash_attn_ext_mma_turbo_case(ggml_backend_cuda_context & ctx, gg
     extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 4, 2, tK, tV); \
     extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 8, 1, tK, tV); \
 
-DECL_FATTN_MMA_TURBO_ALL(128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
-DECL_FATTN_MMA_TURBO_ALL(256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
-DECL_FATTN_MMA_TURBO_ALL(128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0);
-DECL_FATTN_MMA_TURBO_ALL(256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0);
-DECL_FATTN_MMA_TURBO_ALL(128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
-DECL_FATTN_MMA_TURBO_ALL(256, 256, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
+// Prefill MHA (Q->ne[1] > 4, gqa_ratio == 1, ncols2 == 1) tile sizes.
+// (8,1) is shared with decode via DECL_FATTN_MMA_TURBO_ALL.
+#define DECL_FATTN_MMA_TURBO_PREFILL_MHA(DKQ, DV, tK, tV)  \
+    extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 16, 1, tK, tV); \
+    extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 32, 1, tK, tV); \
+    extern DECL_FATTN_MMA_TURBO_CASE(DKQ, DV, 64, 1, tK, tV); \
+
+DECL_FATTN_MMA_TURBO_ALL       (128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
+DECL_FATTN_MMA_TURBO_PREFILL_MHA(128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
+DECL_FATTN_MMA_TURBO_ALL       (256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
+DECL_FATTN_MMA_TURBO_PREFILL_MHA(256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
+DECL_FATTN_MMA_TURBO_ALL       (128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0);
+DECL_FATTN_MMA_TURBO_PREFILL_MHA(128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0);
+DECL_FATTN_MMA_TURBO_ALL       (256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0);
+DECL_FATTN_MMA_TURBO_PREFILL_MHA(256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0);
+DECL_FATTN_MMA_TURBO_ALL       (128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
+DECL_FATTN_MMA_TURBO_PREFILL_MHA(128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
+DECL_FATTN_MMA_TURBO_ALL       (256, 256, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
+DECL_FATTN_MMA_TURBO_PREFILL_MHA(256, 256, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
