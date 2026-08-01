@@ -517,6 +517,7 @@ static __device__ __forceinline__ void flash_attn_ext_turbo4_load_tile(
         const char * const __restrict__ KV_raw, half2 * const __restrict__ tile_KV,
         const int D2, const int stride_bytes, const int col_offset, const int i_sup) {
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int cols_per_block = QK_TURBO4 / 2;  // 64 half2 cols per turbo4 block
     const int tid = threadIdx.y * warp_size + threadIdx.x;
 #pragma unroll
     for (int row = tid; row < nbatch_fa; row += nthreads) {
@@ -527,18 +528,63 @@ static __device__ __forceinline__ void flash_attn_ext_turbo4_load_tile(
             continue;
         }
         const char * row_ptr = KV_raw + (int64_t)row * stride_bytes;
-        // Which block(s) this column window spans. QK_TURBO4/2 == 64 half2 columns per block.
-        // For D=128 there is exactly one block per row and col_offset==0.
-        for (int c = 0; c < D2; ++c) {
-            const int col = col_offset + c;                 // absolute half2 column in the row
-            const int blk_idx = col / (QK_TURBO4 / 2);      // 64 half2 cols per turbo4 block
-            const int in_blk  = col % (QK_TURBO4 / 2);      // half2 index within the block
-            const block_turbo4_0 * blk = (const block_turbo4_0 *)(row_ptr) + blk_idx;
-            const float norm = __half2float(blk->norm);
+
+        // Cache scaled centroids per block: avoids per-element norm load + multiply.
+        int prev_blk_idx = -1;
+        float sc[16];
+        const block_turbo4_0 * blk = nullptr;
+
+        // Process 4 half2 columns (4 qs bytes) per iteration to reduce loop overhead.
+        const int D2_4 = D2 / 4 * 4;
+        for (int c = 0; c < D2_4; c += 4) {
+            const int col = col_offset + c;
+            const int blk_idx = col / cols_per_block;
+            const int in_blk  = col % cols_per_block;
+
+            if (blk_idx != prev_blk_idx) {
+                blk = (const block_turbo4_0 *)(row_ptr) + blk_idx;
+                const float norm = __half2float(blk->norm);
+            #pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    sc[i] = TURBO_CENTROIDS_4BIT_FATTN[i] * norm;
+                }
+                prev_blk_idx = blk_idx;
+            }
+
+            const uint8_t b0 = blk->qs[in_blk + 0];
+            const uint8_t b1 = blk->qs[in_blk + 1];
+            const uint8_t b2 = blk->qs[in_blk + 2];
+            const uint8_t b3 = blk->qs[in_blk + 3];
+
+            tile_KV[row*stride_tile + c + 0] = __halves2half2(
+                __float2half(sc[b0 & 0xF]), __float2half(sc[b0 >> 4]));
+            tile_KV[row*stride_tile + c + 1] = __halves2half2(
+                __float2half(sc[b1 & 0xF]), __float2half(sc[b1 >> 4]));
+            tile_KV[row*stride_tile + c + 2] = __halves2half2(
+                __float2half(sc[b2 & 0xF]), __float2half(sc[b2 >> 4]));
+            tile_KV[row*stride_tile + c + 3] = __halves2half2(
+                __float2half(sc[b3 & 0xF]), __float2half(sc[b3 >> 4]));
+        }
+
+        // Tail: remaining columns (D2 % 4).
+        for (int c = D2_4; c < D2; ++c) {
+            const int col = col_offset + c;
+            const int blk_idx = col / cols_per_block;
+            const int in_blk  = col % cols_per_block;
+
+            if (blk_idx != prev_blk_idx) {
+                blk = (const block_turbo4_0 *)(row_ptr) + blk_idx;
+                const float norm = __half2float(blk->norm);
+            #pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    sc[i] = TURBO_CENTROIDS_4BIT_FATTN[i] * norm;
+                }
+                prev_blk_idx = blk_idx;
+            }
+
             const uint8_t byte = blk->qs[in_blk];
-            const half lo = __float2half(TURBO_CENTROIDS_4BIT_FATTN[byte & 0xF] * norm);
-            const half hi = __float2half(TURBO_CENTROIDS_4BIT_FATTN[byte >>  4] * norm);
-            tile_KV[row*stride_tile + c] = __halves2half2(lo, hi);
+            tile_KV[row*stride_tile + c] = __halves2half2(
+                __float2half(sc[byte & 0xF]), __float2half(sc[byte >> 4]));
         }
     }
 }
