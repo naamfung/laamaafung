@@ -2444,11 +2444,6 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
-    // Enable built-in causal masking (mask src[3] must be NULL).
-    // Used to skip materializing a full KQ mask for pure-causal single-sequence prefill.
-    GGML_API void ggml_flash_attn_ext_set_causal(
-            struct ggml_tensor * a);
-
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
            struct ggml_context * ctx,

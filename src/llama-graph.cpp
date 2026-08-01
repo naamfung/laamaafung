@@ -2445,12 +2445,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
-        // Enable built-in causal masking for pure-causal single-stream prefill.
-        // Skips mask load/apply in the FA kernel (mask materialization still occurs).
-        if (cparams.causal_attn && n_stream == 1 && !cparams.kv_unified && hparams.swa_type == LLAMA_SWA_TYPE_NONE) {
-            ggml_flash_attn_ext_set_causal(cur);
-        }
-
         // TurboQuant: inverse WHT on FA output when V values are WHT-rotated.
         // For MLA, V is a view of K with different ne[0] (e.g. V=512, K=576).
         // Group size must come from K (which determines the WHT rotation), not V.
