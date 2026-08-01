@@ -1543,7 +1543,7 @@ llama_kv_cache_dsv4_raw_context::llama_kv_cache_dsv4_raw_context(
     ubatches(std::move(ubatches)),
     ubatches_write(std::move(ubatches_write)),
     ctx_base_mem(std::make_unique<llama_kv_cache_context>(
-                kv->get_base(), std::move(sinfos_base_write), this->ubatches_write)),
+                kv->get_base(), std::move(sinfos_base_write), this->ubatches_write, 0)),
     ctx_swa_mem(nullptr),
     n_kv(kv_swa->get_size()),
     status(LLAMA_MEMORY_STATUS_SUCCESS) {

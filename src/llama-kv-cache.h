@@ -195,7 +195,8 @@ public:
 
     // find places for the provided ubatches in the cache, returns the slot infos
     // return empty vector on failure
-    slot_info_vec_t prepare(const std::vector<llama_ubatch> & ubatches);
+    // if n_kv_per_ubatch is non-null, stores the n_kv value that would result from each ubatch
+    slot_info_vec_t prepare(const std::vector<llama_ubatch> & ubatches, std::vector<uint32_t> * n_kv_per_ubatch = nullptr);
 
     bool update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info);
 
@@ -368,7 +369,8 @@ public:
     llama_kv_cache_context(
             llama_kv_cache * kv,
             slot_info_vec_t sinfos,
-            std::vector<llama_ubatch> ubatches);
+            std::vector<llama_ubatch> ubatches,
+            uint32_t n_kv_max);
 
     virtual ~llama_kv_cache_context();
 
@@ -468,4 +470,9 @@ private:
     // a heuristic, to avoid attending the full cache if it is not yet utilized
     // as the cache gets filled, the benefit from this heuristic disappears
     int32_t n_kv;
+
+    // pre-computed max n_kv across all ubatches in this batch
+    // using a fixed n_kv allows non-tail ubatches to reuse the same graph topology,
+    // since mask + KV_max mechanism will skip the unused KV cells
+    int32_t n_kv_max = 0;
 };

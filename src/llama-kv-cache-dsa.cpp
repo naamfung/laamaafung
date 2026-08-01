@@ -207,8 +207,8 @@ llama_kv_cache_dsa_context::llama_kv_cache_dsa_context(
         std::vector<llama_ubatch> ubatches) :
     ubatches(std::move(ubatches)),
     // note: here we copy the ubatches. not sure if this is ideal
-    ctx_mla(new llama_kv_cache_context(kv->get_mla(), std::move(sinfos_mla), this->ubatches)),
-    ctx_lid(new llama_kv_cache_context(kv->get_lid(), std::move(sinfos_lid), this->ubatches)),
+    ctx_mla(new llama_kv_cache_context(kv->get_mla(), std::move(sinfos_mla), this->ubatches, 0)),
+    ctx_lid(new llama_kv_cache_context(kv->get_lid(), std::move(sinfos_lid), this->ubatches, 0)),
     status(llama_memory_status_combine(ctx_mla->get_status(), ctx_lid->get_status())) {
 }
 

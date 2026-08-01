@@ -987,13 +987,23 @@ llama_memory_context_ptr llama_kv_cache::init_batch(
             break;
         }
 
-        auto sinfos = prepare(ubatches);
+        // collect the n_kv that would result from each ubatch, so we can use
+        // a single fixed n_kv across all ubatches for graph reuse
+        std::vector<uint32_t> n_kv_per_ubatch;
+        auto sinfos = prepare(ubatches, &n_kv_per_ubatch);
         if (sinfos.empty()) {
             break;
         }
 
+        // compute the max n_kv across all ubatches so that non-tail ubatches
+        // can reuse the same graph topology (mask + KV_max skip unused cells)
+        uint32_t n_kv_max = 0;
+        for (const auto n_kv : n_kv_per_ubatch) {
+            n_kv_max = std::max(n_kv_max, n_kv);
+        }
+
         return std::make_unique<llama_kv_cache_context>(
-                this, std::move(sinfos), std::move(ubatches));
+                this, std::move(sinfos), std::move(ubatches), n_kv_max);
     } while (false);
 
     return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
@@ -1011,7 +1021,7 @@ llama_memory_context_ptr llama_kv_cache::init_update(llama_context * lctx, bool 
     return std::make_unique<llama_kv_cache_context>(this, lctx, do_shift, std::move(sc_info));
 }
 
-llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_ubatch> & ubatches) {
+llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_ubatch> & ubatches, std::vector<uint32_t> * n_kv_per_ubatch) {
     llama_kv_cache::slot_info_vec_t res;
 
     struct state_t {
@@ -1053,6 +1063,11 @@ llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_
 
         // now emplace the ubatch
         apply_ubatch(sinfo_new, ubatch);
+
+        // record the n_kv that results from this ubatch (before cells are restored)
+        if (n_kv_per_ubatch) {
+            n_kv_per_ubatch->push_back(get_n_kv(sinfo_new));
+        }
     }
 
     GGML_ASSERT(!states.empty() || !success);
@@ -3061,7 +3076,8 @@ llama_kv_cache_context::llama_kv_cache_context(
 llama_kv_cache_context::llama_kv_cache_context(
         llama_kv_cache * kv,
         llama_kv_cache::slot_info_vec_t sinfos,
-        std::vector<llama_ubatch> ubatches) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), sinfos(std::move(sinfos)), ubatches(std::move(ubatches)) {
+        std::vector<llama_ubatch> ubatches,
+        uint32_t n_kv_max) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), sinfos(std::move(sinfos)), ubatches(std::move(ubatches)), n_kv_max((int32_t) n_kv_max) {
 }
 
 llama_kv_cache_context::~llama_kv_cache_context() = default;
@@ -3087,7 +3103,10 @@ bool llama_kv_cache_context::apply() {
     }
 
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
-    n_kv = kv->get_n_kv(sinfos[i_cur]);
+
+    // use the pre-computed n_kv_max so that all ubatches share the same graph topology
+    // (mask marks unused KV cells as -INFINITY, KV_max mechanism skips them in the FA kernel)
+    n_kv = n_kv_max > 0 ? n_kv_max : (int32_t) kv->get_n_kv(sinfos[i_cur]);
 
     // InnerQ: check if CUDA calibration finalized and tensor needs update
     if (kv->get_turbo_innerq_scale_inv() != nullptr && turbo_innerq_needs_tensor_update()) {
