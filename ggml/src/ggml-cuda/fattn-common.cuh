@@ -453,6 +453,10 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0(
 
     float sum = 0.0f;
 
+    // Cache scaled centroids per block, mirroring the V path in fattn-vec.cuh.
+    int prev_ib = -1;
+    float sc[16];
+
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
 #pragma unroll
@@ -463,23 +467,26 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0(
             const int ib    = elem0 / QK_TURBO4;           // block index
             const int j0    = elem0 % QK_TURBO4;           // always even
 
-            const float   norm    = __half2float(K_turbo[ib].norm);
-            // Both j0 and j0+1 are adjacent nibbles: j0/2 == (j0+1)/2 when j0 is even
+            if (ib != prev_ib) {
+                prev_ib = ib;
+                const float norm = __half2float(K_turbo[ib].norm);
+            #pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    sc[i] = TURBO_CENTROIDS_4BIT[i] * norm;
+                }
+            }
+
             const uint8_t qs_byte = K_turbo[ib].qs[j0 / 2];
 
             const uint8_t idx0 = (qs_byte >> 0) & 0xF;    // low nibble = j0
             const uint8_t idx1 = (qs_byte >> 4) & 0xF;    // high nibble = j0+1
 
-            float2 kv;
-            kv.x = TURBO_CENTROIDS_4BIT[idx0] * norm;
-            kv.y = TURBO_CENTROIDS_4BIT[idx1] * norm;
-
 #ifdef V_DOT2_F32_F16_AVAILABLE
             const half2 qv = ((const half2 *) Q_v)[k_KQ_0/nthreads + k_KQ_1];
-            ggml_cuda_mad(sum, make_float2(kv.x, kv.y), __half22float2(qv));
+            ggml_cuda_mad(sum, make_float2(sc[idx0], sc[idx1]), __half22float2(qv));
 #else
             const float2 qv = ((const float2 *) Q_v)[k_KQ_0/nthreads + k_KQ_1];
-            sum += kv.x * qv.x + kv.y * qv.y;
+            sum += sc[idx0] * qv.x + sc[idx1] * qv.y;
 #endif // V_DOT2_F32_F16_AVAILABLE
         }
     }
