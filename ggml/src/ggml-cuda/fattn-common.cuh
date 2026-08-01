@@ -1323,7 +1323,8 @@ static __global__ void flash_attn_combine_results(
 template <int DV, int ncols1, int ncols2>
 void launch_fattn(
     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
-    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE
+    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE,
+    const bool causal = false
 ) {
     constexpr int ncols = ncols1 * ncols2;
 
@@ -1443,7 +1444,8 @@ void launch_fattn(
     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
     //     multiple sequences of possibly different lengths.
-    if (mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+    // Skipped when causal is enabled: the kernel handles causal masking inline.
+    if (!causal && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
         const int64_t s31 = mask->nb[1] / sizeof(half2);
         const int64_t s33 = mask->nb[3] / sizeof(half2);
 
@@ -1559,12 +1561,22 @@ void launch_fattn(
 
     GGML_ASSERT(block_dim.x % warp_size == 0);
 
+        // When causal is enabled, pass null mask and ne31=1 as sentinel.
+        // Only the MMA kernel checks ne31==1 to apply built-in causal masking.
+        const char * mask_ptr = (causal || !mask) ? nullptr : (const char *) mask->data;
+        const int32_t ne31 = causal ? 1 : (mask ? mask->ne[1] : 0);
+        const int32_t ne32 = causal ? 0 : (mask ? mask->ne[2] : 0);
+        const int32_t ne33 = causal ? 0 : (mask ? mask->ne[3] : 0);
+        const int32_t nb31 = causal ? 0 : (mask ? mask->nb[1] : 0);
+        const int32_t nb32 = causal ? 0 : (mask ? mask->nb[2] : 0);
+        const int64_t nb33 = causal ? 0 : (mask ? mask->nb[3] : 0);
+
         ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num, block_dim, nbytes_shared, main_stream);
         ggml_cuda_kernel_launch(fattn_kernel, launch_params,
         (const char *) Q->data,
         K_data,
         V_data,
-        mask ? ((const char *) mask->data) : nullptr,
+        mask_ptr,
         sinks ? ((const char *) sinks->data) : nullptr,
         KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
@@ -1572,8 +1584,8 @@ void launch_fattn(
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
         K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
-        mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        ne31, ne32, ne33,
+        nb31, nb32, nb33
     );
     CUDA_CHECK(cudaGetLastError());
 
