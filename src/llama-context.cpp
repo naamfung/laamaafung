@@ -292,14 +292,23 @@ llama_context::llama_context(
 
             size_t kv_per_ubatch_token = 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2);
 
+            // MoE expert routing temp: gate + up projection outputs coexist for SiLU(gate)*up.
+            size_t moe_per_token = 0;
+            if (model.hparams.n_expert_used > 0) {
+                moe_per_token  = 2 * (size_t)model.hparams.n_expert_used * model.hparams.n_ff_exp * sizeof(float);
+                if (model.hparams.n_expert_shared > 0) {
+                    moe_per_token += 2 * (size_t)model.hparams.n_ff_shexp * sizeof(float);
+                }
+            }
+
             // Total KV cache scales with n_ctx, not n_ubatch. Reserve it first or we
             // overestimate free memory and pick an ubatch that starves CUDA graph capture.
             size_t kv_cache_total = kv_per_ubatch_token * (size_t) cparams.n_ctx;
 
             // Decode: 6x multiplier covers CUDA graph buffers + attention intermediates.
-            // Prefill: 3x multiplier - no CUDA graph, FA temp scales smaller per token.
+            // Prefill: 3x KV for attention temp, plus MoE expert routing buffers.
             size_t per_token_decode  = kv_per_ubatch_token * 6;
-            size_t per_token_prefill = kv_per_ubatch_token * 3;
+            size_t per_token_prefill = kv_per_ubatch_token * 3 + moe_per_token;
 
             // Free memory after reserving the full KV cache, with 20% safety margin
             size_t avail_mem = free_mem_total > kv_cache_total ? (free_mem_total - kv_cache_total) : 0;
@@ -337,9 +346,9 @@ llama_context::llama_context(
                     n_ubatch_prefill_calc = std::min(n_ubatch_prefill_calc, static_cast<int32_t>(2048));
                 }
 
-                LLAMA_LOG_INFO("%s: n_ubatch auto (free: %zu MB, KV: %zu MB, avail: %zu MB): %d (prefill: %d)\n",
+                LLAMA_LOG_INFO("%s: n_ubatch auto (free: %zu MB, KV: %zu MB, avail: %zu MB, MoE/tok: %zu B): %d (prefill: %d)\n",
                     __func__, free_mem_mb, kv_cache_total / (1024 * 1024), avail_mem / (1024 * 1024),
-                    n_ubatch_calc, n_ubatch_prefill_calc);
+                    moe_per_token, n_ubatch_calc, n_ubatch_prefill_calc);
             } else {
                 n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch_by_ctx);
                 if (ggml_is_numa()) {
