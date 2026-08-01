@@ -250,6 +250,9 @@ llama_context::llama_context(
     cparams.fused_dsv4_hc_post = true;
     cparams.auto_fhc           = true;
 
+    // Separate ubatch for prefill (throughput) vs decode (latency). Auto-tuned below.
+    int32_t n_ubatch_prefill_calc = -1;
+
     // Auto-tune n_batch and n_ubatch if set to -1
     if (params.n_batch == -1 || params.n_ubatch == -1) {
         // Get free memory from all accelerator devices to prevent OOM
@@ -277,60 +280,86 @@ llama_context::llama_context(
         // Calculate safe n_ubatch based on free memory if available
         int32_t n_ubatch_calc = -1;
         if (free_mem_total > 0 && params.n_ubatch == -1) {
-            // Convert to MB for easier calculation
             size_t free_mem_mb = free_mem_total / (1024 * 1024);
             size_t total_mem_mb = total_mem_total / (1024 * 1024);
 
             LLAMA_LOG_INFO("%s: GPU memory - free: %zu MB, total: %zu MB\n", __func__, free_mem_mb, total_mem_mb);
 
-            // Calculate safe n_ubatch based on free memory
-            // Each n_ubatch token requires approximately: 2 * n_layers * n_embd_k_gqa * type_size bytes for KV cache
-            // plus intermediate tensor memory for batch operations
-            // As a conservative estimate, assume ~2-4 bytes per token per layer for KV cache + intermediates
             const uint32_t n_layers = model.hparams.n_layer();
             const uint32_t n_embd_k_gqa = model.hparams.n_embd_k_gqa_max();
             const size_t type_size_v = ggml_type_size(params.type_v);
             const size_t type_size_k = ggml_type_size(params.type_k);
 
-            // Estimate memory per n_ubatch token: KV cache (2 tensors: K and V) + intermediate tensors
-            // KV cache per token: 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2)
-            size_t kv_cache_per_ubatch_token_bytes = 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2);
+            size_t kv_per_ubatch_token = 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2);
 
-            // Add intermediate tensor estimate (roughly 4-8x kv_cache_per_ubatch_token_bytes for attention intermediates)
-            size_t total_per_ubatch_token_bytes = kv_cache_per_ubatch_token_bytes * 6;
+            // Total KV cache scales with n_ctx, not n_ubatch. Reserve it first or we
+            // overestimate free memory and pick an ubatch that starves CUDA graph capture.
+            size_t kv_cache_total = kv_per_ubatch_token * (size_t) cparams.n_ctx;
 
-            // Ensure we keep at least 20% of GPU memory free for other applications and safety margin
-            size_t safe_free_mem_bytes = free_mem_total * 0.8;
+            // Decode: 6x multiplier covers CUDA graph buffers + attention intermediates.
+            // Prefill: 3x multiplier - no CUDA graph, FA temp scales smaller per token.
+            size_t per_token_decode  = kv_per_ubatch_token * 6;
+            size_t per_token_prefill = kv_per_ubatch_token * 3;
 
-            if (total_per_ubatch_token_bytes > 0 && safe_free_mem_bytes > 0) {
-                n_ubatch_calc = static_cast<int32_t>(safe_free_mem_bytes / total_per_ubatch_token_bytes);
+            // Free memory after reserving the full KV cache, with 20% safety margin
+            size_t avail_mem = free_mem_total > kv_cache_total ? (free_mem_total - kv_cache_total) : 0;
+            size_t safe_mem  = (size_t)(avail_mem * 0.8);
 
-                // Apply bounds
-                n_ubatch_calc = std::max(n_ubatch_calc, static_cast<int32_t>(64)); // Minimum for tiled attention
-                n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(cparams.n_ctx)); // Cannot exceed n_ctx
+            // Context-based conservative cap (refined tiers including 128K+ and 256K+)
+            int32_t max_ubatch_by_ctx;
+            if (cparams.n_ctx >= 262144) {
+                max_ubatch_by_ctx = 512;
+            } else if (cparams.n_ctx >= 131072) {
+                max_ubatch_by_ctx = 1024;
+            } else if (cparams.n_ctx >= 65536) {
+                max_ubatch_by_ctx = 1024;
+            } else if (cparams.n_ctx >= 32768) {
+                max_ubatch_by_ctx = 2048;
+            } else {
+                max_ubatch_by_ctx = 4096;
+            }
+
+            if (per_token_decode > 0 && safe_mem > 0) {
+                int32_t max_ubatch_by_mem = static_cast<int32_t>(safe_mem / per_token_decode);
+                n_ubatch_calc = std::min(max_ubatch_by_ctx, max_ubatch_by_mem);
+                n_ubatch_calc = std::max(n_ubatch_calc, static_cast<int32_t>(64));
+                n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(cparams.n_ctx));
+
+                // Prefill may use a larger tile for throughput, capped at 2x decode
+                // and bounded by the memory budget computed with the smaller multiplier
+                int32_t max_prefill_by_mem = static_cast<int32_t>(safe_mem / per_token_prefill);
+                int32_t max_prefill_by_ctx = std::min(max_ubatch_by_ctx * 2, static_cast<int32_t>(cparams.n_ctx));
+                n_ubatch_prefill_calc = std::min(max_prefill_by_ctx, max_prefill_by_mem);
+                n_ubatch_prefill_calc = std::max(n_ubatch_prefill_calc, n_ubatch_calc);
+
                 if (ggml_is_numa()) {
-                    n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(2048)); // Reduce for NUMA architectures
+                    n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(2048));
+                    n_ubatch_prefill_calc = std::min(n_ubatch_prefill_calc, static_cast<int32_t>(2048));
                 }
 
-                LLAMA_LOG_INFO("%s: n_ubatch adjusted to auto (based on free memory): %d (free: %zu MB, est. per token: %zu bytes)\n",
-                    __func__, n_ubatch_calc, free_mem_mb, total_per_ubatch_token_bytes);
+                LLAMA_LOG_INFO("%s: n_ubatch auto (free: %zu MB, KV: %zu MB, avail: %zu MB): %d (prefill: %d)\n",
+                    __func__, free_mem_mb, kv_cache_total / (1024 * 1024), avail_mem / (1024 * 1024),
+                    n_ubatch_calc, n_ubatch_prefill_calc);
             } else {
-                // Fallback to hardware-based calculation if memory estimation fails
-                n_ubatch_calc = std::min((int32_t)cparams.n_ctx, 4096);
+                n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch_by_ctx);
                 if (ggml_is_numa()) {
-                    n_ubatch_calc = std::min(n_ubatch_calc, 2048); // Reduce for NUMA architectures
+                    n_ubatch_calc = std::min(n_ubatch_calc, 2048);
                 }
                 n_ubatch_calc = std::max(n_ubatch_calc, 64);
-                LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u and hardware): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
+                n_ubatch_prefill_calc = n_ubatch_calc;
+                LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
             }
         } else if (params.n_ubatch == -1) {
-            // Fallback to hardware-based calculation if no GPU memory info available
-            // For large context sizes, use more conservative ubatch limits to prevent OOM during CUDA graph construction
+            // Fallback when no GPU memory info available
             int32_t max_ubatch = 4096;
-            if (cparams.n_ctx >= 65536) {
-                max_ubatch = 1024; // Conservative limit for 64K+ context
+            if (cparams.n_ctx >= 262144) {
+                max_ubatch = 512;
+            } else if (cparams.n_ctx >= 131072) {
+                max_ubatch = 1024;
+            } else if (cparams.n_ctx >= 65536) {
+                max_ubatch = 1024;
             } else if (cparams.n_ctx >= 32768) {
-                max_ubatch = 2048; // Conservative limit for 32K+ context
+                max_ubatch = 2048;
             }
 
             n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch);
@@ -338,6 +367,7 @@ llama_context::llama_context(
                 n_ubatch_calc = std::min(n_ubatch_calc, 1024); // Reduce for NUMA architectures
             }
             n_ubatch_calc = std::max(n_ubatch_calc, 64);
+            n_ubatch_prefill_calc = n_ubatch_calc;
             LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u and hardware): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
         }
 
@@ -392,6 +422,13 @@ llama_context::llama_context(
 
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 || params.n_ubatch == -1 ? params.n_batch : params.n_ubatch);
 
+    // Prefill uses a larger ubatch for throughput. If user explicitly set n_ubatch,
+    // use it for both (backward compat). If auto-tuned, n_ubatch_prefill_calc was
+    // computed with a smaller memory multiplier to allow a larger prefill tile.
+    cparams.n_ubatch_prefill = n_ubatch_prefill_calc > 0
+        ? std::min(cparams.n_batch, (uint32_t)n_ubatch_prefill_calc)
+        : cparams.n_ubatch;
+
     cparams.n_outputs_max = params.n_outputs_max == 0 || llama_model_has_encoder(&model) ? cparams.n_batch : params.n_outputs_max;
 
     cparams.op_offload = params.op_offload;
@@ -432,7 +469,7 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: n_ctx         = %u\n",   __func__, cparams.n_ctx);
     LLAMA_LOG_INFO("%s: n_ctx_seq     = %u\n",   __func__, cparams.n_ctx_seq);
     LLAMA_LOG_INFO("%s: n_batch       = %u\n",   __func__, cparams.n_batch);
-    LLAMA_LOG_INFO("%s: n_ubatch      = %u\n",   __func__, cparams.n_ubatch);
+    LLAMA_LOG_INFO("%s: n_ubatch      = %u (prefill = %u)\n", __func__, cparams.n_ubatch, cparams.n_ubatch_prefill);
     LLAMA_LOG_INFO("%s: causal_attn   = %d\n",   __func__, cparams.causal_attn);
     LLAMA_LOG_INFO("%s: flash_attn    = %s\n",   __func__, llama_flash_attn_type_name(params.flash_attn_type));
     LLAMA_LOG_INFO("%s: kv_unified    = %s\n",   __func__, cparams.kv_unified ? "true" : "false");
@@ -724,7 +761,7 @@ void llama_context::sched_reserve() {
     const int64_t t_start_us = ggml_time_us();
 
     const uint32_t n_seqs = cparams.n_seq_max;
-    const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
+    const uint32_t n_tokens = std::min(cparams.n_ctx, std::max(cparams.n_ubatch, cparams.n_ubatch_prefill));
 
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
 
@@ -956,7 +993,7 @@ bool llama_context::memory_update(bool optimize) {
         }
 
         const uint32_t n_seqs = cparams.n_seq_max;
-        const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
+        const uint32_t n_tokens = std::min(cparams.n_ctx, std::max(cparams.n_ubatch, cparams.n_ubatch_prefill));
 
         const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
 
@@ -1556,7 +1593,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     const llama_ubatch ubatch = balloc->split_simple(n_tokens);
 
     // micro-batching is not possible for non-causal encoding, so we process the batch in a single shot
-    GGML_ASSERT(cparams.n_ubatch >= n_tokens && "encoder requires n_ubatch >= n_tokens");
+    GGML_ASSERT(std::max(cparams.n_ubatch, cparams.n_ubatch_prefill) >= n_tokens && "encoder requires n_ubatch >= n_tokens");
 
     // TODO: this clear of the buffer can easily be forgotten - need something better
     // sync first so any in-flight async copies into embd_seq complete before it is freed
@@ -1905,7 +1942,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     GGML_ASSERT(n_tokens_all <= cparams.n_batch);
 
-    GGML_ASSERT((cparams.causal_attn || cparams.n_ubatch >= n_tokens_all) && "non-causal attention requires n_ubatch >= n_tokens");
+    GGML_ASSERT((cparams.causal_attn || std::max(cparams.n_ubatch, cparams.n_ubatch_prefill) >= n_tokens_all) && "non-causal attention requires n_ubatch >= n_tokens");
 
     // TODO: this clear of the buffer can easily be forgotten - need something better
     // sync first so any in-flight async copies into embd_seq complete before it is freed
@@ -1930,8 +1967,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     llama_memory_context_ptr mctx;
 
+    // Use larger prefill ubatch when the batch needs splitting (prefill path).
+    // Single-ubatch batches (typical decode) keep the smaller n_ubatch.
+    const uint32_t n_ubatch_batch = n_tokens_all > cparams.n_ubatch ? cparams.n_ubatch_prefill : cparams.n_ubatch;
+
     while (true) {
-        mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+        mctx = memory->init_batch(*balloc, n_ubatch_batch, output_all);
         if (!mctx) {
             return -2;
         }
