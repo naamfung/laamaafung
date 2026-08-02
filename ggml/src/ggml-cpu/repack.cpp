@@ -4772,39 +4772,32 @@ static size_t ggml_backend_cpu_repack_buffer_type_get_alignment(ggml_backend_buf
 namespace ggml::cpu::repack {
 class extra_buffer_type : ggml::cpu::extra_buffer_type {
     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
-        if (    op->op == GGML_OP_MUL_MAT &&
-                op->src[0]->buffer &&
-                (ggml_n_dims(op->src[0]) == 2) &&
-                op->src[0]->buffer->buft == ggml_backend_cpu_repack_buffer_type() &&
-                ggml_repack_get_optimal_repack_type(op->src[0])
-                ) {
-            if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
-                return false;
-            }
-            if (op->src[1]->type == GGML_TYPE_F32) {
-                return true;
-            }
-            //if (op->src[1]->type == GGML_TYPE_Q8_0) {
-            //    return true;
-            //}
-            // may be possible if Q8_0 packed...
-        } else if (op->op == GGML_OP_MUL_MAT_ID
-                && op->src[0]->buffer
-                && (ggml_n_dims(op->src[0]) == 3)
-                && op->src[0]->buffer->buft == ggml_backend_cpu_repack_buffer_type()
-                && ggml_repack_get_optimal_repack_type(op->src[0])
-                ) {
-            if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
-                return false;
-            }
-            if (op->src[1]->type == GGML_TYPE_F32) {
-                return true;
-            }
-            //if (op->src[1]->type == GGML_TYPE_Q8_0) {
-            //    return true;
-            //}
+        const int expected_dims = (op->op == GGML_OP_MUL_MAT) ? 2 :
+                                  (op->op == GGML_OP_MUL_MAT_ID) ? 3 : 0;
+        if (expected_dims == 0) {
+            return false;
         }
-        return false;
+
+        if (ggml_n_dims(op->src[0]) != expected_dims) {
+            return false;
+        }
+
+        if (!ggml_repack_get_optimal_repack_type(op->src[0])) {
+            return false;
+        }
+
+        // At load time (buffer == nullptr) we accept so the tensor gets
+        // allocated into a repack buffer. At runtime we only claim ops whose
+        // weight already lives in a repack buffer.
+        if (op->src[0]->buffer && op->src[0]->buffer->buft != ggml_backend_cpu_repack_buffer_type()) {
+            return false;
+        }
+
+        if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
+            return false;
+        }
+
+        return op->src[1]->type == GGML_TYPE_F32;
     }
 
     ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
