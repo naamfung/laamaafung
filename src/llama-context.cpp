@@ -397,21 +397,28 @@ llama_context::llama_context(
                     max_n_batch = 4096; // Conservative limit for 32K+ context
                 }
 
-                // Based on the division logic: total_safe_tokens = safe_mem / per_token_consumption,
-                // allocate n_ubatch and n_batch proportionally (n_batch >= 4 * n_ubatch).
-                int32_t target_n_batch = std::max(static_cast<int32_t>(params.n_ubatch), static_cast<int32_t>(512));
-
-                // Aim for n_batch >= 4 * n_ubatch, but respect memory and context limits.
-                // This applies to both full GPU offload and hybrid inference (based on GPU memory cap).
-                int32_t target_n_batch_4x = params.n_ubatch * 4;
-                if (target_n_batch_4x <= static_cast<int32_t>(cparams.n_ctx) && target_n_batch_4x <= max_n_batch) {
-                    target_n_batch = std::max(target_n_batch, target_n_batch_4x);
+                // Based on empirical results: when ub is very small, b should be ub * large_multiplier
+                // to reach max_n_batch. The multiplier decreases as ub increases (descending order):
+                // ub<=256 -> multiplier 32 (b=8192 when max_n_batch=8192)
+                // ub<=512 -> multiplier 16 (b=8192 when max_n_batch=8192)
+                // ub<=1024 -> multiplier 8 (b=8192 when max_n_batch=8192)
+                // ub<=2048 -> multiplier 4 (b=8192 when max_n_batch=8192)
+                // ub<=4096 -> multiplier 2 (b=8192 when max_n_batch=8192)
+                int32_t target_n_batch;
+                if (params.n_ubatch >= max_n_batch) {
+                    target_n_batch = params.n_ubatch;
+                } else if (params.n_ubatch <= 256) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 32);
+                } else if (params.n_ubatch <= 512) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 16);
+                } else if (params.n_ubatch <= 1024) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 8);
+                } else if (params.n_ubatch <= 2048) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 4);
+                } else if (params.n_ubatch <= 4096) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 2);
                 } else {
-                    // If 4x is not possible due to limits, ensure at least 2x n_ubatch
-                    int32_t target_n_batch_2x = params.n_ubatch * 2;
-                    if (target_n_batch_2x <= static_cast<int32_t>(cparams.n_ctx) && target_n_batch_2x <= max_n_batch) {
-                        target_n_batch = std::max(target_n_batch, target_n_batch_2x);
-                    }
+                    target_n_batch = max_n_batch;
                 }
 
                 n_batch_calc = std::min(static_cast<int32_t>(cparams.n_ctx), target_n_batch);
