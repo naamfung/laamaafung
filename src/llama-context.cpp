@@ -396,7 +396,25 @@ llama_context::llama_context(
                 } else if (cparams.n_ctx >= 32768) {
                     max_n_batch = 4096; // Conservative limit for 32K+ context
                 }
-                n_batch_calc = std::min(static_cast<int32_t>(cparams.n_ctx), std::max(static_cast<int32_t>(params.n_ubatch), static_cast<int32_t>(512)));
+
+                // Based on the division logic: total_safe_tokens = safe_mem / per_token_consumption,
+                // allocate n_ubatch and n_batch proportionally (n_batch >= 4 * n_ubatch).
+                int32_t target_n_batch = std::max(static_cast<int32_t>(params.n_ubatch), static_cast<int32_t>(512));
+
+                // Aim for n_batch >= 4 * n_ubatch, but respect memory and context limits.
+                // This applies to both full GPU offload and hybrid inference (based on GPU memory cap).
+                int32_t target_n_batch_4x = params.n_ubatch * 4;
+                if (target_n_batch_4x <= static_cast<int32_t>(cparams.n_ctx) && target_n_batch_4x <= max_n_batch) {
+                    target_n_batch = std::max(target_n_batch, target_n_batch_4x);
+                } else {
+                    // If 4x is not possible due to limits, ensure at least 2x n_ubatch
+                    int32_t target_n_batch_2x = params.n_ubatch * 2;
+                    if (target_n_batch_2x <= static_cast<int32_t>(cparams.n_ctx) && target_n_batch_2x <= max_n_batch) {
+                        target_n_batch = std::max(target_n_batch, target_n_batch_2x);
+                    }
+                }
+
+                n_batch_calc = std::min(static_cast<int32_t>(cparams.n_ctx), target_n_batch);
                 n_batch_calc = std::min(n_batch_calc, max_n_batch);
             } else {
                 // Calculate based on n_ctx and hardware features
