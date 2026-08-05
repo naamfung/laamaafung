@@ -213,7 +213,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--sse-ping-interval N` | server SSE ping interval in seconds (-1 = disabled, default: 30)<br/>(env: LLAMA_ARG_SSE_PING_INTERVAL) |
 | `--threads-http N` | number of threads used to process HTTP requests (default: -1)<br/>(env: LLAMA_ARG_THREADS_HTTP) |
 | `--cache-prompt, --no-cache-prompt` | whether to enable prompt caching (default: enabled)<br/>(env: LLAMA_ARG_CACHE_PROMPT) |
-| `--cache-reuse N` | min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: 0). Note: this is NOT traditional prefix cache reuse - it works by K-shifting cached KV chunks to new positions. Requires `llama_memory_can_shift() == true`; unavailable on models with M-RoPE/IM-RoPE positions (`n_pos_per_embd > 1`, e.g. Qwen3.5/3.6 series, Qwen3VL and other multimodal models), or SWA models without `--swa-full`. Qwen3.5/3.6 also use hybrid attention (gated DeltaNet linear + gated attention) - either IM-RoPE or hybrid attention alone is sufficient to disable K-shift. On unsupported models the warning `cache_reuse is not supported by this context` is printed and the feature is disabled - `--cache-prompt` prefix reuse still works independently<br/>[(card)](https://ggml.ai/f0.png)<br/>(env: LLAMA_ARG_CACHE_REUSE) |
+| `--cache-reuse N` | min token count to attempt prefix cache reuse across slots via zero-copy KV cell sharing (`seq_cp`), requires prompt caching to be enabled (default: 0, disabled). Works on fixed-size 256-token blocks: computes a chained XXH64 hash of each block and shares KV cells between slots when a match is found. Auto-enables `--kv-unified` when N > 0. Disabled for multimodal models. Same-slot prefix reuse via `--cache-prompt` works independently of this flag<br/>(env: LLAMA_ARG_CACHE_REUSE) |
 | `--metrics` | enable prometheus compatible metrics endpoint (default: disabled)<br/>(env: LLAMA_ARG_ENDPOINT_METRICS) |
 | `--props` | enable changing global properties via POST /props (default: disabled)<br/>(env: LLAMA_ARG_ENDPOINT_PROPS) |
 | `--slots, --no-slots` | expose slots monitoring endpoint (default: enabled)<br/>(env: LLAMA_ARG_ENDPOINT_SLOTS) |
@@ -464,7 +464,7 @@ By default, this value is set to `0`, meaning no tokens are kept. Use `-1` to re
 
 `n_cmpl`: Number of completions to generate from the current prompt. If input has multiple prompts, the output will have N prompts times `n_cmpl` entries.
 
-`n_cache_reuse`: Min chunk size to attempt reusing from the cache via KV shifting. For more info, see `--cache-reuse` arg. Default: `0`, which is disabled.
+`n_cache_reuse`: Min token count for cross-slot prefix cache reuse via `seq_cp` cell sharing. For more info, see `--cache-reuse` arg. Default: `0`, which is disabled.
 
 `stream`: Allows receiving each predicted token in real-time instead of waiting for the completion to finish (uses a different response format). To enable this, set to `true`.
 

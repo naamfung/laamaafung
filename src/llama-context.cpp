@@ -310,9 +310,9 @@ llama_context::llama_context(
             size_t per_token_decode  = kv_per_ubatch_token * 6;
             size_t per_token_prefill = kv_per_ubatch_token * 3 + moe_per_token;
 
-            // Free memory after reserving the full KV cache, with 20% safety margin
+            // Free memory after reserving the full KV cache, with safety margin
             size_t avail_mem = free_mem_total > kv_cache_total ? (free_mem_total - kv_cache_total) : 0;
-            size_t safe_mem  = (size_t)(avail_mem * 0.8);
+            size_t safe_mem  = (size_t)(avail_mem * 0.78);
 
             // Context-based conservative cap (refined tiers including 128K+ and 256K+)
             int32_t max_ubatch_by_ctx;
