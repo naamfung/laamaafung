@@ -803,6 +803,27 @@ extern "C" {
     // Returns the number of blocks freed.
     LLAMA_API int llama_memory_ensure_capacity(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_tokens);
 
+    // Swap preemption: check if a seq is swapped out to CPU
+    LLAMA_API bool llama_memory_is_swapped(llama_memory_t mem, llama_seq_id seq_id);
+
+    // Swap preemption: restore a seq's K/V from CPU swap buffer back to GPU
+    LLAMA_API bool llama_memory_swap_in(llama_memory_t mem, llama_seq_id seq_id);
+
+    // Paged cache metrics for monitoring
+    struct llama_memory_metrics {
+        uint32_t n_blocks_total;   // total blocks in pool
+        uint32_t n_blocks_free;    // ref_count==0, no hash (truly free)
+        uint32_t n_blocks_used;    // ref_count>0 (in use)
+        uint32_t n_blocks_cached;  // ref_count==0, hash!=0 (evictable)
+        uint32_t n_swapped_tokens; // tokens swapped to CPU
+        uint64_t preempt_count;    // total preemption operations
+        uint64_t swap_out_count;   // total swap_out operations
+        uint64_t swap_in_count;    // total swap_in operations
+    };
+
+    // Returns metrics for paged cache. For legacy cache, all fields are 0.
+    LLAMA_API struct llama_memory_metrics llama_memory_get_metrics(llama_memory_t mem);
+
     //
     // State / sessions
     //

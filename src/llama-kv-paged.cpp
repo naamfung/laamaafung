@@ -107,7 +107,7 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq) {
             // loops until a block actually frees up (shared blocks only drop
             // ref_count and stay in use).
             if (!preempt_one(exclude_seq)) {
-                GGML_ASSERT(false && "paged cache: out of blocks, no seq to preempt");
+                throw std::runtime_error("paged cache: out of blocks, no seq to preempt");
             }
         }
     }
@@ -148,7 +148,15 @@ bool llama_kv_paged_cache::preempt_one(llama_seq_id exclude_seq) {
     }
     if (victim < 0) return false;
 
+    preempt_count++;
+
+    // swap out the entire victim if it has > 1 block and swap buffer has room.
+    // this preserves K/V data and frees all blocks at once, avoiding recompute.
     auto & bt = block_tables[victim];
+    if (bt.size() > 1 && n_swapped_tokens() + seq_length(victim) < n_blocks * block_size) {
+        return swap_out(victim);
+    }
+
     const uint32_t block_id = bt.back();
     const uint32_t n_filled = (uint32_t) blocks[block_id].token_ids.size();
 
@@ -327,6 +335,191 @@ int llama_kv_paged_cache::ensure_capacity(llama_seq_id seq_id, uint32_t n_tokens
         n_freed++;
     }
     return n_freed;
+}
+
+bool llama_kv_paged_cache::is_swapped(llama_seq_id seq_id) const {
+    return swapped_seqs.find(seq_id) != swapped_seqs.end();
+}
+
+uint32_t llama_kv_paged_cache::n_swapped_tokens() const {
+    uint32_t total = 0;
+    for (auto & [sid, entry] : swapped_seqs) {
+        total += entry.n_tokens;
+    }
+    return total;
+}
+
+llama_kv_paged_cache::metrics llama_kv_paged_cache::get_metrics() const {
+    metrics m;
+    m.n_blocks_total   = n_blocks;
+    m.n_blocks_free    = (uint32_t) free_block_ids.size();
+    m.n_blocks_used    = (uint32_t) used_block_ids.size();
+    m.n_blocks_cached  = (uint32_t) cached_block_ids.size();
+    m.n_swapped_tokens = n_swapped_tokens();
+    m.preempt_count    = preempt_count;
+    m.swap_out_count   = swap_out_count;
+    m.swap_in_count    = swap_in_count;
+    return m;
+}
+
+bool llama_kv_paged_cache::swap_out(llama_seq_id seq_id) {
+    const int64_t t0 = ggml_time_us();
+    uint32_t n_tokens = seq_length(seq_id);
+    if (n_tokens == 0) return false;
+
+    swap_entry_t entry;
+    entry.n_tokens = n_tokens;
+    entry.k_data.resize(layers.size());
+    entry.v_data.resize(layers.size());
+
+    // allocate CPU buffers
+    for (size_t il = 0; il < layers.size(); il++) {
+        auto & layer = layers[il];
+        if (layer.k) {
+            size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
+            entry.k_data[il].resize(n_tokens * row_size);
+        }
+        if (layer.v) {
+            size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
+            entry.v_data[il].resize(n_tokens * row_size);
+        }
+    }
+
+    // copy K/V data and collect tokens, block by block
+    auto it = block_tables.find(seq_id);
+    if (it == block_tables.end()) return false;
+    auto & bt = it->second;
+
+    uint32_t token_off = 0;
+    for (uint32_t block_id : bt) {
+        auto & blk = blocks[block_id];
+        uint32_t n_filled = (uint32_t) blk.token_ids.size();
+        uint32_t cell_start = block_id * block_size;
+
+        for (auto t : blk.token_ids) {
+            entry.tokens.push_back(t);
+        }
+
+        for (size_t il = 0; il < layers.size(); il++) {
+            auto & layer = layers[il];
+            if (layer.k && !entry.k_data[il].empty()) {
+                size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
+                ggml_backend_tensor_get(
+                    layer.k,
+                    entry.k_data[il].data() + token_off * row_size,
+                    cell_start * row_size,
+                    n_filled * row_size);
+            }
+            if (layer.v && !entry.v_data[il].empty()) {
+                size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
+                ggml_backend_tensor_get(
+                    layer.v,
+                    entry.v_data[il].data() + token_off * row_size,
+                    cell_start * row_size,
+                    n_filled * row_size);
+            }
+        }
+
+        token_off += n_filled;
+    }
+
+    // clear cell metadata for the seq
+    for (uint32_t block_id : bt) {
+        auto & blk = blocks[block_id];
+        uint32_t n_filled = (uint32_t) blk.token_ids.size();
+        uint32_t base = block_id * block_size;
+        for (uint32_t off = 0; off < n_filled; ++off) {
+            v_cells[0].seq_rm(base + off, seq_id);
+        }
+    }
+
+    dealloc_seq(seq_id);
+    swapped_seqs[seq_id] = std::move(entry);
+
+    swap_out_count++;
+
+    const int64_t t1 = ggml_time_us();
+    LLAMA_LOG_INFO("paged cache: swap_out seq=%d, n_tokens=%u, %.2f ms\n",
+                   seq_id, n_tokens, (t1 - t0) / 1000.0);
+    return true;
+}
+
+bool llama_kv_paged_cache::swap_in(llama_seq_id seq_id) {
+    auto it = swapped_seqs.find(seq_id);
+    if (it == swapped_seqs.end()) return false;
+
+    const int64_t t0 = ggml_time_us();
+    auto & entry = it->second;
+    uint32_t n_tokens = entry.n_tokens;
+
+    // allocate blocks at block boundaries
+    uint32_t n_blocks_needed = (n_tokens + block_size - 1) / block_size;
+    for (uint32_t bi = 0; bi < n_blocks_needed; bi++) {
+        may_append(seq_id, bi * block_size);
+    }
+
+    // set cell metadata for each position
+    for (uint32_t pos = 0; pos < n_tokens; pos++) {
+        uint32_t cell = cell_index(seq_id, pos);
+        v_cells[0].pos_set(cell, pos);
+        v_cells[0].seq_add(cell, seq_id);
+    }
+
+    // restore token_ids in blocks
+    auto & bt = block_tables[seq_id];
+    uint32_t token_off = 0;
+    for (uint32_t bi = 0; bi < bt.size(); bi++) {
+        auto & blk = blocks[bt[bi]];
+        uint32_t n_filled = std::min(block_size, n_tokens - token_off);
+        blk.token_ids.assign(
+            entry.tokens.begin() + token_off,
+            entry.tokens.begin() + token_off + n_filled);
+        token_off += n_filled;
+    }
+
+    // copy K/V data from CPU to GPU, block by block
+    token_off = 0;
+    for (uint32_t block_id : bt) {
+        uint32_t n_filled = (uint32_t) blocks[block_id].token_ids.size();
+        uint32_t cell_start = block_id * block_size;
+
+        for (size_t il = 0; il < layers.size(); il++) {
+            auto & layer = layers[il];
+            if (layer.k && !entry.k_data[il].empty()) {
+                size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
+                ggml_backend_tensor_set(
+                    layer.k,
+                    entry.k_data[il].data() + token_off * row_size,
+                    cell_start * row_size,
+                    n_filled * row_size);
+            }
+            if (layer.v && !entry.v_data[il].empty()) {
+                size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
+                ggml_backend_tensor_set(
+                    layer.v,
+                    entry.v_data[il].data() + token_off * row_size,
+                    cell_start * row_size,
+                    n_filled * row_size);
+            }
+        }
+
+        token_off += n_filled;
+    }
+
+    // hash full blocks for prefix sharing
+    uint32_t n_full_blocks = n_tokens / block_size;
+    if (n_full_blocks > 0) {
+        hash_blocks(seq_id, 0, n_full_blocks);
+    }
+
+    swapped_seqs.erase(it);
+
+    swap_in_count++;
+
+    const int64_t t1 = ggml_time_us();
+    LLAMA_LOG_INFO("paged cache: swap_in seq=%d, n_tokens=%u, %.2f ms\n",
+                   seq_id, n_tokens, (t1 - t0) / 1000.0);
+    return true;
 }
 
 uint32_t llama_kv_paged_cache::find_prefix(const llama_token * tokens, uint32_t n) const {
@@ -625,6 +818,7 @@ void llama_kv_paged_cache::clear(bool data) {
         free_block_ids.push_back(i);
     }
     block_tables.clear();
+    swapped_seqs.clear();
 
     // reset cell metadata + clear data buffers
     llama_kv_cache::clear(data);

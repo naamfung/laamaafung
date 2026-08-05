@@ -3346,6 +3346,19 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     res->n_decode_total          = metrics.n_decode_total;
                     res->n_busy_slots_total      = metrics.n_busy_slots_total;
 
+                    // paged KV cache metrics
+                    {
+                        auto m = llama_memory_get_metrics(llama_get_memory(ctx_tgt));
+                        res->kv_blocks_total   = m.n_blocks_total;
+                        res->kv_blocks_free    = m.n_blocks_free;
+                        res->kv_blocks_used    = m.n_blocks_used;
+                        res->kv_blocks_cached  = m.n_blocks_cached;
+                        res->kv_swapped_tokens = m.n_swapped_tokens;
+                        res->kv_preempt_count  = m.preempt_count;
+                        res->kv_swap_out_count = m.swap_out_count;
+                        res->kv_swap_in_count  = m.swap_in_count;
+                    }
+
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
                     }
@@ -5370,6 +5383,43 @@ void server_routes::init_routes() {
                     {"name",  "n_busy_slots_per_decode"},
                     {"help",  "Average number of busy slots per llama_decode() call"},
                     {"value",  (float) res_task->n_busy_slots_total / std::max((float) res_task->n_decode_total, 1.f)}
+            },{
+                    {"name",  "kv_blocks_total"},
+                    {"help",  "Total blocks in paged KV cache pool"},
+                    {"value",  (uint64_t) res_task->kv_blocks_total}
+            },{
+                    {"name",  "kv_blocks_free"},
+                    {"help",  "Free blocks (ref_count=0, no hash)"},
+                    {"value",  (uint64_t) res_task->kv_blocks_free}
+            },{
+                    {"name",  "kv_blocks_used"},
+                    {"help",  "Used blocks (ref_count>0)"},
+                    {"value",  (uint64_t) res_task->kv_blocks_used}
+            },{
+                    {"name",  "kv_blocks_cached"},
+                    {"help",  "Cached blocks (ref_count=0, hash!=0, evictable)"},
+                    {"value",  (uint64_t) res_task->kv_blocks_cached}
+            },{
+                    {"name",  "kv_cache_usage"},
+                    {"help",  "KV cache usage percentage (used+cached)/total"},
+                    {"value",  res_task->kv_blocks_total ? (float)(res_task->kv_blocks_used + res_task->kv_blocks_cached) / res_task->kv_blocks_total * 100.f : 0.f}
+            },{
+                    {"name",  "kv_swapped_tokens"},
+                    {"help",  "Tokens swapped to CPU memory"},
+                    {"value",  (uint64_t) res_task->kv_swapped_tokens}
+            }}},
+            {"counter", {{
+                    {"name",  "kv_preempt_count"},
+                    {"help",  "Total preemption operations"},
+                    {"value",  res_task->kv_preempt_count}
+            },{
+                    {"name",  "kv_swap_out_count"},
+                    {"help",  "Total swap_out operations"},
+                    {"value",  res_task->kv_swap_out_count}
+            },{
+                    {"name",  "kv_swap_in_count"},
+                    {"help",  "Total swap_in operations"},
+                    {"value",  res_task->kv_swap_in_count}
             }}}
         };
 

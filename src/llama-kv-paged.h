@@ -71,6 +71,25 @@ public:
     // per-seq logical length (number of tokens currently mapped)
     uint32_t seq_length(llama_seq_id seq_id) const;
 
+    // swap preemption: save/restore a seq's K/V data to/from CPU memory
+    bool is_swapped(llama_seq_id seq_id) const override;
+    bool swap_out  (llama_seq_id seq_id) override;
+    bool swap_in   (llama_seq_id seq_id) override;
+    uint32_t n_swapped_tokens() const;
+
+    // metrics for monitoring
+    struct metrics {
+        uint32_t n_blocks_total   = 0;
+        uint32_t n_blocks_free    = 0;
+        uint32_t n_blocks_used    = 0;
+        uint32_t n_blocks_cached  = 0;
+        uint32_t n_swapped_tokens = 0;
+        uint64_t preempt_count    = 0;
+        uint64_t swap_out_count   = 0;
+        uint64_t swap_in_count    = 0;
+    };
+    metrics get_metrics() const;
+
 private:
     struct block_t {
         int32_t  ref_count = 0;
@@ -89,8 +108,22 @@ private:
     // monotonic counter for LRU ordering
     uint64_t lru_counter = 0;
 
+    // metrics counters
+    uint64_t preempt_count  = 0;
+    uint64_t swap_out_count = 0;
+    uint64_t swap_in_count  = 0;
+
     // per-seq physical block table (block_table[seq][i] -> physical block id)
     std::unordered_map<llama_seq_id, std::vector<uint32_t>> block_tables;
+
+    // swap storage: per-seq CPU buffers for swapped-out K/V data
+    struct swap_entry_t {
+        std::vector<llama_token> tokens;
+        std::vector<std::vector<uint8_t>> k_data;  // per-layer
+        std::vector<std::vector<uint8_t>> v_data;
+        uint32_t n_tokens = 0;
+    };
+    std::unordered_map<llama_seq_id, swap_entry_t> swapped_seqs;
 
     // auto-detect block_size: 32 for GPU buft, 16 for CPU
     static uint32_t detect_block_size(const llama_model & model, bool offload);

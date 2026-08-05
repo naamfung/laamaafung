@@ -7,6 +7,7 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-kv-paged.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
@@ -4221,6 +4222,45 @@ int llama_memory_ensure_capacity(llama_memory_t mem, llama_seq_id seq_id, uint32
     }
 
     return mem->ensure_capacity(seq_id, n_tokens);
+}
+
+bool llama_memory_is_swapped(llama_memory_t mem, llama_seq_id seq_id) {
+    if (!mem) {
+        return false;
+    }
+
+    return mem->is_swapped(seq_id);
+}
+
+bool llama_memory_swap_in(llama_memory_t mem, llama_seq_id seq_id) {
+    if (!mem) {
+        return false;
+    }
+
+    return mem->swap_in(seq_id);
+}
+
+llama_memory_metrics llama_memory_get_metrics(llama_memory_t mem) {
+    llama_memory_metrics m{};
+    if (!mem) {
+        return m;
+    }
+
+    // only paged cache has meaningful metrics
+    auto * paged = dynamic_cast<llama_kv_paged_cache *>(mem);
+    if (paged) {
+        auto pm = paged->get_metrics();
+        m.n_blocks_total   = pm.n_blocks_total;
+        m.n_blocks_free    = pm.n_blocks_free;
+        m.n_blocks_used    = pm.n_blocks_used;
+        m.n_blocks_cached  = pm.n_blocks_cached;
+        m.n_swapped_tokens = pm.n_swapped_tokens;
+        m.preempt_count    = pm.preempt_count;
+        m.swap_out_count   = pm.swap_out_count;
+        m.swap_in_count    = pm.swap_in_count;
+    }
+
+    return m;
 }
 
 // llama state API
