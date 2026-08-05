@@ -4240,6 +4240,22 @@ bool llama_memory_swap_in(llama_memory_t mem, llama_seq_id seq_id) {
     return mem->swap_in(seq_id);
 }
 
+uint32_t llama_memory_find_prefix(llama_memory_t mem, const llama_token * tokens, uint32_t n_tokens) {
+    if (!mem || !tokens || n_tokens == 0) {
+        return 0;
+    }
+
+    return mem->find_prefix(tokens, n_tokens);
+}
+
+uint32_t llama_memory_share_prefix(llama_memory_t mem, llama_seq_id seq_id, const llama_token * tokens, uint32_t n_tokens) {
+    if (!mem || !tokens || n_tokens == 0) {
+        return 0;
+    }
+
+    return mem->share_prefix(seq_id, tokens, n_tokens);
+}
+
 llama_memory_metrics llama_memory_get_metrics(llama_memory_t mem) {
     llama_memory_metrics m{};
     if (!mem) {

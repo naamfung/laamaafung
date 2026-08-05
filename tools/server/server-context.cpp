@@ -1575,15 +1575,17 @@ private:
             const bool can_shift = llama_memory_can_shift(llama_get_memory(ctx_tgt));
             const char * graphs_env = getenv("GGML_CUDA_DISABLE_GRAPHS");
             const char * block_size_env = getenv("LLAMA_KV_BLOCK_SIZE");
+            const char * paged_swa_env = getenv("LLAMA_KV_PAGED_SWA");
             const uint32_t block_size = llama_memory_get_metrics(llama_get_memory(ctx_tgt)).block_size;
-            SRV_INF("KV cache: %s (LLAMA_KV_LEGACY=%s, can_shift=%s, cuda_graphs=%s, block_size=%u%s%s)\n",
+            SRV_INF("KV cache: %s (LLAMA_KV_LEGACY=%s, can_shift=%s, cuda_graphs=%s, block_size=%u%s%s, swa=%s)\n",
                     kv_paged ? "paged (vllm-style)" : "legacy (contiguous)",
                     legacy_env ? legacy_env : "(unset)",
                     can_shift ? "true" : "false",
                     graphs_env ? "disabled" : "auto",
                     block_size,
                     block_size_env ? ", env=" : "",
-                    block_size_env ? block_size_env : "");
+                    block_size_env ? block_size_env : "",
+                    paged_swa_env && paged_swa_env[0] == '1' ? "paged" : "auto");
         }
 
         // initialize slots
@@ -4140,9 +4142,23 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                                 // paged cache: prefix sharing is handled internally by the
                                 // block-hash-chain, no server-layer prefix cache needed
                                 GGML_UNUSED(n_cache_reuse);
+
+                                // query paged-cache prefix hit for observability. the actual
+                                // block sharing happens later in init_batch via share_prefix.
+                                {
+                                    const auto & tokens = input_tokens.get_tokens();
+                                    slot.n_prompt_tokens_prefix = (int32_t) llama_memory_find_prefix(
+                                            llama_get_memory(ctx_tgt),
+                                            tokens.data(),
+                                            (uint32_t) tokens.size());
+                                    if (slot.n_prompt_tokens_prefix > 0) {
+                                        SLT_INF(slot, "paged cache: prefix hit %d tokens\n", slot.n_prompt_tokens_prefix);
+                                    }
+                                }
                             } else {
                                 // if we don't cache the prompt, we have to remove all previous tokens
                                 n_past = 0;
+                                slot.n_prompt_tokens_prefix = 0;
                             }
 
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);

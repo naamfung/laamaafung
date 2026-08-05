@@ -126,6 +126,21 @@ struct llama_memory_i {
     virtual bool swap_out  (llama_seq_id seq_id) { (void) seq_id; return false; }
     virtual bool swap_in   (llama_seq_id seq_id) { (void) seq_id; return false; }
 
+    // paged cache prefix lookup: returns the number of matching tokens (a
+    // multiple of block_size) for the given token sequence, 0 on miss or for
+    // non-paged memory. Only fully-filled blocks participate in matching.
+    virtual uint32_t find_prefix(const llama_token * tokens, uint32_t n_tokens) const {
+        GGML_UNUSED(tokens); GGML_UNUSED(n_tokens); return 0;
+    }
+
+    // paged cache prefix sharing: shares the matching prefix blocks with
+    // seq_id (ref_count++ on each shared block). Returns the number of shared
+    // tokens (a multiple of block_size), 0 on miss. Only safe to call before
+    // seq_id has any blocks allocated (i.e. a fresh sequence).
+    virtual uint32_t share_prefix(llama_seq_id seq_id, const llama_token * tokens, uint32_t n_tokens) {
+        GGML_UNUSED(seq_id); GGML_UNUSED(tokens); GGML_UNUSED(n_tokens); return 0;
+    }
+
     //
     // ops
     //

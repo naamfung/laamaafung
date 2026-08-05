@@ -58,8 +58,8 @@ llama_kv_paged_cache::llama_kv_paged_cache(
             /*kv_size*/    kv_size,
             n_seq_max,
             n_pad,
-            /*n_swa*/      0,
-            /*swa_type*/   LLAMA_SWA_TYPE_NONE,
+            /*n_swa*/      hparams.n_swa,
+            /*swa_type*/   hparams.swa_type,
             /*mem_other*/  nullptr,
             filter,
             nullptr,
@@ -67,8 +67,6 @@ llama_kv_paged_cache::llama_kv_paged_cache(
     block_size(detect_block_size(model, offload)),
     n_blocks(kv_size / block_size) {
 
-    GGML_ASSERT(hparams.swa_type == LLAMA_SWA_TYPE_NONE && "paged cache requires swa_type == NONE");
-    GGML_ASSERT(hparams.n_pos_per_embd() == 1 && "paged cache requires n_pos_per_embd == 1");
     GGML_ASSERT(n_blocks > 0 && "paged cache requires kv_size >= block_size");
 
     blocks.resize(n_blocks);
@@ -358,6 +356,38 @@ uint32_t llama_kv_paged_cache::n_swapped_tokens() const {
     return total;
 }
 
+ggml_backend_t llama_kv_paged_cache::get_swap_backend(const ggml_tensor * tensor) {
+    ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+    if (!buf) return nullptr;
+
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf);
+    if (!buft) return nullptr;
+
+    ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+    if (!dev) return nullptr;
+
+    auto it = swap_backends.find(dev);
+    if (it != swap_backends.end()) {
+        return it->second.get();
+    }
+
+    ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+    if (!backend) return nullptr;
+
+    auto & ptr = swap_backends[dev];
+    ptr.reset(backend);
+    return backend;
+}
+
+void llama_kv_paged_cache::swap_synchronize() {
+    for (auto & backend : swap_backends_used) {
+        if (backend) {
+            ggml_backend_synchronize(backend);
+        }
+    }
+    swap_backends_used.clear();
+}
+
 llama_kv_paged_cache::metrics llama_kv_paged_cache::get_metrics() const {
     metrics m;
     m.n_blocks_total   = n_blocks;
@@ -395,7 +425,8 @@ bool llama_kv_paged_cache::swap_out(llama_seq_id seq_id) {
         }
     }
 
-    // copy K/V data and collect tokens, block by block
+    // copy K/V data and collect tokens, block by block. use async copies to
+    // pipeline all layers on the swap stream, then sync once at the end.
     auto it = block_tables.find(seq_id);
     if (it == block_tables.end()) return false;
     auto & bt = it->second;
@@ -414,24 +445,43 @@ bool llama_kv_paged_cache::swap_out(llama_seq_id seq_id) {
             auto & layer = layers[il];
             if (layer.k && !entry.k_data[il].empty()) {
                 size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
-                ggml_backend_tensor_get(
-                    layer.k,
-                    entry.k_data[il].data() + token_off * row_size,
-                    cell_start * row_size,
-                    n_filled * row_size);
+                ggml_backend_t backend = get_swap_backend(layer.k);
+                if (backend) {
+                    swap_backends_used.push_back(backend);
+                    ggml_backend_tensor_get_async(
+                        backend, layer.k,
+                        entry.k_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                } else {
+                    ggml_backend_tensor_get(
+                        layer.k,
+                        entry.k_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                }
             }
             if (layer.v && !entry.v_data[il].empty()) {
                 size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
-                ggml_backend_tensor_get(
-                    layer.v,
-                    entry.v_data[il].data() + token_off * row_size,
-                    cell_start * row_size,
-                    n_filled * row_size);
+                ggml_backend_t backend = get_swap_backend(layer.v);
+                if (backend) {
+                    swap_backends_used.push_back(backend);
+                    ggml_backend_tensor_get_async(
+                        backend, layer.v,
+                        entry.v_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                } else {
+                    ggml_backend_tensor_get(
+                        layer.v,
+                        entry.v_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                }
             }
         }
 
         token_off += n_filled;
     }
+
+    // wait for all async copies to complete before freeing blocks
+    swap_synchronize();
 
     // clear cell metadata for the seq
     for (uint32_t block_id : bt) {
@@ -487,7 +537,8 @@ bool llama_kv_paged_cache::swap_in(llama_seq_id seq_id) {
         token_off += n_filled;
     }
 
-    // copy K/V data from CPU to GPU, block by block
+    // copy K/V data from CPU to GPU, block by block. use async copies to
+    // pipeline all layers on the swap stream, then sync once at the end.
     token_off = 0;
     for (uint32_t block_id : bt) {
         uint32_t n_filled = (uint32_t) blocks[block_id].token_ids.size();
@@ -497,24 +548,43 @@ bool llama_kv_paged_cache::swap_in(llama_seq_id seq_id) {
             auto & layer = layers[il];
             if (layer.k && !entry.k_data[il].empty()) {
                 size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
-                ggml_backend_tensor_set(
-                    layer.k,
-                    entry.k_data[il].data() + token_off * row_size,
-                    cell_start * row_size,
-                    n_filled * row_size);
+                ggml_backend_t backend = get_swap_backend(layer.k);
+                if (backend) {
+                    swap_backends_used.push_back(backend);
+                    ggml_backend_tensor_set_async(
+                        backend, layer.k,
+                        entry.k_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                } else {
+                    ggml_backend_tensor_set(
+                        layer.k,
+                        entry.k_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                }
             }
             if (layer.v && !entry.v_data[il].empty()) {
                 size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
-                ggml_backend_tensor_set(
-                    layer.v,
-                    entry.v_data[il].data() + token_off * row_size,
-                    cell_start * row_size,
-                    n_filled * row_size);
+                ggml_backend_t backend = get_swap_backend(layer.v);
+                if (backend) {
+                    swap_backends_used.push_back(backend);
+                    ggml_backend_tensor_set_async(
+                        backend, layer.v,
+                        entry.v_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                } else {
+                    ggml_backend_tensor_set(
+                        layer.v,
+                        entry.v_data[il].data() + token_off * row_size,
+                        cell_start * row_size, n_filled * row_size);
+                }
             }
         }
 
         token_off += n_filled;
     }
+
+    // wait for all async copies to complete before returning
+    swap_synchronize();
 
     // hash full blocks for prefix sharing
     uint32_t n_full_blocks = n_tokens / block_size;
@@ -753,8 +823,12 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
         }
     }
 
-    // track first new block per seq for post-batch hashing
-    std::unordered_map<llama_seq_id, uint32_t> first_new_block;
+    // track first modified block per seq for post-batch hashing.
+    // unlike "first new block", this also covers the case where a previously
+    // partial block becomes full during decode - essential for incremental
+    // prefix matching (running seqs' newly completed blocks must be hashed
+    // so future seqs can share them).
+    std::unordered_map<llama_seq_id, uint32_t> first_modified_block;
 
     slot_info_vec_t sinfos;
     sinfos.reserve(filtered_ubatches.size());
@@ -771,10 +845,13 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
             const llama_seq_id seq_id = ubatch.seq_id[i][0];
             const llama_pos    pos    = ubatch.pos[i * ubatch.n_pos];
 
-            // record first new block for this seq (before may_append grows the table)
-            if (first_new_block.find(seq_id) == first_new_block.end()) {
-                auto it = block_tables.find(seq_id);
-                first_new_block[seq_id] = (it != block_tables.end()) ? (uint32_t) it->second.size() : 0;
+            // record the block index of the first token processed for this
+            // seq. this block may already exist (partial) and become full
+            // during this batch, or it may be newly allocated.
+            const uint32_t block_idx = (uint32_t) pos / block_size;
+            auto fmb_it = first_modified_block.find(seq_id);
+            if (fmb_it == first_modified_block.end() || block_idx < fmb_it->second) {
+                first_modified_block[seq_id] = block_idx;
             }
 
             may_append(seq_id, pos);
@@ -790,8 +867,10 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
         sinfos.push_back(std::move(sinfo));
     }
 
-    // hash newly completed full blocks
-    for (auto & [seq_id, start] : first_new_block) {
+    // hash newly completed full blocks. hash_blocks skips already-hashed
+    // blocks, so starting from first_modified_block is safe even if some
+    // blocks in the range were hashed in a previous batch.
+    for (auto & [seq_id, start] : first_modified_block) {
         auto it = block_tables.find(seq_id);
         if (it == block_tables.end()) continue;
         hash_blocks(seq_id, start, (uint32_t) it->second.size());
@@ -829,6 +908,7 @@ void llama_kv_paged_cache::clear(bool data) {
     }
     block_tables.clear();
     swapped_seqs.clear();
+    swap_backends_used.clear();
 
     // reset cell metadata + clear data buffers
     llama_kv_cache::clear(data);
@@ -1145,7 +1225,11 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
             io.read(&pos,      sizeof(pos));
             io.read(&n_seq_id, sizeof(n_seq_id));
 
-            // n_pos_per_embd == 1 (asserted in constructor), no ext
+            // ext (n_pos_per_embd > 1) is written between n_seq_id and seq_ids
+            llama_kv_cell_ext ext;
+            if (hparams.n_pos_per_embd() > 1) {
+                io.read(&ext, sizeof(ext));
+            }
 
             std::vector<llama_seq_id> seq_ids(n_seq_id);
             for (uint32_t j = 0; j < n_seq_id; ++j) {
@@ -1161,6 +1245,9 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
             const uint32_t cell_idx = cell_index(primary, pos);
 
             v_cells[0].pos_set(cell_idx, pos);
+            if (hparams.n_pos_per_embd() > 1) {
+                v_cells[0].ext_set(cell_idx, ext);
+            }
             for (uint32_t j = 0; j < n_seq_id; ++j) {
                 const llama_seq_id sid = (seq_id >= 0) ? seq_id : seq_ids[j];
                 if (!v_cells[0].seq_has(cell_idx, sid)) {

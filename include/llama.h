@@ -809,6 +809,23 @@ extern "C" {
     // Swap preemption: restore a seq's K/V from CPU swap buffer back to GPU
     LLAMA_API bool llama_memory_swap_in(llama_memory_t mem, llama_seq_id seq_id);
 
+    // Paged cache prefix lookup: returns the number of tokens in the longest
+    // matching prefix that is already cached (a multiple of block_size).
+    // Returns 0 if no prefix is cached or mem is not a paged cache.
+    LLAMA_API uint32_t llama_memory_find_prefix(
+            llama_memory_t mem,
+            const llama_token * tokens,
+            uint32_t            n_tokens);
+
+    // Paged cache prefix sharing: shares the matching prefix blocks with
+    // seq_id. Returns the number of shared tokens (a multiple of block_size),
+    // 0 on miss. Only safe to call before seq_id has any blocks allocated.
+    LLAMA_API uint32_t llama_memory_share_prefix(
+            llama_memory_t      mem,
+                  llama_seq_id  seq_id,
+            const llama_token * tokens,
+                  uint32_t      n_tokens);
+
     // Paged cache metrics for monitoring
     struct llama_memory_metrics {
         uint32_t n_blocks_total;   // total blocks in pool

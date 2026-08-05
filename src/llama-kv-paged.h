@@ -2,6 +2,8 @@
 
 #include "llama-kv-cache.h"
 
+#include "ggml-cpp.h"
+
 #include <cstdint>
 #include <deque>
 #include <set>
@@ -64,12 +66,12 @@ public:
     // paged cache API (for future server-layer prefix lookup)
     //
 
-    // hash-chain prefix lookup: returns number of matching full blocks
-    // for the given token sequence, or 0 on miss.
-    uint32_t find_prefix(const llama_token * tokens, uint32_t n) const;
-
     // per-seq logical length (number of tokens currently mapped)
     uint32_t seq_length(llama_seq_id seq_id) const;
+
+    // hash-chain prefix lookup and sharing (override of llama_memory_i)
+    uint32_t find_prefix (const llama_token * tokens, uint32_t n) const override;
+    uint32_t share_prefix(llama_seq_id seq_id, const llama_token * tokens, uint32_t n) override;
 
     // swap preemption: save/restore a seq's K/V data to/from CPU memory
     bool is_swapped(llama_seq_id seq_id) const override;
@@ -126,6 +128,16 @@ private:
     };
     std::unordered_map<llama_seq_id, swap_entry_t> swapped_seqs;
 
+    // async swap backends: one per device, lazily created. using a dedicated
+    // backend gives a separate CUDA stream so swap copies don't block the
+    // compute stream. all layer copies are pipelined then synchronized once,
+    // reducing N syncs to 1.
+    std::unordered_map<ggml_backend_dev_t, ggml_backend_ptr> swap_backends;
+    std::vector<ggml_backend_t> swap_backends_used;
+
+    ggml_backend_t get_swap_backend(const ggml_tensor * tensor);
+    void swap_synchronize();
+
     // auto-detect block_size: 32 for GPU buft, 16 for CPU
     static uint32_t detect_block_size(const llama_model & model, bool offload);
 
@@ -164,13 +176,6 @@ private:
     // hash full blocks in [start_block, end_block) for seq_id using the
     // stored token_ids. Stores block.hash + hash_to_block_id.
     void hash_blocks(llama_seq_id seq_id, uint32_t start_block, uint32_t end_block);
-
-    // share hash-chain-matched prefix blocks for seq_id:
-    //   - lookup full blocks via hash_to_block_id
-    //   - ref_count++ on hit, append to block_table[seq_id]
-    //   - seq_add the new seq_id on each shared cell
-    // returns number of shared tokens (multiple of block_size), 0 on miss
-    uint32_t share_prefix(llama_seq_id seq_id, const llama_token * tokens, uint32_t n);
 
     // deallocate all blocks in block_table[seq_id], then clear it
     void dealloc_seq(llama_seq_id seq_id);

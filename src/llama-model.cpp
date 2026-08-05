@@ -2291,6 +2291,23 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 filter,
                                 reuse);
                     } else if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+                        // env: LLAMA_KV_PAGED_SWA=1 routes full-SWA models through
+                        // the paged cache instead of iswa. requires flash_attn for
+                        // correct SWA mask handling.
+                        const char * paged_swa_env = getenv("LLAMA_KV_PAGED_SWA");
+                        if (paged_swa_env && paged_swa_env[0] == '1' && !reuse && !share) {
+                            res = new llama_kv_paged_cache(
+                                    *this,
+                                    hparams,
+                                    params.type_k,
+                                    params.type_v,
+                                    !cparams.flash_attn,
+                                    cparams.offload_kqv,
+                                    cparams.n_ctx_seq,
+                                    cparams.n_seq_max,
+                                    1,
+                                    filter);
+                        } else {
                         GGML_ASSERT(hparams.is_swa_any());
 
                         if (arch == LLM_ARCH_GEMMA4_ASSISTANT) {
@@ -2340,6 +2357,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     reuse,
                                     share);
                         }
+                        } // else: iswa cache
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
