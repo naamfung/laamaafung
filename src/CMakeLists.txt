@@ -23,6 +23,7 @@ add_library(llama
             llama-impl.cpp
             llama-io.cpp
             llama-kv-cache.cpp
+            llama-kv-paged.cpp
             llama-kv-cache-iswa.cpp
             llama-kv-cache-dsa.cpp
             llama-kv-cache-dsv4.cpp
@@ -51,6 +52,7 @@ set_target_properties(llama PROPERTIES
 
 target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
+target_include_directories(llama PRIVATE ${CMAKE_SOURCE_DIR}/examples/gguf-hash/deps/xxhash)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)

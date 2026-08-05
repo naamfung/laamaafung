@@ -228,7 +228,9 @@ public:
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
 
-private:
+protected:
+    // exposed for llama_kv_paged_cache to manipulate cell seq bitsets directly
+    // when sharing blocks via the hash chain (bypassing apply_ubatch)
     const llama_model & model;
     const llama_hparams & hparams;
 
