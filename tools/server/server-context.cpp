@@ -11,6 +11,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "llama-prefix-cache.h"
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -343,8 +344,12 @@ struct server_slot {
         return res;
     }
 
-    void prompt_clear() {
+    void prompt_clear(llama_prefix_cache * prefix_cache = nullptr) {
         SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
+
+        if (prefix_cache) {
+            prefix_cache->revoke_seq(id);
+        }
 
         mem.seq_rm(id, -1, -1);
 
@@ -1132,6 +1137,9 @@ private:
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
+    // v13: vllm-style prefix cache (block-hash-chain + ref-counted cell sharing)
+    llama_prefix_cache prefix_cache;
+
     server_metrics metrics;
 
     json json_ui_settings = json::object();
@@ -1161,6 +1169,8 @@ private:
 
         mtmd_free(mctx);
         mctx = nullptr;
+
+        prefix_cache.clear();
     }
 
     void handle_sleeping_state(bool new_state) {
@@ -1350,6 +1360,12 @@ private:
             }
         }
 
+        // v13: prefix cache requires unified KV cache for cross-slot seq_cp zero-copy
+        if (params_base.n_cache_reuse > 0 && !params_base.kv_unified) {
+            params_base.kv_unified = true;
+            SRV_WRN("%s\n", "auto-enabling kv_unified to support prefix caching (n_cache_reuse > 0)");
+        }
+
         // attach a progress callback
         {
             params_base.load_progress_callback = load_progress_callback;
@@ -1442,15 +1458,8 @@ private:
             }
         }
 
-        // ctx_shift (runtime K-shift) is already disabled by common_init_from_params
-        // when llama_memory_can_shift() returns false; prompt_truncate (initial prompt
-        // truncation) is independent and remains unaffected.
-        if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
-            if (params_base.n_cache_reuse) {
-                params_base.n_cache_reuse = 0;
-                SRV_WRN("%s\n", "cache_reuse is not supported by this context, it will be disabled");
-            }
-        }
+        // v13: prefix cache uses seq_cp (zero-copy cell sharing) instead of K-shift,
+        // so the can_shift check no longer applies. Multimodal still disables it above.
 
         if (llama_model_n_swa(model_tgt) == 0) {
             if (params_base.swa_full) {
@@ -1852,7 +1861,7 @@ private:
                 ret->prompt_save(*prompt_cache);
 
                 if (!ret->prompt_load(*prompt_cache, task.tokens)) {
-                    ret->prompt_clear();
+                    ret->prompt_clear(&prefix_cache);
                 }
 
                 prompt_cache->update();
@@ -1884,7 +1893,7 @@ private:
             if (slot.prompt.n_tokens() > 0) {
                 SRV_WRN("purging slot %d with %zu tokens\n", slot.id, slot.prompt.tokens.size());
 
-                slot.prompt_clear();
+                slot.prompt_clear(&prefix_cache);
 
                 res = true;
 
@@ -3156,7 +3165,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                                 if (params_base.kv_unified) {
                                     // [TAG_IDLE_SLOT_CLEAR]
-                                    slot.prompt_clear();
+                                    slot.prompt_clear(&prefix_cache);
                                 }
                             }
                         }
@@ -3374,7 +3383,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     // Erase token cache
                     const size_t n_erased = slot->prompt.tokens.size();
 
-                    slot->prompt_clear();
+                    slot->prompt_clear(&prefix_cache);
 
                     auto res = std::make_unique<server_task_result_slot_erase>();
                     res->id       = task.id;
@@ -3655,6 +3664,9 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 }
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
+
+                // v13: invalidate prefix cache entries before shifting KV
+                prefix_cache.revoke_seq(slot.id);
 
                 slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
@@ -3937,62 +3949,56 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                                 const auto n_cache_reuse = slot.task->params.n_cache_reuse;
 
-                                const bool can_cache_reuse =
-                                    llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
-                                    !slot.prompt.tokens.has_mtmd;
+                                // v13: try prefix cache (cross-slot block-hash-chain sharing)
+                                const bool can_prefix_cache =
+                                    n_cache_reuse > 0 &&
+                                    !slot.prompt.tokens.has_mtmd &&
+                                    !input_tokens.has_mtmd;
 
-                                if (!can_cache_reuse && n_cache_reuse > 0) {
-                                    SLT_WRN(slot, "cache reuse is not supported - ignoring n_cache_reuse = %d\n", n_cache_reuse);
+                                llama_prefix_cache::prefix_hit prefix_hit;
+                                if (can_prefix_cache) {
+                                    const auto & in_tokens = input_tokens.get_tokens();
+                                    prefix_hit = prefix_cache.find_prefix(in_tokens.data(), (uint32_t) in_tokens.size());
+                                    if (!prefix_hit.empty() && prefix_hit.n_tokens() < (uint32_t) n_cache_reuse) {
+                                        SLT_DBG(slot, "prefix cache hit (%u tokens) below threshold %d, ignoring\n",
+                                                prefix_hit.n_tokens(), n_cache_reuse);
+                                        prefix_hit = {};
+                                    }
                                 }
 
-                                // reuse chunks from the cached prompt by shifting their KV cache in the new position
-                                if (can_cache_reuse && n_cache_reuse > 0) {
-                                    GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
+                                if (!prefix_hit.empty() && prefix_hit.n_tokens() > (uint32_t) n_past_common) {
+                                    // prefix cache wins
+                                    const uint32_t hit_tokens = prefix_hit.n_tokens();
 
-                                    size_t head_c = n_past; // cache
-                                    size_t head_p = n_past; // current prompt
+                                    prefix_cache.revoke_seq(slot.id);
 
-                                    if (mctx) {
-                                        // we should never reach this
-                                        GGML_ABORT("not supported by multimodal");
+                                    if (prefix_hit.src_seq != slot.id) {
+                                        SLT_TRC(slot, "prefix cache hit: %u tokens from slot %d\n",
+                                                hit_tokens, prefix_hit.src_seq);
+                                        // clear this slot's KV and share cells from the source
+                                        slot.mem.seq_rm(slot.id, -1, -1);
+                                        slot.mem.seq_cp(prefix_hit.src_seq, slot.id, 0, (llama_pos) hit_tokens);
+                                    } else {
+                                        SLT_TRC(slot, "prefix cache hit (same-slot): %u tokens\n", hit_tokens);
+                                        // truncate KV to the hit length
+                                        slot.mem.seq_rm(slot.id, (llama_pos) hit_tokens, -1);
                                     }
 
-                                    SLT_DBG(slot, "trying to reuse chunks with size > %d, n_past = %d\n", n_cache_reuse, n_past);
+                                    // re-register the surviving blocks for this slot
+                                    const auto & in_tokens = input_tokens.get_tokens();
+                                    prefix_cache.register_blocks(slot.id, in_tokens.data(), hit_tokens);
 
-                                    while (head_c < slot.prompt.tokens.size() &&
-                                           head_p < input_tokens.size()) {
+                                    // set the prompt to the cached prefix
+                                    slot.prompt.clear();
+                                    llama_tokens prefix_tokens(in_tokens.begin(), in_tokens.begin() + hit_tokens);
+                                    slot.prompt.tokens.insert(prefix_tokens);
 
-                                        size_t n_match = 0;
-                                        while (head_c + n_match < slot.prompt.tokens.size() &&
-                                               head_p + n_match < input_tokens.size()       &&
-                                               slot.prompt.tokens[head_c + n_match] == input_tokens[head_p + n_match]) {
-                                            n_match++;
-                                        }
-
-                                        if (n_match >= (size_t) n_cache_reuse) {
-                                            SLT_TRC(slot, "reusing chunk with size %zu, shifting KV cache [%zu, %zu) -> [%zu, %zu)\n", n_match, head_c, head_c + n_match, head_p, head_p + n_match);
-                                            //for (size_t i = head_p; i < head_p + n_match; i++) {
-                                            //    SLT_DBG(slot, "cache token %3zu: %6d '%s'\n", i, prompt_tokens[i], common_token_to_piece(ctx_tgt, prompt_tokens[i]).c_str());
-                                            //}
-
-                                            const int64_t kv_shift = (int64_t) head_p - (int64_t) head_c;
-
-                                            slot.mem.seq_rm (slot.id, head_p, head_c);
-                                            slot.mem.seq_add(slot.id, head_c, head_c + n_match, kv_shift);
-
-                                            for (size_t i = 0; i < n_match; i++) {
-                                                slot.prompt.tokens.set_token(head_p + i, slot.prompt.tokens[head_c + i]);
-                                                n_past++;
-                                            }
-
-                                            head_c += n_match;
-                                            head_p += n_match;
-                                        } else {
-                                            head_c += 1;
-                                        }
-                                    }
-
-                                    SLT_DBG(slot, "after context reuse, new n_past = %d\n", n_past);
+                                    n_past        = (int) hit_tokens;
+                                    n_past_common = (int) hit_tokens;
+                                } else {
+                                    // common prefix wins (same-slot fallback)
+                                    // revoke stale registrations; KV truncation is handled below (seq_rm at p0)
+                                    prefix_cache.revoke_seq(slot.id);
                                 }
                             } else {
                                 // if we don't cache the prompt, we have to remove all previous tokens
@@ -4323,6 +4329,12 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                         slot.state = SLOT_STATE_DONE_PROMPT;
 
+                        // v13: register prefix cache blocks for the completed prompt
+                        if (!slot.prompt.tokens.has_mtmd) {
+                            const auto & tokens = slot.prompt.tokens.get_tokens();
+                            prefix_cache.register_blocks(slot.id, tokens.data(), (uint32_t) tokens.size());
+                        }
+
                         // extract the logits only for the last token
                         batch.set_output(batch.size() - 1, true);
 
@@ -4432,7 +4444,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                             // note: it's complicated to keep track of how much of the current batch has been
                             //       processed before the error occurred, so we simply clear the entire context
-                            slot.prompt_clear();
+                            slot.prompt_clear(&prefix_cache);
                         }
                     }
 
