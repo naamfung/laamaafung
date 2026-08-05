@@ -109,6 +109,18 @@ struct llama_memory_i {
     // getters
     virtual bool get_can_shift() const = 0;
 
+    // returns true if n_tokens can be appended to seq_id without evicting
+    // other sequences. default: true (contiguous cache shifts/overwrites)
+    virtual bool can_append(llama_seq_id seq_id, uint32_t n_tokens) const {
+        (void) seq_id; (void) n_tokens; return true;
+    }
+
+    // proactively free capacity for n_tokens on seq_id by evicting LRU blocks
+    // from other sequences. returns number of blocks freed. default: no-op
+    virtual int ensure_capacity(llama_seq_id seq_id, uint32_t n_tokens) {
+        (void) seq_id; (void) n_tokens; return 0;
+    }
+
     //
     // ops
     //

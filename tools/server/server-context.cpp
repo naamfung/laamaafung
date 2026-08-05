@@ -287,6 +287,13 @@ struct server_slot {
     int32_t n_prompt_tokens_processed = 0;
     int32_t n_prompt_tokens_prefix    = -1;
 
+    // paged-cache preemption recovery (Phase 5): when nonzero, the next
+    // handle_last_sampled_token() call replays this many evicted tokens
+    // (the trailing tokens of prompt.tokens) before adding the sampled
+    // token, so the cache is repopulated. Set by pre_decode() when it
+    // detects that pos_max + 1 < prompt.n_tokens() in GENERATING state.
+    int32_t n_preempt_recovery = 0;
+
     size_t last_nl_pos = 0;
 
     std::string  generated_text;
@@ -389,6 +396,8 @@ struct server_slot {
         SLT_DBG(*this, "%s", "\n");
 
         n_prompt_tokens_cache = 0;
+
+        n_preempt_recovery = 0;
 
         last_nl_pos    = 0;
         generated_text = "";
@@ -571,7 +580,60 @@ struct server_slot {
         // self-check prefill) into prompt.tokens, so the trailing unified
         // push_back/insert must be skipped.
         bool self_check_managed = false;
-        if (spec_draft.empty()) {
+        if (n_preempt_recovery > 0) {
+            // paged-cache preemption recovery (Rewind + recompute): replay the
+            // evicted trailing tokens of prompt.tokens at their original
+            // positions (output=false, no logits) then add the sampled token
+            // at pos_next (output=true). The trailing push_back(sampled) below
+            // appends the sampled token to prompt.tokens; spec_draft was
+            // cleared by pre_decode() so the trailing insert() is a no-op.
+            const int n_lost = n_preempt_recovery;
+            n_preempt_recovery = 0;
+
+            if (!spec_draft.empty()) {
+                SLT_WRN(*this, "preemption recovery: discarding %zu draft tokens\n", spec_draft.size());
+                spec_draft.clear();
+            }
+            spec_i_batch.clear();
+
+            const int n_have       = prompt.n_tokens();
+            const int n_first_lost = n_have - n_lost;
+
+            // guard: if lost tokens + sampled don't fit in the remaining batch,
+            // add what we can (output=false) and defer the rest. i_batch = -1
+            // makes post_decode skip this slot this iter (no stale sampling).
+            // pre_decode re-calculates n_lost next iter from the updated cache
+            // state, so chunked recovery converges without extra bookkeeping.
+            const int avail = batch.n_tokens_alloc - batch.size();
+            if (n_lost + 1 > avail) {
+                const int n_can_add = std::min(n_lost, std::max(0, avail));
+                if (n_can_add > 0) {
+                    SLT_WRN(*this, "preemption recovery: chunked, adding %d/%d tokens (positions %d..%d), deferring rest\n",
+                            n_can_add, n_lost, n_first_lost, n_first_lost + n_can_add - 1);
+                    const auto & toks = prompt.tokens.get_tokens();
+                    for (int i = n_first_lost; i < n_first_lost + n_can_add; i++) {
+                        add_ok &= batch.add(id, toks[i], i, false);
+                    }
+                } else {
+                    SLT_WRN(*this, "preemption recovery: batch full, deferring all %d tokens to next iter\n", n_lost);
+                }
+                i_batch              = -1;  // skip post_decode this iter
+                self_check_managed   = true; // skip push_back(sampled)
+                n_preempt_recovery   = n_lost - n_can_add; // remaining (pre_decode overwrites)
+            } else {
+                SLT_WRN(*this, "preemption recovery: re-adding %d tokens (positions %d..%d) before sampled\n",
+                        n_lost, n_first_lost, n_have - 1);
+
+                const auto & toks = prompt.tokens.get_tokens();
+                for (int i = n_first_lost; i < n_have; i++) {
+                    add_ok &= batch.add(id, toks[i], i, false);
+                }
+
+                i_batch = batch.size();
+                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true);
+                // trailing push_back(sampled) adds sampled to prompt.tokens
+            }
+        } else if (spec_draft.empty()) {
             // no speculative decoding
             if (self_check_phase == SELF_CHECK_PREFILL && !self_check_prefill.empty()) {
                 // Hidden self-check turn: the triggering EOS is kept in the
@@ -1485,6 +1547,18 @@ private:
         // setup slots
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot, params_base.kv_unified ? "true" : "false");
+
+        // KV cache mode: paged (vllm-style) is default on v15, LLAMA_KV_LEGACY=1 restores contiguous
+        {
+            const char * legacy_env = getenv("LLAMA_KV_LEGACY");
+            const bool kv_paged = !(legacy_env && legacy_env[0] == '1');
+            const bool can_shift = llama_memory_can_shift(llama_get_memory(ctx_tgt));
+            SRV_INF("KV cache: %s%s (LLAMA_KV_LEGACY=%s, can_shift=%s)\n",
+                    kv_paged ? "paged (vllm-style)" : "legacy (contiguous)",
+                    kv_paged ? "" : "",
+                    legacy_env ? legacy_env : "(unset)",
+                    can_shift ? "true" : "false");
+        }
 
         // initialize slots
         for (int i = 0; i < params_base.n_parallel; i++) {
@@ -3597,6 +3671,69 @@ static bool has_visible_after(const std::string & text, size_t offset) {
     }
 
     void pre_decode() {
+        // proactive capacity check: for each generating slot, ensure the cache
+        // has room for the next token before batch build. this avoids reactive
+        // OOM in alloc_block which would evict mid-batch. victim slots are
+        // picked up by the preemption detection loop below.
+        iterate(slots, [&](server_slot & slot) {
+            if (slot.state != SLOT_STATE_GENERATING) {
+                return;
+            }
+            const int n_freed = llama_memory_ensure_capacity(
+                    llama_get_memory(ctx_tgt), slot.id, 1);
+            if (n_freed > 0) {
+                SLT_INF(slot, "proactive preempt: freed %d block(s) for next token\n", n_freed);
+            }
+        });
+
+        // detect paged-cache preemption before any other work: another slot's
+        // alloc_block may have evicted some of this slot's tail KV positions.
+        // prompt-phase slots rewind prompt.tokens so the prefill loop replays
+        // them from input_tokens; generating slots set n_preempt_recovery and
+        // the replay happens in handle_last_sampled_token() (lost tokens are
+        // not in input_tokens, only in prompt.tokens).
+        iterate(slots, [&](server_slot & slot) {
+            if (!slot.is_processing() || slot.state == SLOT_STATE_STARTED) {
+                return;
+            }
+
+            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+            const int n_cached = pos_max < 0 ? 0 : (int) pos_max + 1;
+            const int n_have   = slot.prompt.n_tokens();
+
+            if (n_cached >= n_have) {
+                return;
+            }
+
+            const int n_lost = n_have - n_cached;
+            SLT_WRN(slot, "preemption detected: state=%d, n_have=%d, n_cached=%d, n_lost=%d\n",
+                    (int) slot.state, n_have, n_cached, n_lost);
+
+            if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
+                // lost tokens are prompt tokens that exist in input_tokens;
+                // rewind prompt.tokens to n_cached and let the prefill loop
+                // re-add them. seq_rm at p0=n_cached is a no-op (cache already
+                // at n_cached).
+                slot.prompt.tokens.keep_first(n_cached);
+                slot.n_prompt_tokens_cache = n_cached;
+                slot.state = SLOT_STATE_PROCESSING_PROMPT;
+            } else if (slot.state == SLOT_STATE_GENERATING) {
+                // lost tokens are generated tokens (not in input_tokens);
+                // replay them in handle_last_sampled_token() before sampled
+                if (slot.prompt.tokens.has_mtmd) {
+                    // multimodal slots cannot rewind across image chunks safely
+                    send_error(slot, "preemption recovery not supported for multimodal slots", ERROR_TYPE_SERVER);
+                    slot.release();
+                    return;
+                }
+                slot.n_preempt_recovery = n_lost;
+                // discard any speculative draft; we recompute deterministically
+                slot.spec_draft.clear();
+                slot.spec_i_batch.clear();
+            }
+            // WAIT_OTHER: nothing to do; parent slot will trigger recovery
+        });
+
         // apply context-shift if needed
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {

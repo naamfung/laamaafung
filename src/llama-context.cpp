@@ -4207,6 +4207,22 @@ bool llama_memory_can_shift(llama_memory_t mem) {
     return mem->get_can_shift();
 }
 
+bool llama_memory_can_append(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_tokens) {
+    if (!mem) {
+        return true;
+    }
+
+    return mem->can_append(seq_id, n_tokens);
+}
+
+int llama_memory_ensure_capacity(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_tokens) {
+    if (!mem) {
+        return 0;
+    }
+
+    return mem->ensure_capacity(seq_id, n_tokens);
+}
+
 // llama state API
 
 // deprecated

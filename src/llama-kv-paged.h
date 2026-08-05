@@ -16,7 +16,7 @@
 // server-layer prefix cache.
 class llama_kv_paged_cache : public llama_kv_cache {
 public:
-    // block_size: 32 for GPU buft, 16 for CPU. Set in constructor based on buft.
+    // block_size: 32 for GPU buft, 16 for CPU. Auto-detected in constructor.
     const uint32_t block_size;
     const uint32_t n_blocks;
 
@@ -45,6 +45,9 @@ public:
 
     bool get_can_shift() const override;
 
+    bool can_append(llama_seq_id seq_id, uint32_t n_tokens) const override;
+    int  ensure_capacity(llama_seq_id seq_id, uint32_t n_tokens) override;
+
     void clear(bool data) override;
 
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
@@ -72,27 +75,53 @@ private:
     struct block_t {
         int32_t  ref_count = 0;
         uint64_t hash      = 0;   // 0 = not yet hashed
+        uint64_t last_used = 0;   // LRU timestamp, higher = more recent
         std::vector<llama_token> token_ids;   // partial until size == block_size
     };
 
     // block pool + allocation index
     std::vector<block_t>        blocks;
-    std::deque<uint32_t>        free_block_ids;
-    std::set<uint32_t>          used_block_ids;
+    std::deque<uint32_t>        free_block_ids;     // ref_count==0, hash==0 (truly free)
+    std::set<uint32_t>          used_block_ids;     // ref_count>0 (in use)
+    std::set<uint32_t>          cached_block_ids;   // ref_count==0, hash!=0 (evictable)
     std::unordered_map<uint64_t, uint32_t> hash_to_block_id;
+
+    // monotonic counter for LRU ordering
+    uint64_t lru_counter = 0;
 
     // per-seq physical block table (block_table[seq][i] -> physical block id)
     std::unordered_map<llama_seq_id, std::vector<uint32_t>> block_tables;
+
+    // auto-detect block_size: 32 for GPU buft, 16 for CPU
+    static uint32_t detect_block_size(const llama_model & model, bool offload);
 
     // XXH64 chain: hash of block i = XXH64(tokens[i], seed=hash[i-1])
     // hash[-1] = 0 (chain head). Order-dependent.
     static uint64_t compute_hash(uint64_t prev_hash, const llama_token * tokens, uint32_t n);
 
-    // allocate a fresh block from the free pool, returns physical block id
-    uint32_t alloc_block();
+    // update last_used on a block (call on alloc/share/append)
+    void touch(uint32_t block_id);
 
-    // release a block: ref_count-- and return to free pool on 0
+    // allocate a fresh block. when the free pool and cached set are both
+    // empty, preempt (swap out) the tail block of the LRU active seq that is
+    // not exclude_seq until a block becomes available. asserts if no seq can
+    // be preempted (e.g. exclude_seq is the only active seq).
+    uint32_t alloc_block(llama_seq_id exclude_seq = -1);
+
+    // preempt one block from the LRU active seq != exclude_seq: release the
+    // tail block of that seq, clear the victim's cell metadata for the
+    // released cells, and truncate its block_table. returns false if no seq
+    // can be preempted. note: a shared block (ref_count > 1 after release)
+    // stays in use and does not immediately yield a free block - the caller
+    // (alloc_block) loops until something frees up.
+    bool preempt_one(llama_seq_id exclude_seq);
+
+    // release a block: ref_count-- and on 0 move to cached set (keep hash for reuse)
     void release_block(uint32_t block_id);
+
+    // copy K/V (and k_idx) data for n_tokens cells from src to dst block.
+    // used for COW when forking a partial block in seq_cp.
+    void copy_block_data(uint32_t src_block_id, uint32_t dst_block_id, uint32_t n_tokens);
 
     // ensure block_table[seq_id] has enough blocks for position `pos`.
     // allocates a new block when pos % block_size == 0.
@@ -111,6 +140,12 @@ private:
 
     // deallocate all blocks in block_table[seq_id], then clear it
     void dealloc_seq(llama_seq_id seq_id);
+
+    // filter a ubatch, dropping tokens whose (seq_id, pos) is covered by
+    // hit_lens (i.e. pos < hit_lens[seq_id]). returns a new ubatch with own
+    // storage. if no tokens are dropped, returns a shallow copy of the input.
+    llama_ubatch filter_ubatch(const llama_ubatch & ub,
+            const std::unordered_map<llama_seq_id, uint32_t> & hit_lens) const;
 
     // physical cell index for (seq_id, pos)
     uint32_t cell_index(llama_seq_id seq_id, llama_pos pos) const;

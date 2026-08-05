@@ -796,6 +796,13 @@ extern "C" {
     // Check if the memory supports shifting
     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
 
+    // Check if n_tokens can be appended to seq_id without evicting other sequences
+    LLAMA_API bool llama_memory_can_append(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_tokens);
+
+    // Proactively free capacity for n_tokens on seq_id by evicting LRU blocks from other sequences.
+    // Returns the number of blocks freed.
+    LLAMA_API int llama_memory_ensure_capacity(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_tokens);
+
     //
     // State / sessions
     //

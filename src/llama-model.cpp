@@ -2343,21 +2343,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
-                        // env: LLAMA_KV_PAGED=1 enables vllm-style paged cache
-                        const char * paged_env = getenv("LLAMA_KV_PAGED");
-                        if (paged_env && paged_env[0] == '1') {
-                            res = new llama_kv_paged_cache(
-                                    *this,
-                                    hparams,
-                                    params.type_k,
-                                    params.type_v,
-                                    !cparams.flash_attn,
-                                    cparams.offload_kqv,
-                                    cparams.n_ctx_seq,
-                                    cparams.n_seq_max,
-                                    1,
-                                    filter);
-                        } else {
+                        // v15: vllm-style paged cache is the default.
+                        // env: LLAMA_KV_LEGACY=1 restores the original contiguous cache.
+                        const char * legacy_env = getenv("LLAMA_KV_LEGACY");
+                        if (legacy_env && legacy_env[0] == '1') {
                             res = new llama_kv_cache(
                                     *this,
                                     hparams,
@@ -2375,6 +2364,18 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     filter,
                                     nullptr,
                                     nullptr);
+                        } else {
+                            res = new llama_kv_paged_cache(
+                                    *this,
+                                    hparams,
+                                    params.type_k,
+                                    params.type_v,
+                                    !cparams.flash_attn,
+                                    cparams.offload_kqv,
+                                    cparams.n_ctx_seq,
+                                    cparams.n_seq_max,
+                                    1,
+                                    filter);
                         }
                     }
                 }
