@@ -1418,6 +1418,26 @@ private:
             SRV_WRN("%s\n", "auto-enabling kv_unified to support prefix caching (n_cache_reuse > 0)");
         }
 
+        // CUDA graph safety guard: paged cache uses dynamic cell_index mapping
+        // which may be incompatible with CUDA graph replay. Auto-disable graphs
+        // unless user explicitly opts out via LLAMA_KV_PAGED_DISABLE_GRAPHS=0
+        {
+            const char * legacy_env = getenv("LLAMA_KV_LEGACY");
+            const bool kv_paged = !(legacy_env && legacy_env[0] == '1');
+            if (kv_paged) {
+                const char * opt_out = getenv("LLAMA_KV_PAGED_DISABLE_GRAPHS");
+                const bool auto_disable = !(opt_out && opt_out[0] == '0');
+                if (auto_disable && getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr) {
+#ifdef _WIN32
+                    _putenv_s("GGML_CUDA_DISABLE_GRAPHS", "1");
+#else
+                    setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 1);
+#endif
+                    SRV_WRN("%s\n", "paged KV cache: auto-disabling CUDA graphs (set LLAMA_KV_PAGED_DISABLE_GRAPHS=0 to keep enabled)");
+                }
+            }
+        }
+
         // attach a progress callback
         {
             params_base.load_progress_callback = load_progress_callback;
@@ -1553,11 +1573,12 @@ private:
             const char * legacy_env = getenv("LLAMA_KV_LEGACY");
             const bool kv_paged = !(legacy_env && legacy_env[0] == '1');
             const bool can_shift = llama_memory_can_shift(llama_get_memory(ctx_tgt));
-            SRV_INF("KV cache: %s%s (LLAMA_KV_LEGACY=%s, can_shift=%s)\n",
+            const char * graphs_env = getenv("GGML_CUDA_DISABLE_GRAPHS");
+            SRV_INF("KV cache: %s (LLAMA_KV_LEGACY=%s, can_shift=%s, cuda_graphs=%s)\n",
                     kv_paged ? "paged (vllm-style)" : "legacy (contiguous)",
-                    kv_paged ? "" : "",
                     legacy_env ? legacy_env : "(unset)",
-                    can_shift ? "true" : "false");
+                    can_shift ? "true" : "false",
+                    graphs_env ? "disabled" : "auto");
         }
 
         // initialize slots
@@ -3605,6 +3626,16 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         } catch (const std::exception & e) {
             SRV_ERR("pre_decode() failed: %s\n", e.what());
             abort_all_slots("pre_decode() failed: " + std::string(e.what()));
+            // free orphaned cache blocks left by aborted non-child slots.
+            // release() only clears child slots; non-child blocks stay
+            // allocated and would waste preemption/swap on the next request.
+            for (auto & slot : slots) {
+                if (slot.state == SLOT_STATE_IDLE) {
+                    common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
+                }
+            }
+            // reset partially built batch so the assert below does not fire
+            batch.clear();
         }
 
         GGML_ASSERT(batch.slot_batched || batch.size() == 0);
@@ -3671,6 +3702,20 @@ static bool has_visible_after(const std::string & text, size_t offset) {
     }
 
     void pre_decode() {
+        // restore any swapped-out slots before batch build. swap_in allocates
+        // new blocks and copies K/V from CPU, avoiding full recompute.
+        iterate(slots, [&](server_slot & slot) {
+            if (!slot.is_processing()) {
+                return;
+            }
+            if (llama_memory_is_swapped(llama_get_memory(ctx_tgt), slot.id)) {
+                SLT_INF(slot, "swap_in: restoring K/V from CPU swap buffer\n", "");
+                if (!llama_memory_swap_in(llama_get_memory(ctx_tgt), slot.id)) {
+                    SRV_ERR("swap_in failed for slot %d\n", slot.id);
+                }
+            }
+        });
+
         // proactive capacity check: for each generating slot, ensure the cache
         // has room for the next token before batch build. this avoids reactive
         // OOM in alloc_block which would evict mid-batch. victim slots are
