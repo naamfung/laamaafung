@@ -819,6 +819,7 @@ extern "C" {
         uint64_t preempt_count;    // total preemption operations
         uint64_t swap_out_count;   // total swap_out operations
         uint64_t swap_in_count;    // total swap_in operations
+        uint32_t block_size;       // tokens per block (0 for legacy cache)
     };
 
     // Returns metrics for paged cache. For legacy cache, all fields are 0.

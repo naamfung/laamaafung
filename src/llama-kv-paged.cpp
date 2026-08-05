@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -18,6 +19,14 @@
 //
 
 uint32_t llama_kv_paged_cache::detect_block_size(const llama_model & model, bool offload) {
+    // user override via env var (must be > 0)
+    if (const char * env = std::getenv("LLAMA_KV_BLOCK_SIZE")) {
+        const int v = std::atoi(env);
+        if (v > 0) {
+            return (uint32_t) v;
+        }
+    }
+
     if (offload) {
         auto * dev = model.dev_layer(0);
         if (dev && ggml_backend_dev_buffer_type(dev) != ggml_backend_cpu_buffer_type()) {
@@ -359,6 +368,7 @@ llama_kv_paged_cache::metrics llama_kv_paged_cache::get_metrics() const {
     m.preempt_count    = preempt_count;
     m.swap_out_count   = swap_out_count;
     m.swap_in_count    = swap_in_count;
+    m.block_size       = block_size;
     return m;
 }
 

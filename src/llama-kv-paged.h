@@ -87,6 +87,7 @@ public:
         uint64_t preempt_count    = 0;
         uint64_t swap_out_count   = 0;
         uint64_t swap_in_count    = 0;
+        uint32_t block_size       = 0;
     };
     metrics get_metrics() const;
 

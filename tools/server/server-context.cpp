@@ -1574,11 +1574,16 @@ private:
             const bool kv_paged = !(legacy_env && legacy_env[0] == '1');
             const bool can_shift = llama_memory_can_shift(llama_get_memory(ctx_tgt));
             const char * graphs_env = getenv("GGML_CUDA_DISABLE_GRAPHS");
-            SRV_INF("KV cache: %s (LLAMA_KV_LEGACY=%s, can_shift=%s, cuda_graphs=%s)\n",
+            const char * block_size_env = getenv("LLAMA_KV_BLOCK_SIZE");
+            const uint32_t block_size = llama_memory_get_metrics(llama_get_memory(ctx_tgt)).block_size;
+            SRV_INF("KV cache: %s (LLAMA_KV_LEGACY=%s, can_shift=%s, cuda_graphs=%s, block_size=%u%s%s)\n",
                     kv_paged ? "paged (vllm-style)" : "legacy (contiguous)",
                     legacy_env ? legacy_env : "(unset)",
                     can_shift ? "true" : "false",
-                    graphs_env ? "disabled" : "auto");
+                    graphs_env ? "disabled" : "auto",
+                    block_size,
+                    block_size_env ? ", env=" : "",
+                    block_size_env ? block_size_env : "");
         }
 
         // initialize slots
@@ -3357,6 +3362,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         res->kv_preempt_count  = m.preempt_count;
                         res->kv_swap_out_count = m.swap_out_count;
                         res->kv_swap_in_count  = m.swap_in_count;
+                        res->kv_block_size     = m.block_size;
                     }
 
                     if (task.metrics_reset_bucket) {
@@ -5407,6 +5413,10 @@ void server_routes::init_routes() {
                     {"name",  "kv_swapped_tokens"},
                     {"help",  "Tokens swapped to CPU memory"},
                     {"value",  (uint64_t) res_task->kv_swapped_tokens}
+            },{
+                    {"name",  "kv_block_size"},
+                    {"help",  "Tokens per block in paged KV cache (0 for legacy cache)"},
+                    {"value",  (uint64_t) res_task->kv_block_size}
             }}},
             {"counter", {{
                     {"name",  "kv_preempt_count"},

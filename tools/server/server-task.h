@@ -552,6 +552,7 @@ struct server_task_result_metrics : server_task_result {
     uint64_t kv_preempt_count  = 0;
     uint64_t kv_swap_out_count = 0;
     uint64_t kv_swap_in_count  = 0;
+    uint32_t kv_block_size     = 0;
 
     // while we can also use std::vector<server_slot> this requires copying the slot object which can be quite messy
     // therefore, we use json to temporarily store the slot.to_json() result

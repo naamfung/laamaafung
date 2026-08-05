@@ -4258,6 +4258,7 @@ llama_memory_metrics llama_memory_get_metrics(llama_memory_t mem) {
         m.preempt_count    = pm.preempt_count;
         m.swap_out_count   = pm.swap_out_count;
         m.swap_in_count    = pm.swap_in_count;
+        m.block_size       = pm.block_size;
     }
 
     return m;
