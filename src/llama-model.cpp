@@ -12,6 +12,7 @@
 #include "llama-kv-cache-iswa.h"
 #include "llama-kv-cache-dsa.h"
 #include "llama-kv-cache-dsv4.h"
+#include "llama-kv-paged.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
@@ -2342,14 +2343,13 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
-                        res = new llama_kv_cache(
+                        res = new llama_kv_paged_cache(
                                 *this,
                                 hparams,
                                 params.type_k,
                                 params.type_v,
                                 !cparams.flash_attn,
                                 cparams.offload_kqv,
-                                cparams.kv_unified,
                                 cparams.n_ctx_seq,
                                 cparams.n_seq_max,
                                 1,

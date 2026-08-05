@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash=cd \"D:\\Programs\\llama-cpp-repos\\laamaafung\" && git checkout -b v13"]
