@@ -121,6 +121,11 @@ struct llama_memory_i {
         (void) seq_id; (void) n_tokens; return 0;
     }
 
+    // swap preemption: save/restore a seq's K/V to/from CPU memory
+    virtual bool is_swapped(llama_seq_id seq_id) const { (void) seq_id; return false; }
+    virtual bool swap_out  (llama_seq_id seq_id) { (void) seq_id; return false; }
+    virtual bool swap_in   (llama_seq_id seq_id) { (void) seq_id; return false; }
+
     //
     // ops
     //
