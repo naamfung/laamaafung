@@ -438,11 +438,11 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="Agentic-Turbo-Coder"
 Glash 是基于我对 crush 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/glash
 
 
-### Nix
+### Inx
 
-从响应速度而言，我推荐使用 Nix ，其基于我对 Reasonix 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/Nix
+从响应速度而言，我推荐使用 Inx ，其基于我对 Reasonix 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/inx
 
-克隆之后用「make build」编译，将得到的二进制程序放到你系统环境变量可搜索到的路径，启动终端运行「nix setup」选 ANTHROPIC 兼容协议配置好 laamaafung server 运行的端口。再次启动「nix」即可畅享本地模型支持下的编程乐趣。
+克隆之后用「make build」编译，将得到的二进制程序放到你系统环境变量可搜索到的路径，启动终端运行「inx setup」选 ANTHROPIC 兼容协议配置好 laamaafung server 运行的端口。再次启动「inx」即可畅享本地模型支持下的编程乐趣。
 
 ---
 

@@ -310,15 +310,9 @@ llama_context::llama_context(
             size_t per_token_decode  = kv_per_ubatch_token * 6;
             size_t per_token_prefill = kv_per_ubatch_token * 3 + moe_per_token;
 
-            // Free memory after reserving the full KV cache, with safety margin
-            // Use a more conservative margin (0.75) for full GPU offload to avoid OOM and fallback to mixed inference
-            // Use 0.80 margin for mixed inference (partial offload) to maximize performance on limited VRAM devices
+            // Free memory after reserving the full KV cache, with 20% safety margin
             size_t avail_mem = free_mem_total > kv_cache_total ? (free_mem_total - kv_cache_total) : 0;
-            
-            const bool full_offload = model.n_gpu_layers() > model.hparams.n_layer_all;
-            float safety_margin = full_offload ? 0.75f : 0.80f;
-            
-            size_t safe_mem  = (size_t)(avail_mem * safety_margin);
+            size_t safe_mem  = (size_t)(avail_mem * 0.8);
 
             // Context-based conservative cap (refined tiers including 128K+ and 256K+)
             int32_t max_ubatch_by_ctx;
