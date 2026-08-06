@@ -149,7 +149,20 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
                 //   so that the rollback snapshots remain valid
                 const uint32_t n_rs_seq = mem_recr->n_rs_seq;
 
-                ubatch = balloc.split_equal(n_ubatch, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
+                // align the split size so prefills stop on chunk boundaries
+                // where possible: recurrent snapshots are only taken at chunk
+                // boundaries, so a prefill ending off-boundary cannot be shared
+                // by later requests
+                uint32_t n_split = n_ubatch;
+                const uint32_t block_size = mem_recr->get_block_size();
+                if (block_size > 0) {
+                    const uint32_t remaining = balloc.get_n_tokens() - balloc.get_n_used();
+                    if (remaining > block_size && remaining % block_size != 0 && remaining <= n_ubatch) {
+                        n_split = (remaining / block_size) * block_size;
+                    }
+                }
+
+                ubatch = balloc.split_equal(n_split, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
             }
 
             if (ubatch.n_tokens == 0) {
@@ -296,33 +309,30 @@ void llama_memory_hybrid::setup_prefix_sharing(llama_batch_allocr & balloc) {
         }
 
         // the restore point must be a chunk boundary that actually has a
-        // snapshot; the snapshot chain may have gaps (evicted slots), so walk
-        // down from share_len and take the deepest boundary with a snapshot
+        // snapshot and does not include output tokens (outputs must be
+        // computed, not skipped); the snapshot chain may have gaps (evicted
+        // slots), so walk down from share_len
         uint64_t prev = 0;
         uint32_t restore_len = 0;
         int32_t slot = -1;
+        bool has_output = false;
         for (uint32_t i = 0; i < share_len / block_size; ++i) {
+            // mark output tokens in this chunk
+            for (uint32_t k = i*block_size; k < (i + 1)*block_size; ++k) {
+                if (batch.logits[idxs[k]]) {
+                    has_output = true;
+                    break;
+                }
+            }
             prev = llama_memory_recurrent::compute_hash(prev, tokens.data() + i*block_size, block_size);
             const int32_t s = mem_recr->find_snap(prev);
-            if (s >= 0) {
+            if (s >= 0 && !has_output) {
                 slot = s;
                 restore_len = (i + 1)*block_size;
             }
         }
         if (slot < 0) {
             continue; // no usable snapshot below the attention hit
-        }
-
-        // never skip output tokens (the shared prefix is restore_len <= share_len)
-        bool has_output = false;
-        for (uint32_t k = 0; k < restore_len; ++k) {
-            if (batch.logits[idxs[k]]) {
-                has_output = true;
-                break;
-            }
-        }
-        if (has_output) {
-            continue;
         }
 
         // share the attention blocks up to the restore point so that the

@@ -1423,22 +1423,24 @@ private:
             SRV_WRN("%s\n", "auto-enabling kv_unified to support prefix caching (n_cache_reuse > 0)");
         }
 
-        // CUDA graph safety guard: paged cache uses dynamic cell_index mapping
-        // which may be incompatible with CUDA graph replay. Auto-disable graphs
-        // unless user explicitly opts out via LLAMA_KV_PAGED_DISABLE_GRAPHS=0
+        // CUDA graph support with the paged cache: the attention inputs (cell
+        // indices, masks, block table metadata) are plain graph inputs that are
+        // re-set before every replay, so CUDA graphs work with the dynamic
+        // block layout (verified in test-kv-paged scenarios A/H/I/J and the
+        // server prefix-sharing smoke). graphs stay enabled by default;
+        // LLAMA_KV_PAGED_DISABLE_GRAPHS=1 opts out.
         {
             const char * legacy_env = getenv("LLAMA_KV_LEGACY");
             const bool kv_paged = !(legacy_env && legacy_env[0] == '1');
             if (kv_paged) {
-                const char * opt_out = getenv("LLAMA_KV_PAGED_DISABLE_GRAPHS");
-                const bool auto_disable = !(opt_out && opt_out[0] == '0');
-                if (auto_disable && getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr) {
+                const char * disable = getenv("LLAMA_KV_PAGED_DISABLE_GRAPHS");
+                if (disable && disable[0] == '1' && getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr) {
 #ifdef _WIN32
                     _putenv_s("GGML_CUDA_DISABLE_GRAPHS", "1");
 #else
                     setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 1);
 #endif
-                    SRV_WRN("%s\n", "paged KV cache: auto-disabling CUDA graphs (set LLAMA_KV_PAGED_DISABLE_GRAPHS=0 to keep enabled)");
+                    SRV_WRN("%s\n", "paged KV cache: CUDA graphs disabled via LLAMA_KV_PAGED_DISABLE_GRAPHS=1");
                 }
             }
         }

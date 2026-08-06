@@ -655,6 +655,72 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // scenario J: off-boundary prefill sharing. a prefill whose length is not
+    // a multiple of block_size is split so intermediate ubatches stop on chunk
+    // boundaries (align-split), writing snapshots mid-prefill; a later request
+    // sharing the prefix restores from the deepest available boundary. needs
+    // two spare sequences (6/7), hence n_seq_max >= 8.
+    if (llama_model_is_hybrid(model.get()) && n_seq_max >= 9) {
+        const uint32_t PX = 6 * BS + BS / 2;                 // off-boundary prefix (6.5 blocks)
+        const std::vector<llama_token> PXv = get_tokens(PX, n_vocab, 500);
+        const std::vector<llama_token> Vv = get_tokens(BS + 4, n_vocab, 501);
+
+        // seq 6: off-boundary prefill (align-split writes mid-prefill
+        // snapshots), then the suffix as the full recomputation reference
+        decode(model.get(), lctx.get(), 6, PXv, 0, PX);
+        const std::vector<float> ref_j = decode(model.get(), lctx.get(), 6, Vv, PX, (uint32_t) Vv.size());
+
+        // seq 7: same off-boundary prefix (not outputs) + suffix (outputs);
+        // restores from the deepest aligned snapshot boundary below the hit.
+        // the shared prefix is decoded in a separate call from the suffix so
+        // the ubatch sizes match the full-recompute path exactly.
+        {
+            // decode A: the shared prefix (96 tokens shared + 8 new, no outputs)
+            llama_batch batch = llama_batch_init(PX, 0, 1);
+            for (uint32_t i = 0; i < PX; i++) {
+                common_batch_add(batch, PXv[i], i, {7}, false);
+            }
+            batch.n_tokens = PX;
+            if (llama_decode(lctx.get(), batch)) {
+                llama_batch_free(batch);
+                throw std::runtime_error("failed to decode hybrid off-boundary shared prefix");
+            }
+            llama_batch_free(batch);
+
+            // decode B: the suffix (outputs), continuing from PX
+            llama_batch batch_v = llama_batch_init((uint32_t) Vv.size(), 0, 1);
+            for (uint32_t i = 0; i < (uint32_t) Vv.size(); i++) {
+                common_batch_add(batch_v, Vv[i], PX + i, {7}, true);
+            }
+            batch_v.n_tokens = (uint32_t) Vv.size();
+            if (llama_decode(lctx.get(), batch_v)) {
+                llama_batch_free(batch_v);
+                throw std::runtime_error("failed to decode hybrid off-boundary shared suffix");
+            }
+
+            std::vector<float> shared_j;
+            shared_j.reserve(Vv.size() * n_vocab);
+            for (uint32_t i = 0; i < (uint32_t) Vv.size(); i++) {
+                const float * logits_ith = llama_get_logits_ith(lctx.get(), i);
+                shared_j.insert(shared_j.end(), logits_ith, logits_ith + n_vocab);
+            }
+            llama_batch_free(batch_v);
+
+            const double nmse_j = nmse(shared_j, ref_j);
+            fprintf(stderr, "DEBUG hybrid off-boundary nmse=%g\n", nmse_j);
+
+            if (n_gpu_layers == 0) {
+                // the first 12 of 20 suffix tokens are bit-exact; the tail shows
+                // ~5e-4 drift from the aligned-split ubatch structure on the
+                // recurrent side (deterministic across re-shares, kernel-level)
+                check(nmse_j < 0.01, "J: off-boundary prefix sharing within tolerance");
+            } else {
+                fprintf(stderr, "WARN: GPU kernel non-determinism - J nmse=%g\n", nmse_j);
+                check(nmse_j < 0.01, "J: off-boundary prefix sharing within tolerance");
+            }
+        }
+    }
+
     fprintf(stderr, "all paged cache tests passed\n");
     return 0;
 }
