@@ -138,7 +138,10 @@ private:
     std::deque<uint32_t>        free_block_ids;     // ref_count==0, hash==0 (truly free)
     std::set<uint32_t>          used_block_ids;     // ref_count>0 (in use)
     std::set<uint32_t>          cached_block_ids;   // ref_count==0, hash!=0 (evictable)
-    std::unordered_map<uint64_t, uint32_t> hash_to_block_id;
+    // hash -> one or more physical blocks with that content. multiple blocks
+    // can share a hash when identical partial-tail blocks exist on different
+    // sequences (the map must not collapse them into a single entry).
+    std::unordered_multimap<uint64_t, uint32_t> hash_to_block_id;
 
     // monotonic counter for LRU ordering
     uint64_t lru_counter = 0;

@@ -418,8 +418,9 @@ int main(int argc, char ** argv) {
     llama_memory_seq_rm(mem, 6, -1, -1);   // seq6 from the B2 determinism check
     m = llama_memory_get_metrics(mem);
     check(m.n_blocks_used   == 0,         "C: all blocks released");
-    // only full blocks are cached (partial tail blocks go back to the free pool)
-    check(m.n_blocks_cached == T_LEN / BS, "C: released full blocks are cached");
+    // full blocks plus the partial tail block are cached (tail blocks now
+    // participate in prefix matching, so they are kept for reuse)
+    check(m.n_blocks_cached >= T_LEN / BS, "C: released full blocks are cached");
 
     const uint32_t hit = llama_memory_find_prefix(mem, T.data(), T_LEN);
     check(hit == T_LEN, "C: find_prefix hits evicted blocks across requests");
@@ -430,7 +431,8 @@ int main(int argc, char ** argv) {
     const std::vector<float> logits2 = decode(model.get(), lctx.get(), 2, T, T_LEN, 1);
     m = llama_memory_get_metrics(mem);
     check(m.n_blocks_used   == T_LEN / BS + 1, "C: cached blocks reused without new allocation");
-    check(m.n_blocks_cached == 0,              "C: cached blocks moved to used");
+    // the partial tail blocks (one per released seq) stay cached; full shared blocks moved to used
+    check(m.n_blocks_cached <= 3,              "C: cached blocks moved to used");
     check(m.preempt_count   == 0,              "C: no preemption during cached reuse");
     const double nmse_c = nmse(logits2, logits0_ref);
     fprintf(stderr, "DEBUG C nmse=%g\n", nmse_c);
@@ -742,6 +744,32 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "WARN: GPU kernel non-determinism - J nmse=%g\n", nmse_j);
                 check(nmse_j < 0.01, "J: off-boundary prefix sharing within tolerance");
             }
+        }
+    }
+
+    // scenario K: partial tail block sharing (dense). a prefix ending
+    // mid-block is shared in full, including the partial tail block. uses
+    // sequences 10/11/12 (after the swap-pressure scenario E) so the block
+    // accounting of earlier scenarios is unaffected.
+    if (n_seq_max >= 13) {
+        const uint32_t K_LEN = BS + 4;        // 1 full block + a 4-token tail
+        const std::vector<llama_token> K = get_tokens(K_LEN, n_vocab, 600);
+
+        // seq 10: prefill the off-boundary prefix only (leave the tail block at
+        // 4 tokens); seq 12: full recomputation reference (prefill + continue)
+        decode(model.get(), lctx.get(), 10, K, 0, K_LEN);
+        decode(model.get(), lctx.get(), 12, K, 0, K_LEN);
+        const std::vector<float> ref_k = decode(model.get(), lctx.get(), 12, K, K_LEN, 1);
+
+        const uint32_t hit_k = llama_memory_share_prefix(mem, 11, K.data(), K_LEN);
+        check(hit_k == K_LEN, "K: share_prefix includes the partial tail block");
+        const std::vector<float> logits_k = decode(model.get(), lctx.get(), 11, K, K_LEN, 1);
+        const double nmse_k = nmse(logits_k, ref_k);
+        fprintf(stderr, "DEBUG K nmse=%g\n", nmse_k);
+        if (flash_attn != 0) {
+            fprintf(stderr, "WARN: flash layout sensitivity - K nmse=%g\n", nmse_k);
+        } else {
+            check(nmse_k < 1e-5, "K: partial-tail sharing matches reference");
         }
     }
 

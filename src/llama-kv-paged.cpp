@@ -10,6 +10,19 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+
+// erase the (hash, block_id) entry from the hash -> blocks multimap
+static void hash_to_block_id_erase(std::unordered_multimap<uint64_t, uint32_t> & m, uint64_t h, uint32_t block_id) {
+    auto range = m.equal_range(h);
+    for (auto it = range.first; it != range.second; ) {
+        if (it->second == block_id) {
+            it = m.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 #include <limits>
 #include <stdexcept>
 
@@ -118,10 +131,7 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq) {
             GGML_ASSERT(found);
             auto & blk = blocks[evict_id];
             if (blk.hash != 0) {
-                auto it = hash_to_block_id.find(blk.hash);
-                if (it != hash_to_block_id.end() && it->second == evict_id) {
-                    hash_to_block_id.erase(it);
-                }
+                hash_to_block_id_erase(hash_to_block_id, blk.hash, evict_id);
             }
             blk.hash = 0;
             blk.token_ids.clear();
@@ -143,10 +153,7 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq) {
     auto & blk = blocks[block_id];
     GGML_ASSERT(blk.ref_count == 0);
     if (blk.hash != 0) {
-        auto it = hash_to_block_id.find(blk.hash);
-        if (it != hash_to_block_id.end() && it->second == block_id) {
-            hash_to_block_id.erase(it);
-        }
+        hash_to_block_id_erase(hash_to_block_id, blk.hash, block_id);
     }
     blk.ref_count = 1;
     blk.hash      = 0;
@@ -324,20 +331,27 @@ void llama_kv_paged_cache::hash_blocks(llama_seq_id seq_id, uint32_t start_block
         // find_prefix's chain walk.
         for (uint32_t i = 0; i < start_block; ++i) {
             const auto & pb = blocks[bt[i]];
-            if (pb.token_ids.size() < block_size) {
+            if (pb.token_ids.empty()) {
                 return;   // chain can't be rebuilt, leave blocks unhashed
             }
-            prev_hash = pb.hash != 0 ? pb.hash : compute_hash(prev_hash, pb.token_ids.data(), block_size);
+            const uint32_t n = pb.token_ids.size();
+            prev_hash = pb.hash != 0 && n == block_size ? pb.hash : compute_hash(prev_hash, pb.token_ids.data(), n);
         }
     }
 
     for (uint32_t i = start_block; i < end_block && i < bt.size(); ++i) {
         auto & blk = blocks[bt[i]];
-        if (blk.token_ids.size() < block_size) break;   // incomplete block, can't hash
-        if (blk.hash != 0) { prev_hash = blk.hash; continue; }   // already hashed
-
-        blk.hash = compute_hash(prev_hash, blk.token_ids.data(), block_size);
-        hash_to_block_id[blk.hash] = bt[i];
+        if (blk.token_ids.empty()) break;   // no tokens yet, can't hash
+        const uint32_t n_tokens = blk.token_ids.size();
+        // full blocks keep their hash (never appended to); partial blocks are
+        // re-hashed on every pass because they may have been appended to
+        if (blk.hash != 0 && n_tokens == block_size) { prev_hash = blk.hash; continue; }
+        if (blk.hash != 0) {
+            // drop the stale hash of a partial block that was appended to
+            hash_to_block_id_erase(hash_to_block_id, blk.hash, bt[i]);
+        }
+        blk.hash = compute_hash(prev_hash, blk.token_ids.data(), n_tokens);
+        hash_to_block_id.emplace(blk.hash, bt[i]);
         prev_hash = blk.hash;
     }
 }
@@ -726,46 +740,65 @@ uint64_t llama_kv_paged_cache::get_block_hash(llama_seq_id seq_id, uint32_t bloc
 
 uint32_t llama_kv_paged_cache::find_prefix(const llama_token * tokens, uint32_t n) const {
     if (n < block_size) return 0;
-    const uint32_t n_blocks_check = n / block_size;
+    const uint32_t tail = n % block_size;   // tokens in the (possibly partial) last block
+    const uint32_t n_blocks_check = n / block_size + (tail ? 1 : 0);
     uint64_t prev_hash = 0;
-    uint32_t matched = 0;
+    uint32_t matched = 0;  // total matched tokens, including a partial tail block
 
     for (uint32_t i = 0; i < n_blocks_check; ++i) {
-        const uint64_t h = compute_hash(prev_hash, tokens + i * block_size, block_size);
-        auto it = hash_to_block_id.find(h);
-        if (it == hash_to_block_id.end()) break;
+        const bool is_last = (i == n_blocks_check - 1);
+        const uint32_t block_tokens = (is_last && tail != 0) ? tail : block_size;
+        const uint64_t h = compute_hash(prev_hash, tokens + i * block_size, block_tokens);
 
-        const auto & blk = blocks[it->second];
-        // skip freed blocks or token mismatch (hash collision guard). cached
-        // blocks (ref_count == 0, data still resident) can be reused.
-        if (blk.token_ids.size() != block_size ||
-            memcmp(blk.token_ids.data(), tokens + i * block_size, block_size * sizeof(llama_token)) != 0) {
-            break;
+        // a hash may map to several physical blocks (identical partial tails on
+        // different seqs); accept the first one whose content matches
+        bool found = false;
+        auto range = hash_to_block_id.equal_range(h);
+        for (auto it = range.first; it != range.second; ++it) {
+            const auto & blk = blocks[it->second];
+            // skip freed blocks or token mismatch (hash collision guard). cached
+            // blocks (ref_count == 0, data still resident) can be reused.
+            if (blk.token_ids.size() == block_tokens &&
+                memcmp(blk.token_ids.data(), tokens + i * block_size, block_tokens * sizeof(llama_token)) == 0) {
+                found = true;
+                break;
+            }
         }
+        if (!found) break;
         prev_hash = h;
-        ++matched;
+        matched = (is_last && tail != 0) ? n : (i + 1) * block_size;
     }
-    return matched * block_size;
+    return matched;
 }
 
 uint32_t llama_kv_paged_cache::share_prefix(llama_seq_id seq_id, const llama_token * tokens, uint32_t n) {
     const uint32_t hit_len = find_prefix(tokens, n);
     if (hit_len == 0) return 0;
 
-    const uint32_t n_blocks_share = hit_len / block_size;
+    const uint32_t tail = hit_len % block_size;
+    const uint32_t n_blocks_share = hit_len / block_size + (tail ? 1 : 0);
     auto & bt = block_tables[seq_id];
     bt.reserve(n_blocks_share);
 
     uint64_t prev_hash = 0;
     for (uint32_t i = 0; i < n_blocks_share; ++i) {
-        const uint64_t h = compute_hash(prev_hash, tokens + i * block_size, block_size);
-        auto it = hash_to_block_id.find(h);
-        GGML_ASSERT(it != hash_to_block_id.end() && "share_prefix: hash vanished during share");
+        const bool is_last = (i == n_blocks_share - 1);
+        const uint32_t block_tokens = (is_last && tail) ? tail : block_size;
+        const uint64_t h = compute_hash(prev_hash, tokens + i * block_size, block_tokens);
 
-        const uint32_t block_id = it->second;
+        // a hash may map to several physical blocks; pick one whose content
+        // matches the requested token count
+        uint32_t block_id = UINT32_MAX;
+        auto range = hash_to_block_id.equal_range(h);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (blocks[it->second].token_ids.size() == block_tokens) {
+                block_id = it->second;
+                break;
+            }
+        }
+        GGML_ASSERT(block_id != UINT32_MAX && "share_prefix: hash vanished during share");
+
         auto & blk = blocks[block_id];
-        GGML_ASSERT(blk.token_ids.size() == block_size);
-
         bt.push_back(block_id);
 
         const uint32_t base = block_id * block_size;
@@ -776,14 +809,14 @@ uint32_t llama_kv_paged_cache::share_prefix(llama_seq_id seq_id, const llama_tok
             blk.ref_count = 1;
             cached_block_ids.erase(block_id);
             used_block_ids.insert(block_id);
-            for (uint32_t off = 0; off < block_size; ++off) {
+            for (uint32_t off = 0; off < block_tokens; ++off) {
                 v_cells[0].pos_set(base + off, (llama_pos) i * block_size + off);
                 v_cells[0].seq_add(base + off, seq_id);
             }
         } else {
             blk.ref_count++;
             // add the new seq_id to each cell of this block
-            for (uint32_t off = 0; off < block_size; ++off) {
+            for (uint32_t off = 0; off < block_tokens; ++off) {
                 const uint32_t cell_idx = base + off;
                 // cell must already be populated (owned by source seq)
                 if (!v_cells[0].seq_has(cell_idx, seq_id)) {
@@ -943,9 +976,18 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
         if (tokens.empty()) continue;
         // only attempt sharing if we have at least one full block
         if (tokens.size() < block_size) continue;
-        uint32_t hit = share_prefix(seq_id, tokens.data(), (uint32_t) tokens.size());
-        if (hit > 0) {
-            hit_lens[seq_id] = hit;
+        uint32_t hit = find_prefix(tokens.data(), (uint32_t) tokens.size());
+        if (hit >= tokens.size()) {
+            // never share the entire sequence: a fully-shared decode would
+            // produce an empty ubatch. keep at least one token to compute.
+            hit = tokens.size() % block_size
+                ? ((uint32_t) tokens.size() / block_size) * block_size
+                : (uint32_t) tokens.size() - block_size;
+        }
+        if (hit < block_size) continue;
+        uint32_t shared = share_prefix(seq_id, tokens.data(), hit);
+        if (shared > 0) {
+            hit_lens[seq_id] = shared;
         }
     }
 
@@ -1198,10 +1240,7 @@ bool llama_kv_paged_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p
                 blk.token_ids.resize(keep_in_block);
                 // the block hash is now stale: drop it so it gets recomputed
                 if (blk.hash != 0) {
-                    auto it = hash_to_block_id.find(blk.hash);
-                    if (it != hash_to_block_id.end() && it->second == blk_id) {
-                        hash_to_block_id.erase(it);
-                    }
+                    hash_to_block_id_erase(hash_to_block_id, blk.hash, blk_id);
                     blk.hash = 0;
                 }
             }
@@ -1405,7 +1444,7 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
                 io.read(blk.token_ids.data(), n_tokens * sizeof(llama_token));
             }
             if (blk.hash != 0) {
-                hash_to_block_id[blk.hash] = bid;
+                hash_to_block_id.emplace(blk.hash, bid);
             }
         }
 
@@ -1453,7 +1492,7 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
                 used_block_ids.insert(bid);
             }
             if (blk.hash != 0) {
-                hash_to_block_id[blk.hash] = bid;
+                hash_to_block_id.emplace(blk.hash, bid);
             }
         }
     }
