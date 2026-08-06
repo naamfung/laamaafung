@@ -27,13 +27,25 @@ uint32_t llama_kv_paged_cache::detect_block_size(const llama_model & model, bool
         }
     }
 
+    // adaptive block size (P3): aim for roughly constant K/V bytes per block.
+    // wide-KV models (large n_embd_k_gqa) use finer blocks to reduce
+    // partial-tail waste on the last block; narrow-KV models use coarser
+    // blocks to keep the block count (and management overhead) low.
+    // base remains 16 (CPU) / 32 (GPU) for the common range.
+    uint32_t bs = 16;
     if (offload) {
         auto * dev = model.dev_layer(0);
         if (dev && ggml_backend_dev_buffer_type(dev) != ggml_backend_cpu_buffer_type()) {
-            return 32;
+            bs = 32;
         }
     }
-    return 16;
+    const uint32_t kv_w = model.hparams.n_embd_k_gqa_max();
+    if (kv_w >= 4096) {
+        bs = std::max(16u, bs / 2);
+    } else if (kv_w <= 128) {
+        bs = std::min(64u, bs * 2);
+    }
+    return bs;
 }
 
 llama_kv_paged_cache::llama_kv_paged_cache(

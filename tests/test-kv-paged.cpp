@@ -315,15 +315,16 @@ int main(int argc, char ** argv) {
 
     // block-size-adaptive scenario lengths
     const uint32_t T_LEN  = 6 * BS;          // 6 full blocks (prefix reuse target)
-    const uint32_t U_LEN  = 2 * BS + 8;      // 2 full blocks + partial tail
+    const uint32_t U_LEN  = 2 * BS + 4;      // 2 full blocks + partial tail
     const uint32_t TRUNC  = BS + 4;          // mid-block truncation point
     const uint32_t W_LEN  = 3 * BS;          // per-seq length for capacity pressure
     // sequences 4..4+n_press-1 are used for the pressure scenario (n_seq_max must
     // leave room for them)
     const uint32_t n_press = n_seq_max >= 10 ? 6 : (n_seq_max > 4 ? n_seq_max - 4 : 0);
 
-    if (T_LEN / BS + 2 > m.n_blocks_total) {
-        throw std::runtime_error("context too small for the scenario (n_blocks_total < T_LEN/BS + 2)");
+    if (T_LEN / BS + 3 > m.n_blocks_total) {
+        // +3 = seq0's tail block + B's new block + B2's new block
+        throw std::runtime_error("context too small for the scenario (n_blocks_total < T_LEN/BS + 3)");
     }
 
     const std::vector<llama_token> T = get_tokens(T_LEN, n_vocab, 42);
