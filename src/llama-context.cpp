@@ -7,6 +7,7 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-memory-hybrid.h"
 #include "llama-kv-paged.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
@@ -4270,8 +4271,14 @@ llama_memory_metrics llama_memory_get_metrics(llama_memory_t mem) {
         return m;
     }
 
-    // only paged cache has meaningful metrics
+    // only paged cache has meaningful metrics; hybrid delegates to the attention side
     auto * paged = dynamic_cast<llama_kv_paged_cache *>(mem);
+    if (!paged) {
+        auto * hybrid = dynamic_cast<llama_memory_hybrid *>(mem);
+        if (hybrid) {
+            paged = dynamic_cast<llama_kv_paged_cache *>(hybrid->get_mem_attn());
+        }
+    }
     if (paged) {
         auto pm = paged->get_metrics();
         m.n_blocks_total   = pm.n_blocks_total;

@@ -99,6 +99,10 @@ public:
     // call once before splitting the batch to reset the internal state
     void split_reset();
 
+    // mark a token as consumed so that the split functions skip it
+    // (used to skip shared prefix tokens during hybrid prefix sharing)
+    void mark_used(uint32_t i);
+
     // simple split, unknown number of sequence sets of unequal lengths
     llama_ubatch split_simple(uint32_t n_ubatch);
 

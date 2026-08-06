@@ -288,6 +288,10 @@ void llama_kv_paged_cache::may_append(llama_seq_id seq_id, llama_pos pos) {
         // each new block must start exactly at pos == bt.size() * block_size.
         // non-contiguous positions would leave holes in the block chain and
         // break the block hash chain used for prefix matching
+        if ((uint32_t) pos != bt.size() * block_size) {
+            LLAMA_LOG_ERROR("%s: seq %d non-contiguous pos %d, bt.size()=%zu, block_size=%u\n",
+                    __func__, seq_id, (int) pos, bt.size(), block_size);
+        }
         GGML_ASSERT((uint32_t) pos == bt.size() * block_size && "paged cache: non-contiguous positions are not supported");
         bt.push_back(alloc_block(seq_id));
     }
@@ -803,7 +807,7 @@ llama_ubatch llama_kv_paged_cache::filter_ubatch(const llama_ubatch & ub,
     uint32_t n_keep = 0;
     for (uint32_t i = 0; i < ub.n_tokens; ++i) {
         const llama_seq_id seq_id = ub.seq_id[i][0];
-        const llama_pos    pos    = ub.pos[i * ub.n_pos];
+        const llama_pos    pos    = ub.pos[i];
         auto it = hit_lens.find(seq_id);
         if (it != hit_lens.end() && (uint32_t) pos < it->second) {
             continue;   // shared, skip
@@ -838,7 +842,7 @@ llama_ubatch llama_kv_paged_cache::filter_ubatch(const llama_ubatch & ub,
 
     for (uint32_t i = 0; i < ub.n_tokens; ++i) {
         const llama_seq_id seq_id = ub.seq_id[i][0];
-        const llama_pos    pos    = ub.pos[i * ub.n_pos];
+        const llama_pos    pos    = ub.pos[i];
         auto it = hit_lens.find(seq_id);
         if (it != hit_lens.end() && (uint32_t) pos < it->second) {
             continue;
@@ -846,7 +850,8 @@ llama_ubatch llama_kv_paged_cache::filter_ubatch(const llama_ubatch & ub,
 
         fdata->token.push_back(ub.token[i]);
         for (uint32_t p = 0; p < ub.n_pos; ++p) {
-            fdata->pos.push_back(ub.pos[i * ub.n_pos + p]);
+            // the ubatch pos layout is [p0 of all tokens, p1 of all tokens, ...]
+            fdata->pos.push_back(ub.pos[p * ub.n_tokens + i]);
         }
         fdata->n_seq_id.push_back(ub.n_seq_id[i]);
         for (int32_t s = 0; s < ub.n_seq_id[i]; ++s) {
@@ -904,7 +909,7 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
     for (auto & ub : ubatches) {
         for (uint32_t i = 0; i < ub.n_tokens; ++i) {
             const llama_seq_id seq_id = ub.seq_id[i][0];
-            const llama_pos pos = ub.pos[i * ub.n_pos];
+            const llama_pos pos = ub.pos[i];
             if (pos == 0) {
                 auto bt_it = block_tables.find(seq_id);
                 if (bt_it == block_tables.end() || bt_it->second.empty()) {
@@ -984,7 +989,10 @@ llama_kv_cache::slot_info llama_kv_paged_cache::process_ubatch(
 
     for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
         const llama_seq_id seq_id = ubatch.seq_id[i][0];
-        const llama_pos    pos    = ubatch.pos[i * ubatch.n_pos];
+        // note: the ubatch pos layout is [p0 of all tokens, p1 of all tokens,
+        // ...], so the base position of token i is pos[i] (not pos[i*n_pos],
+        // which would stride over the p0 section for M-RoPE models)
+        const llama_pos    pos    = ubatch.pos[i];
 
         // record the block index of the first token processed for this
         // seq. this block may already exist (partial) and become full

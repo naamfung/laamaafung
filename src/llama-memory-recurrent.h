@@ -24,7 +24,8 @@ public:
                      uint32_t   mem_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
-        const layer_filter_cb & filter);
+        const layer_filter_cb & filter,
+                     uint32_t   n_snapshots = 0);
 
     ~llama_memory_recurrent() = default;
 
@@ -112,6 +113,91 @@ public:
     std::vector<ggml_tensor *> r_l;
     std::vector<ggml_tensor *> s_l;
 
+    //
+    // chunk state snapshots for hybrid prefix sharing (vLLM-style):
+    //
+    // the r_l/s_l tensors are extended with n_snap extra columns at the end.
+    // each snapshot stores the R/S state at a chunk boundary (a multiple of
+    // block_size tokens), keyed by the hash of the chunk's tokens. when a new
+    // sequence shares a prefix, the state at the deepest available snapshot
+    // boundary is restored by pointing the first cell's src0 at the snapshot
+    // column, skipping the per-token recomputation of the shared prefix.
+    //
+
+    struct mem_snap {
+        uint64_t hash      = 0;
+        uint32_t n_tokens  = 0;
+        uint64_t last_used = 0; // LRU timestamp
+        bool     valid     = false;
+    };
+
+    // a scheduled snapshot write for the current ubatch (filled in apply())
+    struct snap_write {
+        int32_t  slot;     // snapshot slot index
+        uint64_t hash;     // chunk hash
+        uint32_t n_tokens; // tokens in the chunk
+        uint32_t seq_off;  // seq offset within the ubatch; state column = head + seq_off
+    };
+
+    uint32_t n_snap     = 0; // snapshot slots (0 = disabled)
+    uint32_t block_size = 0; // chunk size used for snapshots
+    uint64_t snap_lru   = 0;
+    std::vector<mem_snap> snaps;
+
+    // seq -> snapshot slot to restore from (set by hybrid init_batch, used by find_slot)
+    std::unordered_map<llama_seq_id, int32_t> snap_restore;
+
+    // seq -> per-chunk hashes, chunk idx = pos / block_size (set by hybrid init_batch)
+    std::unordered_map<llama_seq_id, std::vector<uint64_t>> chunk_hashes;
+
+    static uint64_t compute_hash(uint64_t prev_hash, const llama_token * tokens, uint32_t n);
+
+    int32_t find_snap(uint64_t hash) const;
+    int32_t snap_alloc(uint64_t hash, uint32_t n_tokens);
+
+    uint32_t snap_col(int32_t slot) const {
+        return size*(1 + n_rs_seq) + slot;
+    }
+
+    bool is_snap_col(int32_t col) const {
+        return col >= (int32_t) (size*(1 + n_rs_seq));
+    }
+
+    // longest prefix (multiple of block_size) for which snapshots are available
+    int32_t find_snap_prefix(const llama_token * tokens, uint32_t n_tokens) const;
+
+    void set_snap_restore(llama_seq_id seq_id, int32_t slot) {
+        snap_restore[seq_id] = slot;
+    }
+
+    void clear_snap_restore() {
+        snap_restore.clear();
+    }
+
+    void set_chunk_hashes(llama_seq_id seq_id, std::vector<uint64_t> && hashes) {
+        chunk_hashes[seq_id] = std::move(hashes);
+    }
+
+    uint32_t get_block_size() const {
+        return block_size;
+    }
+
+    // the recurrent snapshot copies write into the r_l/s_l tensor columns; on
+    // GPU backends the graph scheduler does not reliably execute writes into
+    // input-tensor views that are not consumed by the rest of the graph, so
+    // prefix sharing is only enabled when the recurrent state lives on the CPU
+    bool is_cpu_only() const {
+        if (ctxs_bufs.empty()) {
+            return true;
+        }
+        for (const auto & [_, buf] : ctxs_bufs) {
+            if (ggml_backend_buffer_get_type(buf.get()) != ggml_backend_cpu_buffer_type()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 private:
     //const llama_model & model;
     const llama_hparams & hparams;
@@ -173,6 +259,19 @@ public:
 
     int32_t s_copy(int i) const;
 
+    // scheduled snapshot writes for the current ubatch (non-empty only after apply())
+    const std::vector<llama_memory_recurrent::snap_write> & get_snap_writes() const {
+        return snap_writes;
+    }
+
+    uint32_t snap_col(int32_t slot) const {
+        return mem->snap_col(slot);
+    }
+
+    bool is_snap_col(int32_t col) const {
+        return mem->is_snap_col(col);
+    }
+
 private:
     const llama_memory_status status;
 
@@ -181,6 +280,11 @@ private:
     size_t i_next = 0;
 
     std::vector<llama_ubatch> ubatches;
+
+    // filled by apply() for the current ubatch, consumed by the graph builder
+    std::vector<llama_memory_recurrent::snap_write> snap_writes;
+
+    void schedule_snap_writes();
 
     //
     // data needed for building the compute graph for the current ubatch:

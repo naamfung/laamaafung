@@ -473,6 +473,15 @@ void llama_batch_allocr::split_reset() {
     used.resize(get_n_tokens(), false);
 }
 
+void llama_batch_allocr::mark_used(uint32_t i) {
+    GGML_ASSERT(i < used.size() && "mark_used: token index out of range");
+
+    if (!used[i]) {
+        used[i] = true;
+        ++n_used;
+    }
+}
+
 llama_ubatch llama_batch_allocr::split_simple(uint32_t n_ubatch) {
     // find the first unused token
     uint32_t cur_idx = 0;

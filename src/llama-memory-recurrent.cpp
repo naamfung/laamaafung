@@ -6,6 +6,10 @@
 #include "llama-batch.h"
 #include "llama-model.h"
 
+#define XXH_INLINE_ALL
+#include "xxhash.h"
+#undef XXH_INLINE_ALL
+
 #include <algorithm>
 #include <cassert>
 #include <cstring>
@@ -25,7 +29,8 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   mem_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
-    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    const layer_filter_cb & filter,
+                 uint32_t   n_snapshots) : hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
@@ -34,6 +39,9 @@ llama_memory_recurrent::llama_memory_recurrent(
 
     this->n_rs_seq = n_rs_seq;
     rs_idx.assign(n_seq_max, 0);
+
+    n_snap = n_snapshots;
+    snaps.resize(n_snap);
 
     cells.clear();
     cells.resize(mem_size);
@@ -96,7 +104,7 @@ llama_memory_recurrent::llama_memory_recurrent(
             throw std::runtime_error("failed to create ggml context for rs cache");
         }
 
-        const uint32_t n_rows = mem_size * (1 + n_rs_seq);
+        const uint32_t n_rows = mem_size * (1 + n_rs_seq) + n_snap;
         ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
         ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
         ggml_format_name(r, "cache_r_l%d", i);
@@ -138,6 +146,12 @@ void llama_memory_recurrent::clear(bool data) {
     head = 0;
     used = 0;
 
+    // invalidate the chunk snapshots: the token data behind them is gone
+    snaps.assign(snaps.size(), {});
+    snap_lru = 0;
+    chunk_hashes.clear();
+    snap_restore.clear();
+
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
@@ -145,6 +159,73 @@ void llama_memory_recurrent::clear(bool data) {
     }
 
     std::fill(rs_idx.begin(), rs_idx.end(), 0);
+}
+
+uint64_t llama_memory_recurrent::compute_hash(uint64_t prev_hash, const llama_token * tokens, uint32_t n) {
+    return XXH64(tokens, (size_t) n * sizeof(llama_token), prev_hash);
+}
+
+int32_t llama_memory_recurrent::find_snap(uint64_t hash) const {
+    for (uint32_t i = 0; i < n_snap; ++i) {
+        if (snaps[i].valid && snaps[i].hash == hash) {
+            return (int32_t) i;
+        }
+    }
+    return -1;
+}
+
+int32_t llama_memory_recurrent::snap_alloc(uint64_t hash, uint32_t n_tokens) {
+    // never evict a slot that is being restored from in the current batch
+    auto is_pinned = [&](int32_t slot) {
+        for (const auto & [_, s] : snap_restore) {
+            if (s == slot) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    int32_t best = -1;
+    uint64_t min_used = std::numeric_limits<uint64_t>::max();
+    for (uint32_t i = 0; i < n_snap; ++i) {
+        if (is_pinned((int32_t) i)) {
+            continue;
+        }
+        if (!snaps[i].valid) {
+            best = (int32_t) i;
+            break;
+        }
+        if (snaps[i].last_used < min_used) {
+            min_used = snaps[i].last_used;
+            best = (int32_t) i;
+        }
+    }
+    if (best < 0) {
+        return -1;
+    }
+
+    snaps[best] = { hash, n_tokens, ++snap_lru, true };
+    return best;
+}
+
+int32_t llama_memory_recurrent::find_snap_prefix(const llama_token * tokens, uint32_t n_tokens) const {
+    if (n_snap == 0 || block_size == 0) {
+        return 0;
+    }
+
+    // the deepest chunk boundary for which a snapshot is available; chunks are
+    // hashed in a chain, but intermediate boundaries do not need snapshots
+    // (restoring from the deepest boundary is enough, the rest is recomputed)
+    uint64_t prev_hash = 0;
+    const uint32_t n_chunks = n_tokens / block_size;
+    int32_t hit = 0;
+    for (uint32_t i = 0; i < n_chunks; ++i) {
+        prev_hash = compute_hash(prev_hash, tokens + i*block_size, block_size);
+        if (find_snap(prev_hash) >= 0) {
+            hit = (int32_t) (i + 1)*block_size;
+        }
+    }
+    return hit;
 }
 
 bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -230,6 +311,15 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
     // If we freed up a slot, set head to it so searching can start there.
     if (new_head != size && new_head < head) {
         head = new_head;
+    }
+
+    // drop any snapshot restore/hash bookkeeping for the removed sequence(s)
+    if (seq_id < 0) {
+        chunk_hashes.clear();
+        snap_restore.clear();
+    } else {
+        chunk_hashes.erase(seq_id);
+        snap_restore.erase(seq_id);
     }
 
     return true;
@@ -674,8 +764,21 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
 
         for (int i = min; i <= max; ++i) {
             if (cells[i].src < 0) {
-                GGML_ASSERT(rs_z >= 0);
-                cells[i].src0 = rs_z;
+                // a sequence restoring from a chunk snapshot reads its state from the snapshot column
+                int32_t snap_slot = -1;
+                for (const auto seq_id : cells[i].seq_id) {
+                    const auto it = snap_restore.find(seq_id);
+                    if (it != snap_restore.end()) {
+                        snap_slot = it->second;
+                        break;
+                    }
+                }
+                if (snap_slot >= 0) {
+                    cells[i].src0 = snap_col(snap_slot);
+                } else {
+                    GGML_ASSERT(rs_z >= 0);
+                    cells[i].src0 = rs_z;
+                }
             } else {
                 // Stage the source ids for all used cells to allow correct seq_* behavior
                 // and still make these values available when setting the inputs
@@ -845,6 +948,15 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
             set_rs_idx(seq_id, 0);
         }
     }
+
+    // the loaded state does not carry the chunk snapshots - invalidate them
+    // so a stale snapshot is never restored against the new state data
+    if (seq_id == -1) {
+        snaps.assign(snaps.size(), {});
+        snap_lru = 0;
+        chunk_hashes.clear();
+    }
+    snap_restore.clear();
 }
 
 void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, llama_seq_id seq_id) const {
@@ -1209,7 +1321,59 @@ bool llama_memory_recurrent_context::apply() {
 
     mem->find_slot(ubatches[i_next]);
 
+    schedule_snap_writes();
+
     return true;
+}
+
+// schedule a snapshot write for every sequence whose last token in the current
+// ubatch lands exactly on a chunk boundary and for which a chunk hash was
+// precomputed by the hybrid init_batch
+void llama_memory_recurrent_context::schedule_snap_writes() {
+    snap_writes.clear();
+
+    if (mem->n_snap == 0 || mem->block_size == 0) {
+        return;
+    }
+
+    const auto & ubatch = ubatches[i_next];
+    if (ubatch.n_seqs == 0 || ubatch.n_seq_tokens == 0 || !ubatch.equal_seqs()) {
+        return;
+    }
+
+    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+        const uint32_t i_last = (s + 1)*ubatch.n_seq_tokens - 1;
+        const llama_seq_id seq = ubatch.seq_id_unq[s];
+
+        const llama_pos pos = ubatch.pos[i_last];
+        if ((pos + 1) % mem->block_size != 0) {
+            continue; // does not land on a chunk boundary
+        }
+
+        const auto it = mem->chunk_hashes.find(seq);
+        if (it == mem->chunk_hashes.end()) {
+            continue;
+        }
+
+        const uint32_t chunk_idx = pos / mem->block_size;
+        if (chunk_idx >= it->second.size()) {
+            continue;
+        }
+
+        const uint64_t h = it->second[chunk_idx];
+        int32_t slot = mem->find_snap(h);
+        if (slot < 0) {
+            slot = mem->snap_alloc(h, mem->block_size);
+        }
+        if (slot < 0) {
+            continue;
+        }
+
+        snap_writes.push_back({ slot, h, mem->block_size, s });
+
+        LLAMA_LOG_INFO("%s: seq %d snapshot chunk %u hash=%016llx -> slot %d\n",
+                __func__, seq, chunk_idx, (unsigned long long) h, slot);
+    }
 }
 
 llama_memory_status llama_memory_recurrent_context::get_status() const {
@@ -1250,12 +1414,8 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
     const uint32_t cell_idx = i + mem->head;
     const int32_t  src0     = mem->cells[cell_idx].src0;
 
-    if (mem->n_rs_seq == 0) {
-        return src0;
-    }
-
     uint32_t idx = 0;
-    if (!mem->cells[cell_idx].seq_id.empty()) {
+    if (mem->n_rs_seq > 0 && !mem->cells[cell_idx].seq_id.empty()) {
         const llama_seq_id seq = *mem->cells[cell_idx].seq_id.begin();
         if (seq >= 0 && (size_t) seq < mem->rs_idx.size()) {
             idx = mem->rs_idx[seq];
@@ -1263,5 +1423,15 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
             mem->rs_idx[seq] = 0;
         }
     }
+
+    // snapshot columns are absolute indices in the states tensor
+    if (mem->is_snap_col(src0)) {
+        return src0;
+    }
+
+    if (mem->n_rs_seq == 0) {
+        return src0;
+    }
+
     return (int32_t)(idx * mem->size) + src0;
 }

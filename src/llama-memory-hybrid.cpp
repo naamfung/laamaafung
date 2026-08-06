@@ -5,11 +5,25 @@
 #include "llama-model.h"
 #include "llama-context.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <map>
+
 //
 // llama_memory_hybrid
 //
 
 namespace {
+
+// number of recurrent chunk-state snapshot slots (LLAMA_KV_RS_SNAPSHOTS env,
+// default 32; 0 disables the hybrid prefix sharing snapshots)
+uint32_t get_n_snapshots() {
+    const char * val = std::getenv("LLAMA_KV_RS_SNAPSHOTS");
+    if (val == nullptr) {
+        return 32;
+    }
+    return (uint32_t) std::max(0, std::atoi(val));
+}
 
 // build the attention-side KV cache: vllm-style paged by default, legacy
 // contiguous when paged_attn is false
@@ -103,12 +117,19 @@ llama_memory_hybrid::llama_memory_hybrid(
         n_rs_seq,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recr(il); }
-            : filter_recr
+            : filter_recr,
+        get_n_snapshots()
     )) {}
 
 llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
     do {
         balloc.split_reset();
+
+        // hybrid prefix sharing: share attention blocks and recurrent state
+        // snapshots for fresh sequences whose prefix was seen before
+        if (!embd_all) {
+            setup_prefix_sharing(balloc);
+        }
 
         // follow the recurrent pattern for creating the ubatch splits
         std::vector<llama_ubatch> ubatches;
@@ -162,6 +183,145 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
     } while(false);
 
     return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+}
+
+// fresh-sequence prefix sharing for hybrid models:
+//   - attention side: share the matched blocks via share_prefix (paged cache)
+//   - recurrent side: restore the R/S state from a chunk snapshot and skip
+//     the per-token recomputation of the shared prefix
+// the shared prefix tokens are marked as used so that the ubatch split skips
+// them, keeping the recurrent ubatches equal-seqs
+void llama_memory_hybrid::setup_prefix_sharing(llama_batch_allocr & balloc) {
+    auto * paged = dynamic_cast<llama_kv_paged_cache *>(mem_attn.get());
+    if (paged == nullptr) {
+        return; // prefix sharing requires the paged attention cache
+    }
+
+    // snapshot writes into the recurrent state tensors are only reliable on
+    // the CPU backend (see llama_memory_recurrent::is_cpu_only)
+    if (!mem_recr->is_cpu_only()) {
+        return;
+    }
+
+    const uint32_t block_size = paged->block_size;
+    mem_recr->block_size = block_size;
+    mem_recr->clear_snap_restore();
+
+    const llama_batch & batch = balloc.get_batch();
+
+    // group the batch token indices by sequence (batch order == token order)
+    std::map<llama_seq_id, std::vector<uint32_t>> seq_idx;
+    std::set<llama_seq_id> coupled_seqs;
+    for (uint32_t i = 0; i < batch.n_tokens; ++i) {
+        if (batch.n_seq_id[i] == 0) {
+            continue;
+        }
+        if (batch.n_seq_id[i] > 1) {
+            coupled_seqs.insert(batch.seq_id[i][0]);
+        }
+        seq_idx[batch.seq_id[i][0]].push_back(i);
+    }
+
+    for (const auto & [seq, idxs] : seq_idx) {
+        const uint32_t n = (uint32_t) idxs.size();
+        if (n == 0) {
+            continue;
+        }
+
+        // coupled sequences (tokens shared with another seq) cannot be split
+        // cleanly - skip them
+        if (coupled_seqs.count(seq)) {
+            continue;
+        }
+
+        // only fresh sequences with the complete contiguous token stream
+        // (pos 0..n-1) present in this batch can participate
+        if (batch.pos[idxs[0]] != 0) {
+            continue;
+        }
+        bool contig = true;
+        for (uint32_t k = 1; k < n; ++k) {
+            if (batch.pos[idxs[k]] != batch.pos[idxs[k-1]] + 1) {
+                contig = false;
+                break;
+            }
+        }
+        if (!contig || (uint32_t) batch.pos[idxs.back()] + 1 != n) {
+            continue;
+        }
+        if (paged->seq_length(seq) != 0) {
+            continue; // not a fresh sequence on the attention side
+        }
+
+        std::vector<llama_token> tokens(n);
+        for (uint32_t k = 0; k < n; ++k) {
+            tokens[k] = batch.token[idxs[k]];
+        }
+
+        // precompute the chunk hashes for snapshot writes (fresh sequences
+        // write snapshots while processing, later requests restore from them)
+        {
+            std::vector<uint64_t> hashes(n / block_size);
+            uint64_t prev = 0;
+            for (uint32_t i = 0; i < hashes.size(); ++i) {
+                prev = llama_memory_recurrent::compute_hash(prev, tokens.data() + i*block_size, block_size);
+                hashes[i] = prev;
+            }
+            mem_recr->set_chunk_hashes(seq, std::move(hashes));
+        }
+
+        // longest prefix shared by both sides
+        const uint32_t hit_len  = paged->find_prefix(tokens.data(), n);
+        const int32_t  snap_len = mem_recr->find_snap_prefix(tokens.data(), n);
+        const uint32_t share_len = std::min(hit_len, (uint32_t) snap_len);
+        if (share_len == 0) {
+            continue;
+        }
+
+        // the restore point must be a chunk boundary that actually has a
+        // snapshot; the snapshot chain may have gaps (evicted slots), so walk
+        // down from share_len and take the deepest boundary with a snapshot
+        uint64_t prev = 0;
+        uint32_t restore_len = 0;
+        int32_t slot = -1;
+        for (uint32_t i = 0; i < share_len / block_size; ++i) {
+            prev = llama_memory_recurrent::compute_hash(prev, tokens.data() + i*block_size, block_size);
+            const int32_t s = mem_recr->find_snap(prev);
+            if (s >= 0) {
+                slot = s;
+                restore_len = (i + 1)*block_size;
+            }
+        }
+        if (slot < 0) {
+            continue; // no usable snapshot below the attention hit
+        }
+
+        // never skip output tokens (the shared prefix is restore_len <= share_len)
+        bool has_output = false;
+        for (uint32_t k = 0; k < restore_len; ++k) {
+            if (batch.logits[idxs[k]]) {
+                has_output = true;
+                break;
+            }
+        }
+        if (has_output) {
+            continue;
+        }
+
+        // share the attention blocks up to the restore point so that the
+        // attention and recurrent sides stay aligned
+        paged->share_prefix(seq, tokens.data(), restore_len);
+
+        LLAMA_LOG_INFO("%s: seq %d shares %u tokens (attn hit %u, snap hit %d, restore %u)\n",
+                __func__, seq, restore_len, hit_len, snap_len, restore_len);
+
+        mem_recr->set_snap_restore(seq, slot);
+
+        // skip the shared tokens during the ubatch split
+        for (uint32_t k = 0; k < restore_len; ++k) {
+            balloc.mark_used(idxs[k]);
+        }
+    }
 }
 
 llama_memory_context_ptr llama_memory_hybrid::init_full() {

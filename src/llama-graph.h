@@ -942,6 +942,13 @@ struct llm_graph_context {
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
 
+    // store the per-seq recurrent state snapshots for the current ubatch
+    // (hybrid prefix sharing). called right after a recurrent layer's state
+    // write-back, so the copy source is the written-back state itself and the
+    // snapshot is guaranteed to run after the write (no graph reordering).
+    // no-op when the current ubatch scheduled no snapshot writes.
+    void build_rs_snapshots_store(ggml_tensor * new_state, ggml_tensor * states_all, int32_t il, bool is_conv) const;
+
     //
     // common
     //

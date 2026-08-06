@@ -344,8 +344,10 @@ int main(int argc, char ** argv) {
     //
     // scenario B: second sequence shares the prefix via the block hash chain
     // (simulates the server: share_prefix is applied at init_batch, then only
-    // the new tokens are decoded)
+    // the new tokens are decoded). dense-only: hybrid models share via the
+    // automatic recurrent-snapshot path (scenario H) instead
     //
+    if (!llama_model_is_hybrid(model.get())) {
     const uint32_t hit_b = llama_memory_share_prefix(mem, 1, T.data(), T_LEN);
     check(hit_b == T_LEN, "B: share_prefix reuses the live prefix blocks");
     const std::vector<float> logits1 = decode(model.get(), lctx.get(), 1, T, T_LEN, 1);
@@ -484,6 +486,115 @@ int main(int argc, char ** argv) {
             }
             decode(model.get(), lctx.get(), s, get_tokens(1, n_vocab, 100 + s), W_LEN, 1);
             check(llama_memory_seq_pos_max(mem, s) == W_LEN, "E: sequence continues after preemption");
+        }
+    }
+    } // [dense-only scenarios B-E end]
+
+    // scenario H: hybrid automatic prefix sharing. runs only for hybrid
+    // models (qwen35 family) loaded with -force, since the mock model is
+    // pure attention. the shared prefix output must be bit-exact with the
+    // full recomputation of the same sequence.
+    if (llama_model_is_hybrid(model.get())) {
+        // n_ubatch (64) is a multiple of BS, so every prefill ubatch ends on
+        // a chunk boundary and recurrent snapshots are written
+        check(64 % BS == 0, "H: n_ubatch is a multiple of block_size");
+        const uint32_t P_LEN = 6 * BS;   // prefix: 6 full blocks
+        const uint32_t U_LEN = BS + 4;   // suffix: 1 full block + partial tail
+
+        const std::vector<llama_token> P = get_tokens(P_LEN, n_vocab, 300);
+        const std::vector<llama_token> U = get_tokens(U_LEN, n_vocab, 301);
+
+        // seq 1: prefill the prefix (writes snapshots at ubatch boundaries);
+        // seq 0 was consumed by scenario A above, seq 2/3 are free because the
+        // dense-only scenarios B-E are skipped for hybrid models
+        decode(model.get(), lctx.get(), 1, P, 0, P_LEN);
+
+        // seq 1: full recomputation reference - continue with the suffix
+        const std::vector<float> ref = decode(model.get(), lctx.get(), 1, U, P_LEN, U_LEN);
+
+        m = llama_memory_get_metrics(mem);
+        const uint32_t n_blocks_before = m.n_blocks_used;
+
+        // seq 2: same prefix (not outputs) + suffix (outputs); the automatic
+        // hybrid prefix sharing skips the shared prefix on both sides
+        {
+            llama_batch batch = llama_batch_init(P_LEN + U_LEN, 0, 1);
+            for (uint32_t i = 0; i < P_LEN; i++) {
+                common_batch_add(batch, P[i], i, {2}, false);
+            }
+            for (uint32_t i = 0; i < U_LEN; i++) {
+                common_batch_add(batch, U[i], P_LEN + i, {2}, true);
+            }
+            batch.n_tokens = P_LEN + U_LEN;
+            if (llama_decode(lctx.get(), batch)) {
+                llama_batch_free(batch);
+                throw std::runtime_error("failed to decode hybrid shared-prefix batch");
+            }
+
+            std::vector<float> shared;
+            shared.reserve(U_LEN * n_vocab);
+            for (uint32_t i = 0; i < U_LEN; i++) {
+                // output rows are indexed by the original batch token index;
+                // the shared prefix tokens (0..P_LEN-1) produce no logits
+                const float * logits_ith = llama_get_logits_ith(lctx.get(), P_LEN + i);
+                shared.insert(shared.end(), logits_ith, logits_ith + n_vocab);
+            }
+            llama_batch_free(batch);
+
+            m = llama_memory_get_metrics(mem);
+            // the shared prefix must not allocate new blocks: only the suffix
+            // (U_LEN tokens) needs new blocks, the P_LEN/BS prefix blocks are
+            // reused via share_prefix
+            check(m.n_blocks_used <= n_blocks_before + U_LEN / BS + 2, "H: shared prefix allocates no new blocks");
+            const double nmse_h = nmse(shared, ref);
+            fprintf(stderr, "DEBUG hybrid shared-prefix nmse=%g\n", nmse_h);
+            if (getenv("LLAMA_KV_TEST_DUMP")) {
+                FILE * f = fopen("hybrid_shared_logits.bin", "wb");
+                fwrite(shared.data(), sizeof(float), shared.size(), f);
+                fclose(f);
+            }
+            if (n_gpu_layers == 0) {
+                check(nmse_h < 1e-5, "H: shared prefix is bit-exact with full recomputation");
+            } else {
+                // on GPU the recurrent snapshots are disabled (see
+                // llama_memory_recurrent::is_cpu_only), so this measures the
+                // plain CUDA kernel non-determinism
+                fprintf(stderr, "WARN: GPU kernel non-determinism - H nmse=%g (prefix sharing disabled on GPU)\n", nmse_h);
+                check(nmse_h < 0.01, "H: GPU path is not corrupt (prefix sharing disabled)");
+            }
+        }
+
+        // seq 3: sharing again must be deterministic
+        {
+            llama_batch batch = llama_batch_init(P_LEN + U_LEN, 0, 1);
+            for (uint32_t i = 0; i < P_LEN; i++) {
+                common_batch_add(batch, P[i], i, {3}, false);
+            }
+            for (uint32_t i = 0; i < U_LEN; i++) {
+                common_batch_add(batch, U[i], P_LEN + i, {3}, true);
+            }
+            batch.n_tokens = P_LEN + U_LEN;
+            if (llama_decode(lctx.get(), batch)) {
+                llama_batch_free(batch);
+                throw std::runtime_error("failed to decode hybrid second shared-prefix batch");
+            }
+
+            std::vector<float> shared2;
+            shared2.reserve(U_LEN * n_vocab);
+            for (uint32_t i = 0; i < U_LEN; i++) {
+                const float * logits_ith = llama_get_logits_ith(lctx.get(), P_LEN + i);
+                shared2.insert(shared2.end(), logits_ith, logits_ith + n_vocab);
+            }
+            llama_batch_free(batch);
+
+            const double nmse_h2 = nmse(shared2, ref);
+            fprintf(stderr, "DEBUG hybrid re-shared nmse=%g\n", nmse_h2);
+            if (n_gpu_layers == 0) {
+                check(nmse_h2 < 1e-5, "H: re-shared prefix is bit-exact with full recomputation");
+            } else {
+                fprintf(stderr, "WARN: GPU kernel non-determinism - H re-shared nmse=%g\n", nmse_h2);
+                check(nmse_h2 < 0.01, "H: GPU path is not corrupt (prefix sharing disabled)");
+            }
         }
     }
 

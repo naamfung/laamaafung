@@ -84,6 +84,10 @@ public:
     llama_kv_cache * get_mem_attn() const;
     llama_memory_recurrent * get_mem_recr() const;
 
+    // hybrid prefix sharing: skip the recurrent recomputation of shared
+    // prefix chunks and share the attention blocks (paged path only)
+    void setup_prefix_sharing(llama_batch_allocr & balloc);
+
 private:
     const llama_hparams & hparams;
 

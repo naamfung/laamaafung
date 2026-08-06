@@ -3408,6 +3408,49 @@ llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const
     return (llm_graph_input_mem_hybrid_k *) res->add_input(std::move(inp));
 }
 
+// append the ops that copy the recurrent R/S state of the current ubatch
+// into the chunk snapshot slots scheduled by apply(); called right after a
+// recurrent layer's state write-back so the copy source is the written-back
+// state tensor itself - the data dependency then guarantees the snapshot
+// runs after the write on every backend (no reliance on node ordering)
+void llm_graph_context::build_rs_snapshots_store(ggml_tensor * new_state, ggml_tensor * states_all, int32_t il, bool is_conv) const {
+    const auto * mctx_hybrid = dynamic_cast<const llama_memory_hybrid_context *>(mctx);
+    if (mctx_hybrid == nullptr) {
+        return; // recurrent snapshot stores only apply to hybrid models
+    }
+    const auto * recr = mctx_hybrid->get_recr();
+
+    const auto & writes = recr->get_snap_writes();
+    if (writes.empty()) {
+        return;
+    }
+
+    const uint32_t row_count = states_all->ne[0];
+    const size_t row_size = states_all->nb[1];
+
+    for (const auto & w : writes) {
+        // the scheduled seq offset matches the seq index in the state tensor
+        // (both are the position of the sequence within the ubatch)
+        const uint32_t seq_off = w.seq_off;
+        const uint32_t dst_col = recr->snap_col(w.slot);
+
+        ggml_tensor * src;
+        if (is_conv) {
+            // conv state [kernel-1, channels, n_seqs] -> slice out seq
+            src = ggml_view_2d(ctx0, new_state, new_state->ne[0], new_state->ne[1], new_state->nb[1], (size_t) seq_off * new_state->nb[2]);
+        } else {
+            // ssm state [S, S, H, n_seqs] -> slice out seq
+            src = ggml_view_3d(ctx0, new_state,
+                    new_state->ne[0], new_state->ne[1], new_state->ne[2],
+                    new_state->nb[1], new_state->nb[2], (size_t) seq_off * new_state->nb[3]);
+        }
+
+        ggml_tensor * dst = ggml_view_2d(ctx0, states_all, row_count, 1, states_all->nb[1], (size_t) dst_col * row_size);
+
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, src, dst));
+    }
+}
+
 llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_iswa_context *>(mctx);
 
