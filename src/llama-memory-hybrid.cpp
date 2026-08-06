@@ -197,12 +197,6 @@ void llama_memory_hybrid::setup_prefix_sharing(llama_batch_allocr & balloc) {
         return; // prefix sharing requires the paged attention cache
     }
 
-    // snapshot writes into the recurrent state tensors are only reliable on
-    // the CPU backend (see llama_memory_recurrent::is_cpu_only)
-    if (!mem_recr->is_cpu_only()) {
-        return;
-    }
-
     const uint32_t block_size = paged->block_size;
     mem_recr->block_size = block_size;
     mem_recr->clear_snap_restore();
@@ -463,6 +457,10 @@ bool llama_memory_hybrid_context::apply() {
     res = res & ctx_recr->apply();
 
     return res;
+}
+
+void llama_memory_hybrid_context::flush_snapshots() {
+    ctx_recr->flush_snapshots();
 }
 
 llama_memory_status llama_memory_hybrid_context::get_status() const {

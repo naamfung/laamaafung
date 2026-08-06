@@ -1296,7 +1296,12 @@ llama_memory_recurrent_context::llama_memory_recurrent_context(
         llama_memory_recurrent * mem,
         std::vector<llama_ubatch> ubatches) : status(LLAMA_MEMORY_STATUS_SUCCESS), mem(mem), ubatches(std::move(ubatches)) {}
 
-llama_memory_recurrent_context::~llama_memory_recurrent_context() = default;
+llama_memory_recurrent_context::~llama_memory_recurrent_context() {
+    if (ctx_tmp != nullptr) {
+        ggml_free(ctx_tmp);
+        ctx_tmp = nullptr;
+    }
+}
 
 bool llama_memory_recurrent_context::next() {
     assert(status == LLAMA_MEMORY_STATUS_SUCCESS);
@@ -1324,6 +1329,57 @@ bool llama_memory_recurrent_context::apply() {
     schedule_snap_writes();
 
     return true;
+}
+
+// copy the scheduled recurrent state snapshots into the snapshot region; called
+// after the ubatch graph has been computed. a plain backend copy (instead of a
+// graph op writing into an input-tensor view) guarantees the write executes on
+// every backend, including CUDA where unconsumed graph writes are unreliable.
+void llama_memory_recurrent_context::flush_snapshots() {
+    if (snap_writes.empty() || mem->n_snap == 0) {
+        return;
+    }
+
+    // scratch context for the per-copy source/destination view tensors; rebuilt
+    // on every call so the view allocations do not accumulate
+    if (ctx_tmp != nullptr) {
+        ggml_free(ctx_tmp);
+    }
+    ggml_init_params params = { /*.mem_size =*/ 64*1024*1024, /*.mem_buffer =*/ nullptr, /*.no_alloc =*/ true };
+    ctx_tmp = ggml_init(params);
+    if (ctx_tmp == nullptr) {
+        return;
+    }
+
+    const uint32_t head = mem->head;
+    const int32_t n_layer = (int32_t) mem->r_l.size();
+
+    auto copy_state_col = [&](ggml_tensor * t, uint32_t src_col, uint32_t dst_col) {
+        ggml_tensor * src = ggml_view_2d(ctx_tmp, t, t->ne[0], 1, t->nb[1], (size_t) src_col * t->nb[1]);
+        ggml_tensor * dst = ggml_view_2d(ctx_tmp, t, t->ne[0], 1, t->nb[1], (size_t) dst_col * t->nb[1]);
+        // views created in a no-alloc context carry a null buffer; inherit the
+        // parent tensor's buffer so the backend copy can locate the memory
+        src->buffer = t->buffer;
+        dst->buffer = t->buffer;
+        ggml_backend_tensor_copy(src, dst);
+    };
+
+    for (const auto & w : snap_writes) {
+        const uint32_t src_col = head + w.seq_off;
+        const uint32_t dst_col = mem->snap_col(w.slot);
+
+        for (int32_t il = 0; il < n_layer; ++il) {
+            ggml_tensor * r = mem->r_l[il];
+            if (r != nullptr) {
+                copy_state_col(r, src_col, dst_col);
+            }
+
+            ggml_tensor * s = mem->s_l[il];
+            if (s != nullptr) {
+                copy_state_col(s, src_col, dst_col);
+            }
+        }
+    }
 }
 
 // schedule a snapshot write for every sequence whose last token in the current

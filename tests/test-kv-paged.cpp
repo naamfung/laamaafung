@@ -559,8 +559,8 @@ int main(int argc, char ** argv) {
                 // on GPU the recurrent snapshots are disabled (see
                 // llama_memory_recurrent::is_cpu_only), so this measures the
                 // plain CUDA kernel non-determinism
-                fprintf(stderr, "WARN: GPU kernel non-determinism - H nmse=%g (prefix sharing disabled on GPU)\n", nmse_h);
-                check(nmse_h < 0.01, "H: GPU path is not corrupt (prefix sharing disabled)");
+                fprintf(stderr, "WARN: GPU kernel non-determinism - H nmse=%g (shared prefix; CUDA kernels are not bit-exact)\n", nmse_h);
+                check(nmse_h < 0.01, "H: GPU shared prefix within tolerance");
             }
         }
 
@@ -593,7 +593,7 @@ int main(int argc, char ** argv) {
                 check(nmse_h2 < 1e-5, "H: re-shared prefix is bit-exact with full recomputation");
             } else {
                 fprintf(stderr, "WARN: GPU kernel non-determinism - H re-shared nmse=%g\n", nmse_h2);
-                check(nmse_h2 < 0.01, "H: GPU path is not corrupt (prefix sharing disabled)");
+                check(nmse_h2 < 0.01, "H: GPU shared prefix within tolerance");
             }
         }
     }

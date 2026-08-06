@@ -182,22 +182,6 @@ public:
         return block_size;
     }
 
-    // the recurrent snapshot copies write into the r_l/s_l tensor columns; on
-    // GPU backends the graph scheduler does not reliably execute writes into
-    // input-tensor views that are not consumed by the rest of the graph, so
-    // prefix sharing is only enabled when the recurrent state lives on the CPU
-    bool is_cpu_only() const {
-        if (ctxs_bufs.empty()) {
-            return true;
-        }
-        for (const auto & [_, buf] : ctxs_bufs) {
-            if (ggml_backend_buffer_get_type(buf.get()) != ggml_backend_cpu_buffer_type()) {
-                return false;
-            }
-        }
-        return true;
-    }
-
 private:
     //const llama_model & model;
     const llama_hparams & hparams;
@@ -264,6 +248,11 @@ public:
         return snap_writes;
     }
 
+    // copy the scheduled recurrent state snapshots into the snapshot region.
+    // called after the ubatch graph has been computed; a plain backend copy
+    // (instead of a graph op) guarantees the write executes on every backend.
+    void flush_snapshots() override;
+
     uint32_t snap_col(int32_t slot) const {
         return mem->snap_col(slot);
     }
@@ -283,6 +272,10 @@ private:
 
     // filled by apply() for the current ubatch, consumed by the graph builder
     std::vector<llama_memory_recurrent::snap_write> snap_writes;
+
+    // small no-alloc context used to build the source/destination view tensors
+    // for flush_snapshots()
+    struct ggml_context * ctx_tmp = nullptr;
 
     void schedule_snap_writes();
 

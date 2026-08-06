@@ -73,6 +73,11 @@ struct llama_memory_context_i {
     // TurboQuant InnerQ: get per-channel scale_inv tensor for Q/V equalization
     // Returns nullptr when InnerQ is not active. Override in KV cache contexts.
     virtual ggml_tensor * get_turbo_innerq_scale_inv() const { return nullptr; }
+
+    // after the graph for the current ubatch has been computed, copy the
+    // recurrent state snapshots scheduled by apply() into the snapshot region
+    // (used by hybrid prefix sharing). default: no-op.
+    virtual void flush_snapshots() {}
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;

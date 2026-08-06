@@ -494,9 +494,6 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
         cb(conv_state_update, "conv_state_update", il);
 
         ggml_build_forward_expand(gf, ggml_cpy(ctx0, conv_state_last, conv_state_update));
-
-        // chunk state snapshots for hybrid prefix sharing (conv state)
-        build_rs_snapshots_store(conv_state_last, conv_states_all, il, /*is_conv=*/ true);
     } else {
         // [TAG_RECURRENT_ROLLBACK_SPLITS]
         // this logic assumes that the last (n_rs_seq + 1) tokens of a sequence in a batch are inside
@@ -559,9 +556,6 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
                 ggml_cpy(ctx0, new_state,
                     ggml_view_2d(ctx0, ssm_states_all, hparams.n_embd_s(), n_seqs, ssm_states_all->nb[1],
                         kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
-
-        // chunk state snapshots for hybrid prefix sharing (ssm state)
-        build_rs_snapshots_store(new_state, ssm_states_all, il, /*is_conv=*/ false);
 
         return output;
     }

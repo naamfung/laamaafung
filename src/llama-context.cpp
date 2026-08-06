@@ -1595,6 +1595,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
+    // copy the recurrent chunk snapshots scheduled by apply() into the
+    // snapshot region (hybrid prefix sharing; the graph itself does not write
+    // the unconsumed snapshot columns). synchronize first so the state
+    // write-backs from the graph are visible to the backend copy.
+    if (mctx) {
+        ggml_backend_sched_synchronize(sched.get());
+        mctx->flush_snapshots();
+    }
+
     ret = GGML_STATUS_SUCCESS;
 
     return res;
