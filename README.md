@@ -438,9 +438,12 @@ Anthropic 客戶端範例（`/v1/messages`）：
 ./llama-server -m model.gguf -c 32768 -np 4 --cache-prompt --cache-dir ./cache-files ...
 ```
 
-- 手动控制（可选，空闲时执行；load 会清空当前池，有请求处理中时自动排队等待）：
+- 手动控制（默认关闭，需 `--cache-endpoint` 或环境变量 `LLAMA_ARG_ENDPOINT_CACHE` 开启；空闲时执行，load 会清空当前池，有请求处理中时自动排队等待）：
 
 ```sh
+# 启动时开启端点
+LLAMA_ARG_ENDPOINT_CACHE=1 ./llama-server ...   # 或 --cache-endpoint
+
 curl -X POST localhost:8080/cache/save -d '{"path":"/path/prefix-cache.bin"}'
 # 重启 server 后
 curl -X POST localhost:8080/cache/load -d '{"path":"/path/prefix-cache.bin"}'

@@ -3804,6 +3804,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_METRICS"));
     add_opt(common_arg(
+        {"--cache-endpoint"},
+        "enable the /cache/save and /cache/load endpoints (default: disabled - use --cache-dir for automatic persistence)",
+        [](common_params & params) {
+            params.endpoint_cache = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_CACHE"));
+    add_opt(common_arg(
         {"--props"},
         string_format("enable changing global properties via POST /props (default: %s)", params.endpoint_props ? "enabled" : "disabled"),
         [](common_params & params) {

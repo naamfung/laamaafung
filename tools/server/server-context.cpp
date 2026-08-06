@@ -5704,9 +5704,14 @@ void server_routes::init_routes() {
         return res;
     };
 
-    // save/load the whole paged prefix cache to/from a file (main-thread task)
+    // save/load the whole paged prefix cache to/from a file (main-thread task).
+    // disabled by default - use --cache-dir for automatic persistence.
     this->post_cache_save = [this](const server_http_req & req) {
         auto res = create_response();
+        if (!params.endpoint_cache) {
+            res->error(format_error_response("This server does not support the cache endpoint. Start it with `--cache-endpoint` (or set LLAMA_ARG_ENDPOINT_CACHE)", ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
         json body;
         try {
             body = json::parse(req.body);
@@ -5745,6 +5750,10 @@ void server_routes::init_routes() {
 
     this->post_cache_load = [this](const server_http_req & req) {
         auto res = create_response();
+        if (!params.endpoint_cache) {
+            res->error(format_error_response("This server does not support the cache endpoint. Start it with `--cache-endpoint` (or set LLAMA_ARG_ENDPOINT_CACHE)", ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
         json body;
         try {
             body = json::parse(req.body);
