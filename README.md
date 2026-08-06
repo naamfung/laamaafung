@@ -405,6 +405,66 @@ Anthropic 客戶端範例（`/v1/messages`）：
 
 ---
 
+## v15 Paged KV Cache（vLLM 风格分页 KV 缓存）
+
+v15 分支默认启用 vLLM 风格的分页（paged）KV cache：K/V 按固定大小 block 分配，支持跨请求前缀共享、LRU 驱逐、swap 抢占、KV 量化与 CUDA Graph。可用 `LLAMA_KV_LEGACY=1` 环境变量切回旧式连续缓存。
+
+### 核心能力
+
+| 能力 | 说明 |
+|---|---|
+| 前缀共享（APC） | hash 链匹配，跨请求/跨 slot 复用相同前缀的 KV 块（含不满尾块）；配合 `--cache-prompt` |
+| 跨重启持久化 | `POST /cache/save` + `POST /cache/load` 整池落盘，模型指纹校验，重启后同前缀 prompt 免重算 |
+| Preemption | 池满时按（优先级, LRU）选 victim：swap（存 CPU 内存，`LLAMA_KV_SWAP_COMPRESS=1` 启用压缩）或驱逐重算 |
+| 超池降级 | 并发长 prompt 超出池容量时串行排队执行（不整批 500、不崩溃，生成中请求不中断） |
+| KV 量化 | `--cache-type-k/--cache-type-v`（f16/bf16/turbo2/3/4/q8_0/q4_0 等），约省 50% 显存 |
+| CUDA Graph | 默认兼容开启；`LLAMA_KV_PAGED_DISABLE_GRAPHS=1` 禁用 |
+| 可观测性 | `/metrics` 默认启用：`kv_blocks_total/free/used/cached`、`kv_cache_usage`、`kv_swapped_tokens`、`kv_preempt_count`、`kv_swap_out/in_count` |
+
+### 正确使用
+
+```sh
+# 推荐：开启缓存复用 + 量化 + metrics
+./llama-server -m model.gguf -c 32768 -np 4 \
+  --cache-prompt --metrics \
+  --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on    # 量化 V 必须开 flash-attn
+```
+
+- 池容量 = `n_ctx`（每 slot 分配 `n_ctx/n_parallel`）；并发 prompt 总需求超过池时自动降级为串行执行。
+- KV 量化：量化 V（q8_0/q4_0/turbo 等）必须 `--flash-attn on`；浮点（f16/bf16）无此限制。
+- 跨重启复用（空闲时执行；load 会清空当前池，有请求处理中时自动排队等待）：
+
+```sh
+curl -X POST localhost:8080/cache/save -d '{"path":"/path/prefix-cache.bin"}'
+# 重启 server 后
+curl -X POST localhost:8080/cache/load -d '{"path":"/path/prefix-cache.bin"}'
+```
+
+- 回归验证：`./test-kv-paged.exe -fa 0`（dense mock + 共享/swap/量化/持久化场景全过，约 40 项）。
+
+### 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `LLAMA_KV_LEGACY=1` | 切回旧式连续 KV 缓存 |
+| `LLAMA_KV_BLOCK_SIZE` | 覆盖自适应 block size（默认按 n_embd_k 自动选择） |
+| `LLAMA_KV_PAGED_DISABLE_GRAPHS=1` | 禁用 CUDA Graph 路径 |
+| `LLAMA_KV_SWAP_COMPRESS=1` | swap 时无损压缩 K/V（默认不压缩，对齐 vLLM） |
+| `LLAMA_KV_RS_SNAPSHOTS` | hybrid 模型 recurrent 快照数（默认 32） |
+
+### 生产级差距（与原始 vLLM 对比）
+
+**单卡 + 常规负载下已可生产使用**（正确性有测试背书，超池降级与磁盘持久化已补齐）。剩余差距均为工程/调度细化：
+
+- 调度器语义（P2）：无 vLLM 的 waiting/running/swapped 显式队列与可配抢占；超池降级为「串行 defer」尽力调度。
+- kernel 读侧（P3，未量化）：attention 读取遍历已用物理跨度（含空洞），vLLM 按 block table 精确索引；收益未基准。
+- 部署工程（P3）：无多 GPU/分布式块管理；无 per-request 级观测。
+- hybrid 模型跨重启共享：recurrent 快照不落盘，重启后依赖 slot 复用（dense 模型完整生效）。
+
+详细设计与验证记录见 `v15-implementation-report.md` 第 8 节。
+
+---
+
 ## 编程代理
 
 ### Klaude Code
