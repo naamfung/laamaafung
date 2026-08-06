@@ -143,6 +143,21 @@ struct llama_memory_i {
         (void) priority;
     }
 
+    // mark a seq as protected: it must never be preempted (its owner still has
+    // work for it queued). default implementation ignores it (non-paged
+    // caches). protected seqs also do not count as preemption capacity in the
+    // pool budget check, so an over-capacity batch fails cleanly instead of
+    // preempting a seq the caller will need again.
+    virtual void seq_protect(llama_seq_id seq_id, bool protect) {
+        (void) seq_id;
+        (void) protect;
+    }
+
+    // true if the last batch was refused because the pool is over capacity
+    // (rather than an actual context-length overflow). lets the caller
+    // distinguish "wait for pool space" from "request too large to ever run".
+    virtual bool pool_is_full() const { return false; }
+
     // paged cache prefix lookup: returns the number of matching tokens (a
     // multiple of block_size) for the given token sequence, 0 on miss or for
     // non-paged memory. Only fully-filled blocks participate in matching.

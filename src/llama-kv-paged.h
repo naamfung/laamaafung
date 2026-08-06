@@ -97,6 +97,11 @@ public:
     uint32_t find_prefix (const llama_token * tokens, uint32_t n) const override;
     uint32_t share_prefix(llama_seq_id seq_id, const llama_token * tokens, uint32_t n) override;
 
+    // pool capacity check for a raw batch (no prefix sharing applied). used by
+    // llama_memory_hybrid BEFORE it shares, so an over-capacity batch fails
+    // cleanly without leaving shared-state residue.
+    bool budget_fits(const llama_batch & batch) const;
+
     // chain hash of the block at block_idx of seq_id (0 when unavailable);
     // used to budget recurrent chunk snapshots for running sequences that
     // complete a block mid-generation
@@ -110,6 +115,8 @@ public:
     // preemption priority: higher values are retained longer under capacity
     // pressure; the lowest-priority seq is preempted first (ties by LRU)
     void seq_set_priority(llama_seq_id seq_id, int32_t priority) override;
+    void seq_protect(llama_seq_id seq_id, bool protect) override;
+    bool pool_is_full() const override { return last_budget_failed; }
     uint32_t n_swapped_tokens() const;
 
     // metrics for monitoring
@@ -209,6 +216,18 @@ private:
     // stays in use and does not immediately yield a free block - the caller
     // (alloc_block) loops until something frees up.
     bool preempt_one(llama_seq_id exclude_seq);
+
+    // seqs that must never be preempted (their owner still has queued work)
+    std::set<llama_seq_id> protected_seqs;
+
+    // set when the last init_batch/prepare was refused due to pool capacity
+    mutable bool last_budget_failed = false;
+
+    // true if the pool can hold all block additions of the given ubatches
+    // (used + additions <= n_blocks). checked before processing a batch so an
+    // over-capacity batch fails cleanly with FAILED_PREPARE instead of
+    // throwing mid-batch (callers retry with a smaller batch).
+    bool pool_budget_fits(const std::vector<llama_ubatch> & ubatches) const;
 
     // release a block: ref_count-- and on 0 move to cached set (keep hash for reuse)
     void release_block(uint32_t block_id);

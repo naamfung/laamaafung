@@ -173,6 +173,7 @@ bool llama_kv_paged_cache::preempt_one(llama_seq_id exclude_seq) {
     for (auto & [sid, bt] : block_tables) {
         if (sid == exclude_seq) continue;
         if (in_flight_seqs.count(sid)) continue;
+        if (protected_seqs.count(sid)) continue;
         if (bt.empty()) continue;
         const auto pit = seq_priorities.find(sid);
         const int32_t prio = pit != seq_priorities.end() ? pit->second : 0;
@@ -299,6 +300,9 @@ void llama_kv_paged_cache::may_append(llama_seq_id seq_id, llama_pos pos) {
         if ((uint32_t) pos != bt.size() * block_size) {
             LLAMA_LOG_ERROR("%s: seq %d non-contiguous pos %d, bt.size()=%zu, block_size=%u\n",
                     __func__, seq_id, (int) pos, bt.size(), block_size);
+            auto sit = swapped_seqs.find(seq_id);
+            LLAMA_LOG_ERROR("  swapped=%d seq_len=%u is_swapped_mem=%d\n",
+                    (int) (sit != swapped_seqs.end()), seq_length(seq_id), (int) llama_memory_is_swapped(this, seq_id));
         }
         GGML_ASSERT((uint32_t) pos == bt.size() * block_size && "paged cache: non-contiguous positions are not supported");
         bt.push_back(alloc_block(seq_id));
@@ -367,12 +371,21 @@ void llama_kv_paged_cache::dealloc_seq(llama_seq_id seq_id) {
     }
     block_tables.erase(it);
     seq_priorities.erase(seq_id);
+    protected_seqs.erase(seq_id);
 }
 
 void llama_kv_paged_cache::seq_set_priority(llama_seq_id seq_id, int32_t priority) {
     // keep the entry even for default priority so a later seq_id reuse does
     // not inherit a stale priority (dealloc_seq erases it on release)
     seq_priorities[seq_id] = priority;
+}
+
+void llama_kv_paged_cache::seq_protect(llama_seq_id seq_id, bool protect) {
+    if (protect) {
+        protected_seqs.insert(seq_id);
+    } else {
+        protected_seqs.erase(seq_id);
+    }
 }
 
 uint32_t llama_kv_paged_cache::cell_index(llama_seq_id seq_id, llama_pos pos) const {
@@ -1010,6 +1023,28 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
         }
     }
 
+    // refuse batches that cannot fit the pool: every seq here is in-flight so
+    // preemption cannot free blocks, and throwing mid-batch would abort the
+    // whole decode. FAILED_PREPARE lets llama_decode (and the server, which
+    // retries with a smaller batch) degrade gracefully instead. the sharing
+    // above must be undone first so the failed batch leaves no residue.
+    if (!pool_budget_fits(filtered_ubatches)) {
+        last_budget_failed = true;
+        for (auto & [seq_id, hit] : hit_lens) {
+            auto bt_it = block_tables.find(seq_id);
+            if (bt_it == block_tables.end()) {
+                continue;
+            }
+            for (uint32_t blk : bt_it->second) {
+                release_block(blk);
+            }
+            block_tables.erase(bt_it);
+        }
+        in_flight_seqs.clear();
+        return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+    }
+    last_budget_failed = false;
+
     // track first modified block per seq for post-batch hashing.
     // unlike "first new block", this also covers the case where a previously
     // partial block becomes full during decode - essential for incremental
@@ -1035,6 +1070,98 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
     }
 
     return std::make_unique<llama_kv_cache_context>(this, std::move(sinfos), std::move(filtered_ubatches));
+}
+
+bool llama_kv_paged_cache::budget_fits(const llama_batch & batch) const {
+    last_budget_failed = false;
+    std::unordered_map<llama_seq_id, uint32_t> end_block;
+    for (uint32_t i = 0; i < batch.n_tokens; ++i) {
+        for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+            const llama_seq_id sid = batch.seq_id[i][s];
+            const uint32_t eb = (uint32_t) batch.pos[i] / block_size;
+            auto it = end_block.find(sid);
+            if (it == end_block.end() || eb > it->second) {
+                end_block[sid] = eb;
+            }
+        }
+    }
+
+    uint32_t needed = 0;
+    for (auto & [sid, eb] : end_block) {
+        uint32_t have = 0;
+        auto bt_it = block_tables.find(sid);
+        if (bt_it != block_tables.end()) {
+            have = (uint32_t) bt_it->second.size();
+        }
+        if (eb + 1 > have) {
+            needed += (eb + 1) - have;
+        }
+    }
+
+    uint32_t available = n_blocks - (uint32_t) used_block_ids.size();
+    if (needed <= available) {
+        return true;
+    }
+    uint32_t gap = needed - available;
+    uint32_t preemptible = 0;
+    for (auto & [sid, bt] : block_tables) {
+        if (!in_flight_seqs.count(sid) && !protected_seqs.count(sid)) {
+            preemptible += (uint32_t) bt.size();
+        }
+    }
+    if (gap > preemptible) {
+        last_budget_failed = true;
+    }
+    return gap <= preemptible;
+}
+
+bool llama_kv_paged_cache::pool_budget_fits(const std::vector<llama_ubatch> & ubatches) const {
+    last_budget_failed = false;
+    // worst-case per-seq end block across all ubatches
+    std::unordered_map<llama_seq_id, uint32_t> end_block;
+    for (auto & ub : ubatches) {
+        for (uint32_t i = 0; i < ub.n_tokens; ++i) {
+            const llama_seq_id sid = ub.seq_id[i][0];
+            const uint32_t eb = (uint32_t) ub.pos[i] / block_size;
+            auto it = end_block.find(sid);
+            if (it == end_block.end() || eb > it->second) {
+                end_block[sid] = eb;
+            }
+        }
+    }
+
+    // additions = (end block + 1) - blocks the seq already holds
+    uint32_t needed = 0;
+    for (auto & [sid, eb] : end_block) {
+        uint32_t have = 0;
+        auto bt_it = block_tables.find(sid);
+        if (bt_it != block_tables.end()) {
+            have = (uint32_t) bt_it->second.size();
+        }
+        if (eb + 1 > have) {
+            needed += (eb + 1) - have;
+        }
+    }
+
+    // cached blocks are evictable and non-in-flight live seqs can be preempted,
+    // so both free up pool capacity for the additions. only when even that is
+    // insufficient does the batch fail cleanly (FAILED_PREPARE) instead of
+    // throwing mid-batch.
+    uint32_t available = n_blocks - (uint32_t) used_block_ids.size();
+    if (needed <= available) {
+        return true;
+    }
+    uint32_t gap = needed - available;
+    uint32_t preemptible = 0;
+    for (auto & [sid, bt] : block_tables) {
+        if (!in_flight_seqs.count(sid) && !protected_seqs.count(sid)) {
+            preemptible += (uint32_t) bt.size();
+        }
+    }
+    if (gap > preemptible) {
+        last_budget_failed = true;
+    }
+    return gap <= preemptible;
 }
 
 llama_kv_cache::slot_info llama_kv_paged_cache::process_ubatch(
@@ -1184,6 +1311,7 @@ void llama_kv_paged_cache::clear(bool data) {
         free_block_ids.push_back(i);
     }
     block_tables.clear();
+    protected_seqs.clear();
     swapped_seqs.clear();
     swap_backends_used.clear();
 

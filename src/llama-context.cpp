@@ -4258,6 +4258,22 @@ void llama_memory_seq_set_priority(llama_memory_t mem, llama_seq_id seq_id, int3
     mem->seq_set_priority(seq_id, priority);
 }
 
+void llama_memory_seq_protect(llama_memory_t mem, llama_seq_id seq_id, bool protect) {
+    if (!mem) {
+        return;
+    }
+
+    mem->seq_protect(seq_id, protect);
+}
+
+bool llama_memory_pool_is_full(llama_memory_t mem) {
+    if (!mem) {
+        return false;
+    }
+
+    return mem->pool_is_full();
+}
+
 uint32_t llama_memory_find_prefix(llama_memory_t mem, const llama_token * tokens, uint32_t n_tokens) {
     if (!mem || !tokens || n_tokens == 0) {
         return 0;

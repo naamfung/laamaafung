@@ -813,6 +813,8 @@ extern "C" {
     // pressure; the lowest-priority seq is preempted first (ties by LRU).
     // Non-paged caches ignore it.
     LLAMA_API void llama_memory_seq_set_priority(llama_memory_t mem, llama_seq_id seq_id, int32_t priority);
+    LLAMA_API void llama_memory_seq_protect(llama_memory_t mem, llama_seq_id seq_id, bool protect);
+    LLAMA_API bool llama_memory_pool_is_full(llama_memory_t mem);
 
     // Paged cache prefix lookup: returns the number of tokens in the longest
     // matching prefix that is already cached (a multiple of block_size).

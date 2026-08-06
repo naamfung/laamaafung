@@ -1147,6 +1147,16 @@ public:
 
     server_state_callback_t callback_state = [](server_state, json) -> void {};
 
+    // consecutive update_slots rounds where the paged pool stayed full and the
+    // batch was deferred. reset on any successful decode. caps the wait so a
+    // truly unrunnable workload (single request larger than the whole pool)
+    // fails cleanly instead of hanging forever.
+    int defer_count = 0;
+
+    // slots excluded from prompt batching because the paged pool was full
+    // (serial fallback). cleared on the next successful decode.
+    std::set<int32_t> pool_deferred_slots;
+
     server_context_impl() {
         mtmd_helper_log_set(common_log_default_callback, nullptr);
     }
@@ -3611,8 +3621,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
     void update_slots() {
 #ifdef DEBUG_TIMINGS
-        static int64_t t_prev = 0;
-        int64_t t_start = ggml_time_us();
+        static int64_t t_prev = 0;        int64_t t_start = ggml_time_us();
         if (t_start - t_prev > 5 * 1000 * 1000) { // every 5 seconds
             t_prev = t_start;
             SRV_INF("n_pre_decode      = %" PRId64 "\n", n_pre_decode);
@@ -3626,7 +3635,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         // check if all slots are idle
         {
             bool all_idle = true;
-
             for (auto & slot : slots) {
                 if (slot.is_processing()) {
                     all_idle = false;
@@ -3692,11 +3700,33 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         int32_t n_batch = llama_n_batch(ctx_tgt);
         for (int32_t off = 0; off < batch.size(); off = off_next) {
             const int32_t n_tokens = std::min(n_batch, batch.size() - off);
+            // n_batch shrank to 0 (pool full with minimal batch): stop this
+            // iteration; slots stay queued and update_slots() retries next round
+            if (n_tokens <= 0) {
+                break;
+            }
             try {
                 scoped_timer t(t_decode, n_decode);
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
 
                 batch_view = batch.get_view(off, n_tokens);
+
+                // a view that reaches a deferred slot would decode stale
+                // positions (its KV was cleared); stop and rebuild the batch
+                // next round without the deferred slots
+                bool view_has_deferred = false;
+                for (int32_t i = off; i < off + n_tokens && !view_has_deferred; ++i) {
+                    for (int32_t s = 0; s < batch_view.n_seq_id[i]; ++s) {
+                        if (pool_deferred_slots.count(batch_view.seq_id[i][s])) {
+                            view_has_deferred = true;
+                            break;
+                        }
+                    }
+                }
+                if (view_has_deferred) {
+                    break;
+                }
+
                 bool ok = decode(n_batch, off, batch_view);
 #ifdef DEBUG_TIMINGS
                 llama_synchronize(ctx_tgt);
@@ -3733,6 +3763,18 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         // scheduler: restore swapped-out slots and reserve capacity for the
         // next token in priority order (see llama_server_scheduler)
         llama_server_scheduler::pre_decode_prepare(slots, llama_get_memory(ctx_tgt));
+
+        // protect every active slot from preemption: their requests still have
+        // queued work, so a reactive preempt (swap-out) would strand them (the
+        // pool budget then only counts evictable cached blocks, so an
+        // over-capacity batch fails cleanly instead of preempting a slot the
+        // next batch still needs)
+        llama_memory_t mem = llama_get_memory(ctx_tgt);
+        for (auto & slot : slots) {
+            // protect active slots; release the protection of idle ones so
+            // their cached blocks count as preemption capacity again
+            llama_memory_seq_protect(mem, slot.id, slot.is_processing());
+        }
 
         // detect paged-cache preemption before any other work: another slot's
         // alloc_block may have evicted some of this slot's tail KV positions.
@@ -4006,6 +4048,16 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             iterate(slots, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
+                }
+
+                if (pool_deferred_slots.count(slot.id)) {
+                    if (!slot.is_processing()) {
+                        // the deferred request finished/cancelled while the
+                        // pool was full; allow the slot id to be reused
+                        pool_deferred_slots.erase(slot.id);
+                    } else {
+                        return; // wait for pool space
+                    }
                 }
 
                 if (!slot.is_processing()) {
@@ -4545,11 +4597,88 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
         metrics.on_decoded(slots);
 
+        if (ret == 0) {
+            defer_count = 0;
+            pool_deferred_slots.clear();
+        }
+
         if (ret != 0) {
             {
                 std::string err;
 
-                if (n_batch == 1 && ret == 1) {
+                // paged pool over capacity (any batch size): defer all slots of
+                // this batch except the first, so the kept one can finish and
+                // free pool blocks (serial fallback). the wait is capped: if
+                // the pool never drains, fail cleanly.
+                if (ret == 1 && llama_memory_pool_is_full(llama_get_memory(ctx_tgt))) {
+                    // free the KV of idle slots first (their cached prompt is
+                    // kept for reuse but the pool is full; active slots win)
+                    bool purged = false;
+                    for (auto & slot : slots) {
+                        if (!slot.is_processing() && slot.prompt.n_tokens() > 0) {
+                            common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
+                            slot.prompt_clear();
+                            SRV_WRN("paged pool full: purged idle slot %d\n", slot.id);
+                            purged = true;
+                        }
+                    }
+                    if (purged) {
+                        if (!try_clear_idle_slots()) {
+                            n_batch /= 2;
+                        }
+                        return false;
+                    }
+                    if (batch_view.n_tokens > 0) {
+                        std::set<int32_t> in_batch;
+                        for (int32_t i = 0; i < batch_view.n_tokens; ++i) {
+                            for (int32_t s = 0; s < batch_view.n_seq_id[i]; ++s) {
+                                in_batch.insert(batch_view.seq_id[i][s]);
+                            }
+                        }
+                        const int32_t first = batch_view.seq_id[0][0];
+                        bool added = false;
+                        for (auto id : in_batch) {
+                            if (id != first && !pool_deferred_slots.count(id)) {
+                                // never defer a generating slot: its decode must
+                                // keep progressing or the batch would stall
+                                bool generating = false;
+                                for (auto & slot : slots) {
+                                    if (slot.id == id && slot.state == SLOT_STATE_GENERATING) {
+                                        generating = true;
+                                        break;
+                                    }
+                                }
+                                if (generating) {
+                                    continue;
+                                }
+                                pool_deferred_slots.insert(id);
+                                // free the deferred slot's blocks so the kept
+                                // slot can finish and drain the pool; the
+                                // deferred slot replays its prompt on re-entry
+                                common_context_seq_rm(ctx_tgt, id, -1, -1);
+                                added = true;
+                            }
+                        }
+                        if (added) {
+                            SRV_WRN("paged pool full: deferring %zu slots, keeping %d\n", pool_deferred_slots.size(), first);
+                            if (!try_clear_idle_slots()) {
+                                n_batch /= 2;
+                            }
+                            return false;
+                        }
+                    }
+                    defer_count++;
+                    SRV_WRN("paged pool is full, deferring batch (off = %d, defer #%d)\n", off, defer_count);
+                    if (defer_count < 300) {
+                        if (!try_clear_idle_slots()) {
+                            n_batch /= 2;
+                        }
+                        return false;
+                    }
+                    err = "KV pool over capacity: the active prompts cannot fit the cache; retry with fewer concurrent requests or a shorter prompt.";
+                }
+
+                if (n_batch == 1 && ret == 1 && err.empty()) {
                     // TODO: try to terminate only the largest active slot/sequence and continue with the rest
                     //       need to remove the tokens from the current batch too
                     err = "Context size has been exceeded.";

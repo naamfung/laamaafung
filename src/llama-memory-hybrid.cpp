@@ -122,12 +122,46 @@ llama_memory_hybrid::llama_memory_hybrid(
     )) {}
 
 llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
+    // sequences that were fresh (no KV) before setup_prefix_sharing; if the
+    // batch fails after sharing, their shared blocks/snapshots must be undone
+    // so the retry path does not inherit residue
+    std::vector<llama_seq_id> fresh_seqs;
+    auto rollback_shared = [&]() {
+        for (llama_seq_id sid : fresh_seqs) {
+            if (mem_attn->seq_pos_max(sid) >= 0) {
+                mem_attn->seq_rm(sid, -1, -1);
+                mem_recr->seq_rm(sid, -1, -1);
+            }
+        }
+    };
+
     do {
         balloc.split_reset();
 
+        // pool capacity guard BEFORE sharing: setup_prefix_sharing mutates
+        // both caches (attention blocks + recurrent snapshots), and a failure
+        // after that would leave residue on the retry path
+        auto * paged = dynamic_cast<llama_kv_paged_cache *>(mem_attn.get());
+        if (paged && !paged->budget_fits(balloc.get_batch())) {
+            LLAMA_LOG_WARN("%s: batch exceeds pool capacity, refusing\n", __func__);
+            return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
         // hybrid prefix sharing: share attention blocks and recurrent state
         // snapshots for fresh sequences whose prefix was seen before
         if (!embd_all) {
+            auto * paged2 = dynamic_cast<llama_kv_paged_cache *>(mem_attn.get());
+            if (paged2 != nullptr) {
+                const llama_batch & batch = balloc.get_batch();
+                std::set<llama_seq_id> seen;
+                for (uint32_t i = 0; i < batch.n_tokens; ++i) {
+                    for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+                        const llama_seq_id sid = batch.seq_id[i][s];
+                        if (seen.insert(sid).second && paged2->seq_length(sid) == 0) {
+                            fresh_seqs.push_back(sid);
+                        }
+                    }
+                }
+            }
             setup_prefix_sharing(balloc);
         }
 
@@ -181,6 +215,7 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
         if (!mem_recr->prepare(ubatches)) {
             // TODO: will the recurrent cache be in an undefined context at this point?
             LLAMA_LOG_ERROR("%s: failed to prepare recurrent ubatches\n", __func__);
+            rollback_shared();
             return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
@@ -188,6 +223,7 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
         auto heads_attn = mem_attn->prepare(ubatches);
         if (heads_attn.empty()) {
             LLAMA_LOG_ERROR("%s: failed to prepare attention ubatches\n", __func__);
+            rollback_shared();
             return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
@@ -218,6 +254,7 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
                 this, std::move(heads_attn), std::move(ubatches));
     } while(false);
 
+    rollback_shared();
     return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
 }
 
@@ -398,8 +435,19 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
     mem_recr->seq_div(seq_id, p0, p1, d);
 }
 
-llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {
-    // the min of the total cache is the max of the two caches' min values.
+void llama_memory_hybrid::seq_set_priority(llama_seq_id seq_id, int32_t priority) {
+    mem_attn->seq_set_priority(seq_id, priority);
+}
+
+void llama_memory_hybrid::seq_protect(llama_seq_id seq_id, bool protect) {
+    mem_attn->seq_protect(seq_id, protect);
+}
+
+bool llama_memory_hybrid::pool_is_full() const {
+    return mem_attn->pool_is_full();
+}
+
+llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {    // the min of the total cache is the max of the two caches' min values.
     // the recurrent state is valid only at its latest position, so the combined min must
     // not report positions that the recurrent state cannot serve
     return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
