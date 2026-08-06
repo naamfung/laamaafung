@@ -743,8 +743,8 @@ struct common_params {
     bool log_json = false;
 
     std::string slot_save_path;
+    std::string cache_dir;    // auto save/load the paged prefix cache to this directory
     std::string media_path; // path to directory for loading media files
-
     float slot_prompt_similarity = 0.1f;
 
     // batched-bench params

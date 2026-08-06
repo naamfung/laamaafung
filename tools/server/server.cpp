@@ -457,6 +457,17 @@ int llama_server(common_params & params, int argc, char ** argv) {
             return 1;
         }
 
+        // auto-load the paged prefix cache on startup (fingerprint mismatch or
+        // missing file is silently skipped - the cache is an optimization only)
+        if (!params.cache_dir.empty()) {
+            const std::string cache_path = params.cache_dir + "prefix-cache.bin";
+            if (llama_state_cache_load(ctx_server.get_llama_context(), cache_path.c_str())) {
+                SRV_INF("loaded paged prefix cache from %s\n", cache_path.c_str());
+            } else {
+                SRV_WRN("no usable paged prefix cache at %s, starting cold\n", cache_path.c_str());
+            }
+        }
+
         routes.update_meta(ctx_server);
         ctx_http.is_ready.store(true);
 
@@ -510,6 +521,18 @@ int llama_server(common_params & params, int argc, char ** argv) {
 
         // this call blocks the main thread until queue_tasks.terminate() is called
         ctx_server.start_loop();
+
+        // auto-save the paged prefix cache on exit so the next startup can
+        // reuse the warmed blocks (best-effort, like the startup load)
+        if (!params.cache_dir.empty()) {
+            const std::string cache_path = params.cache_dir + "prefix-cache.bin";
+            const size_t n_bytes = llama_state_cache_save(ctx_server.get_llama_context(), cache_path.c_str());
+            if (n_bytes > 0) {
+                SRV_INF("saved paged prefix cache (%zu bytes) to %s\n", n_bytes, cache_path.c_str());
+            } else {
+                SRV_WRN("failed to save paged prefix cache to %s\n", cache_path.c_str());
+            }
+        }
 
         clean_up();
         if (ctx_http.thread.joinable()) {

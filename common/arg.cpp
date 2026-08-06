@@ -3833,6 +3833,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--cache-dir"}, "PATH",
+        "directory to auto-save the paged prefix cache on exit and auto-load on startup (default: disabled)",
+        [](common_params & params, const std::string & value) {
+            params.cache_dir = value;
+            if (!fs_is_directory(params.cache_dir)) {
+                throw std::invalid_argument("not a directory: " + value);
+            }
+            // if doesn't end with DIRECTORY_SEPARATOR, add it
+            if (!params.cache_dir.empty() && params.cache_dir[params.cache_dir.size() - 1] != DIRECTORY_SEPARATOR) {
+                params.cache_dir += DIRECTORY_SEPARATOR;
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--media-path"}, "PATH",
         "directory for loading local media files; files can be accessed via file:// URLs using relative paths (default: disabled)",
         [](common_params & params, const std::string & value) {
