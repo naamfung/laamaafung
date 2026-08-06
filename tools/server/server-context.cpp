@@ -294,6 +294,10 @@ struct server_slot {
     // detects that pos_max + 1 < prompt.n_tokens() in GENERATING state.
     int32_t n_preempt_recovery = 0;
 
+    // preemption/scheduling priority: higher values are prepared first and
+    // retained longer under capacity pressure (see llama_server_scheduler).
+    int32_t priority = 0;
+
     size_t last_nl_pos = 0;
 
     std::string  generated_text;
@@ -1054,7 +1058,8 @@ struct server_slot {
     }
 };
 
-
+// server_slot is fully defined above; the scheduler operates on it
+#include "server-scheduler.h"
 
 //
 // server_metrics
@@ -3723,34 +3728,9 @@ static bool has_visible_after(const std::string & text, size_t offset) {
     }
 
     void pre_decode() {
-        // restore any swapped-out slots before batch build. swap_in allocates
-        // new blocks and copies K/V from CPU, avoiding full recompute.
-        iterate(slots, [&](server_slot & slot) {
-            if (!slot.is_processing()) {
-                return;
-            }
-            if (llama_memory_is_swapped(llama_get_memory(ctx_tgt), slot.id)) {
-                SLT_INF(slot, "swap_in: restoring K/V from CPU swap buffer\n", "");
-                if (!llama_memory_swap_in(llama_get_memory(ctx_tgt), slot.id)) {
-                    SRV_ERR("swap_in failed for slot %d\n", slot.id);
-                }
-            }
-        });
-
-        // proactive capacity check: for each generating slot, ensure the cache
-        // has room for the next token before batch build. this avoids reactive
-        // OOM in alloc_block which would evict mid-batch. victim slots are
-        // picked up by the preemption detection loop below.
-        iterate(slots, [&](server_slot & slot) {
-            if (slot.state != SLOT_STATE_GENERATING) {
-                return;
-            }
-            const int n_freed = llama_memory_ensure_capacity(
-                    llama_get_memory(ctx_tgt), slot.id, 1);
-            if (n_freed > 0) {
-                SLT_INF(slot, "proactive preempt: freed %d block(s) for next token\n", n_freed);
-            }
-        });
+        // scheduler: restore swapped-out slots and reserve capacity for the
+        // next token in priority order (see llama_server_scheduler)
+        llama_server_scheduler::pre_decode_prepare(slots, llama_get_memory(ctx_tgt));
 
         // detect paged-cache preemption before any other work: another slot's
         // alloc_block may have evicted some of this slot's tail KV positions.
