@@ -1354,17 +1354,19 @@ bool llama_kv_paged_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p
 
     // suffix removal: p0 to end
     if ((uint32_t) p1 >= seq_len) {
-        const uint32_t start_block = p0 / block_size;
-
-        if (start_block >= bt.size()) {
-            // p0 is beyond the current sequence length: nothing left to keep
-            for (uint32_t i = 0; i < bt.size(); ++i) {
-                release_block(bt[i]);
-            }
-            bt.clear();
-            llama_kv_cache::seq_rm(seq_id, p0, p1);
+        // [p0, p1) does not intersect the cached range [0, seq_len) when
+        // p0 >= seq_len: nothing to remove. do not drop the block table here -
+        // callers like speculative accept cleanup pass pos_next which can equal
+        // seq_len, and clearing the table would make the next append start at
+        // pos 0 while the caller continues at seq_len (may_append abort).
+        if ((uint32_t) p0 >= seq_len) {
             return true;
         }
+
+        const uint32_t start_block = p0 / block_size;
+
+        // p0 < seq_len guarantees start_block < bt.size()
+        GGML_ASSERT(start_block < bt.size());
 
         const uint32_t keep_in_block = p0 % block_size;
 

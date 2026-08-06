@@ -457,6 +457,24 @@ int main(int argc, char ** argv) {
     llama_memory_seq_rm(mem, 4, -1, -1);
 
     //
+    // scenario D2: seq_rm at/past the sequence length is a no-op
+    // (speculative accept cleanup calls seq_rm(pos_next, -1); when pos_next
+    // lands exactly past a full block table the block table must survive so
+    // the next append at pos_next stays contiguous - regression for the
+    // may_append abort)
+    //
+    const uint32_t V_LEN = 2 * BS;   // exactly 2 full blocks
+    const std::vector<llama_token> V = get_tokens(V_LEN, n_vocab, 44);
+    decode(model.get(), lctx.get(), 5, V, 0, V_LEN);
+    check(llama_memory_seq_rm(mem, 5, V_LEN, -1),        "D2: seq_rm at seq_len accepted");
+    check(llama_memory_seq_pos_max(mem, 5) == V_LEN - 1, "D2: seq_rm at seq_len keeps the prefix");
+    decode(model.get(), lctx.get(), 5, V, V_LEN, 8);     // continue from seq_len
+    check(llama_memory_seq_pos_max(mem, 5) == V_LEN + 7, "D2: continuation after seq_rm no-op works");
+    check(llama_memory_seq_rm(mem, 5, V_LEN + 32, -1),   "D2: seq_rm past seq_len accepted");
+    check(llama_memory_seq_pos_max(mem, 5) == V_LEN + 7, "D2: seq_rm past seq_len keeps the prefix");
+    llama_memory_seq_rm(mem, 5, -1, -1);
+
+    //
     // scenario E: capacity pressure - eviction and swap preemption (only when the
     // cache is small enough to make n_press * W_LEN/BS exceed n_blocks_total)
     //
