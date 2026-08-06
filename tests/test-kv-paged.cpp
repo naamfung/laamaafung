@@ -202,6 +202,24 @@ int main(int argc, char ** argv) {
     int flash_attn = 1;
     bool force = false;
     bool legacy = false;
+    ggml_type cache_type_k = GGML_TYPE_F16;
+    ggml_type cache_type_v = GGML_TYPE_F16;
+
+    auto parse_kv_type = [](const char * s) -> ggml_type {
+        static const std::vector<ggml_type> types = {
+            GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16,
+            GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_IQ4_NL,
+            GGML_TYPE_Q5_0, GGML_TYPE_Q5_1,
+            GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0,
+        };
+        for (const auto t : types) {
+            if (strcmp(s, ggml_type_name(t)) == 0) {
+                return t;
+            }
+        }
+        fprintf(stderr, "unknown kv cache type: %s\n", s);
+        GGML_ABORT("unknown kv cache type");
+    };
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -214,6 +232,10 @@ int main(int argc, char ** argv) {
             n_seq_max = (uint32_t) atoi(argv[++i]);
         } else if (strcmp(argv[i], "-fa") == 0 && i + 1 < argc) {
             flash_attn = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-ctk") == 0 && i + 1 < argc) {
+            cache_type_k = parse_kv_type(argv[++i]);
+        } else if (strcmp(argv[i], "-ctv") == 0 && i + 1 < argc) {
+            cache_type_v = parse_kv_type(argv[++i]);
         } else if (strcmp(argv[i], "-force") == 0) {
             force = true;
         } else if (strcmp(argv[i], "-legacy") == 0) {
@@ -271,6 +293,8 @@ int main(int argc, char ** argv) {
     ctx_params.flash_attn_type = flash_attn == 0 ? LLAMA_FLASH_ATTN_TYPE_DISABLED
         : flash_attn == 2 ? LLAMA_FLASH_ATTN_TYPE_ENABLED
         : LLAMA_FLASH_ATTN_TYPE_AUTO;
+    ctx_params.type_k = cache_type_k;
+    ctx_params.type_v = cache_type_v;
     llama_context_ptr lctx(llama_init_from_model(model.get(), ctx_params));
     if (!lctx) {
         throw std::runtime_error("failed to create llama context");
