@@ -201,33 +201,60 @@ void llama_kv_paged_cache::copy_block_data(uint32_t src_block_id, uint32_t dst_b
     const uint32_t src_off = src_block_id * block_size;
     const uint32_t dst_off = dst_block_id * block_size;
 
-    struct ggml_init_params gparams = { /*.mem_size=*/ 128*1024, /*.mem_buffer=*/ nullptr, /*.no_alloc=*/ true };
-    ggml_context_ptr ctx(ggml_init(gparams));
-    GGML_ASSERT(ctx && "paged cache: failed to create temp context for COW copy");
+    // NOTE: ggml_backend_tensor_copy cannot be used with view tensors here -
+    // a view's buffer field is NULL (it is resolved lazily via view_src by the
+    // backend, but tensor_copy checks src->buffer directly). Copy via byte
+    // offsets on the underlying tensors instead.
+    auto copy_range = [](ggml_tensor * tensor, size_t src_bytes, size_t dst_bytes, size_t nbytes) {
+        void * tmp = malloc(nbytes);
+        GGML_ASSERT(tmp && "paged cache: OOM in COW copy");
+        ggml_backend_tensor_get(tensor, tmp, src_bytes, nbytes);
+        ggml_backend_tensor_set(tensor, tmp, dst_bytes, nbytes);
+        free(tmp);
+    };
 
     for (const auto & layer : layers) {
         if (layer.k) {
-            const int64_t n_embd = layer.k->ne[0];
-            const size_t row_size = ggml_row_size(layer.k->type, n_embd);
-            ggml_tensor * k_src = ggml_view_2d(ctx.get(), layer.k, n_embd, n_tokens, row_size, src_off * row_size);
-            ggml_tensor * k_dst = ggml_view_2d(ctx.get(), layer.k, n_embd, n_tokens, row_size, dst_off * row_size);
-            ggml_backend_tensor_copy(k_src, k_dst);
+            const size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
+            copy_range(layer.k, (size_t) src_off * row_size, (size_t) dst_off * row_size, row_size * n_tokens);
         }
         if (layer.v) {
-            const int64_t n_embd = layer.v->ne[0];
-            const size_t row_size = ggml_row_size(layer.v->type, n_embd);
-            ggml_tensor * v_src = ggml_view_2d(ctx.get(), layer.v, n_embd, n_tokens, row_size, src_off * row_size);
-            ggml_tensor * v_dst = ggml_view_2d(ctx.get(), layer.v, n_embd, n_tokens, row_size, dst_off * row_size);
-            ggml_backend_tensor_copy(v_src, v_dst);
+            const size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
+            copy_range(layer.v, (size_t) src_off * row_size, (size_t) dst_off * row_size, row_size * n_tokens);
         }
         if (layer.k_idx) {
-            const int64_t n_embd = layer.k_idx->ne[0];
-            const size_t row_size = ggml_row_size(layer.k_idx->type, n_embd);
-            ggml_tensor * ki_src = ggml_view_2d(ctx.get(), layer.k_idx, n_embd, n_tokens, row_size, src_off * row_size);
-            ggml_tensor * ki_dst = ggml_view_2d(ctx.get(), layer.k_idx, n_embd, n_tokens, row_size, dst_off * row_size);
-            ggml_backend_tensor_copy(ki_src, ki_dst);
+            const size_t row_size = ggml_row_size(layer.k_idx->type, layer.k_idx->ne[0]);
+            copy_range(layer.k_idx, (size_t) src_off * row_size, (size_t) dst_off * row_size, row_size * n_tokens);
         }
     }
+}
+
+uint32_t llama_kv_paged_cache::cow_block(llama_seq_id seq_id, uint32_t block_idx) {
+    auto & bt = block_tables[seq_id];
+    const uint32_t old_id = bt[block_idx];
+    GGML_ASSERT(blocks[old_id].ref_count > 1);
+
+    const uint32_t new_id  = alloc_block(seq_id);
+    const uint32_t n_filled = (uint32_t) blocks[old_id].token_ids.size();
+
+    copy_block_data(old_id, new_id, n_filled);
+    blocks[new_id].token_ids = blocks[old_id].token_ids;
+
+    // move this seq's cell metadata from old block to new block
+    const uint32_t old_base = old_id * block_size;
+    const uint32_t new_base = new_id * block_size;
+    for (uint32_t off = 0; off < n_filled; ++off) {
+        const llama_pos p = v_cells[0].pos_get(old_base + off);
+        v_cells[0].pos_set(new_base + off, p);
+        v_cells[0].seq_rm(old_base + off, seq_id);
+        v_cells[0].seq_add(new_base + off, seq_id);
+    }
+
+    bt[block_idx] = new_id;
+    blocks[old_id].ref_count--;
+    touch(new_id);
+    touch(old_id);
+    return new_id;
 }
 
 void llama_kv_paged_cache::may_append(llama_seq_id seq_id, llama_pos pos) {
@@ -236,8 +263,10 @@ void llama_kv_paged_cache::may_append(llama_seq_id seq_id, llama_pos pos) {
 
     // allocate new blocks up to block_idx
     while (bt.size() <= block_idx) {
-        // verify position alignment: a new block starts at pos = bt.size() * block_size
-        GGML_ASSERT((uint32_t) pos == bt.size() * block_size || bt.size() < block_idx);
+        // each new block must start exactly at pos == bt.size() * block_size.
+        // non-contiguous positions would leave holes in the block chain and
+        // break the block hash chain used for prefix matching
+        GGML_ASSERT((uint32_t) pos == bt.size() * block_size && "paged cache: non-contiguous positions are not supported");
         bt.push_back(alloc_block(seq_id));
     }
 
@@ -247,24 +276,7 @@ void llama_kv_paged_cache::may_append(llama_seq_id seq_id, llama_pos pos) {
     // to a shared block.
     const uint32_t block_id = bt[block_idx];
     if (blocks[block_id].ref_count > 1) {
-        const uint32_t new_id  = alloc_block(seq_id);
-        const uint32_t n_filled = (uint32_t) blocks[block_id].token_ids.size();
-
-        copy_block_data(block_id, new_id, n_filled);
-        blocks[new_id].token_ids = blocks[block_id].token_ids;
-
-        // move this seq's cell metadata from old block to new block
-        const uint32_t old_base = block_id * block_size;
-        const uint32_t new_base = new_id * block_size;
-        for (uint32_t off = 0; off < n_filled; ++off) {
-            const llama_pos p = v_cells[0].pos_get(old_base + off);
-            v_cells[0].pos_set(new_base + off, p);
-            v_cells[0].seq_rm(old_base + off, seq_id);
-            v_cells[0].seq_add(new_base + off, seq_id);
-        }
-
-        bt[block_idx] = new_id;
-        blocks[block_id].ref_count--;
+        cow_block(seq_id, block_idx);
     }
 
     touch(bt[block_idx]);
@@ -279,6 +291,19 @@ void llama_kv_paged_cache::hash_blocks(llama_seq_id seq_id, uint32_t start_block
 
     // chain seed: previous block's hash, or 0 for the first block
     uint64_t prev_hash = (start_block > 0) ? blocks[bt[start_block - 1]].hash : 0;
+
+    if (start_block > 0 && prev_hash == 0) {
+        // the previous block was never hashed (only possible with a broken
+        // chain). rebuild from block 0 so stored hashes stay consistent with
+        // find_prefix's chain walk.
+        for (uint32_t i = 0; i < start_block; ++i) {
+            const auto & pb = blocks[bt[i]];
+            if (pb.token_ids.size() < block_size) {
+                return;   // chain can't be rebuilt, leave blocks unhashed
+            }
+            prev_hash = pb.hash != 0 ? pb.hash : compute_hash(prev_hash, pb.token_ids.data(), block_size);
+        }
+    }
 
     for (uint32_t i = start_block; i < end_block && i < bt.size(); ++i) {
         auto & blk = blocks[bt[i]];
@@ -615,9 +640,9 @@ uint32_t llama_kv_paged_cache::find_prefix(const llama_token * tokens, uint32_t 
         if (it == hash_to_block_id.end()) break;
 
         const auto & blk = blocks[it->second];
-        // skip freed blocks or token mismatch (hash collision guard)
-        if (blk.ref_count == 0 ||
-            blk.token_ids.size() != block_size ||
+        // skip freed blocks or token mismatch (hash collision guard). cached
+        // blocks (ref_count == 0, data still resident) can be reused.
+        if (blk.token_ids.size() != block_size ||
             memcmp(blk.token_ids.data(), tokens + i * block_size, block_size * sizeof(llama_token)) != 0) {
             break;
         }
@@ -643,18 +668,31 @@ uint32_t llama_kv_paged_cache::share_prefix(llama_seq_id seq_id, const llama_tok
 
         const uint32_t block_id = it->second;
         auto & blk = blocks[block_id];
-        GGML_ASSERT(blk.ref_count > 0 && blk.token_ids.size() == block_size);
+        GGML_ASSERT(blk.token_ids.size() == block_size);
 
-        blk.ref_count++;
         bt.push_back(block_id);
 
-        // add the new seq_id to each cell of this block
         const uint32_t base = block_id * block_size;
-        for (uint32_t off = 0; off < block_size; ++off) {
-            const uint32_t cell_idx = base + off;
-            // cell must already be populated (owned by source seq)
-            if (!v_cells[0].seq_has(cell_idx, seq_id)) {
-                v_cells[0].seq_add(cell_idx, seq_id);
+        if (blk.ref_count == 0) {
+            // reuse a cached (evicted) block: its cells were fully released
+            // (pos/seq cleared), so repopulate the metadata before adding this
+            // sequence. the block hash/token_ids are still valid.
+            blk.ref_count = 1;
+            cached_block_ids.erase(block_id);
+            used_block_ids.insert(block_id);
+            for (uint32_t off = 0; off < block_size; ++off) {
+                v_cells[0].pos_set(base + off, (llama_pos) i * block_size + off);
+                v_cells[0].seq_add(base + off, seq_id);
+            }
+        } else {
+            blk.ref_count++;
+            // add the new seq_id to each cell of this block
+            for (uint32_t off = 0; off < block_size; ++off) {
+                const uint32_t cell_idx = base + off;
+                // cell must already be populated (owned by source seq)
+                if (!v_cells[0].seq_has(cell_idx, seq_id)) {
+                    v_cells[0].seq_add(cell_idx, seq_id);
+                }
             }
         }
 
@@ -856,9 +894,10 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
 
             may_append(seq_id, pos);
 
-            // append token to the current block's token_ids
+            // append token to the block that contains this position (contiguous
+            // positions guarantee it equals the last block)
             auto & bt   = block_tables[seq_id];
-            auto & blk  = blocks[bt.back()];
+            auto & blk  = blocks[bt[block_idx]];
             blk.token_ids.push_back(ubatch.token[i]);
 
             sinfo.idxs[0].push_back(cell_index(seq_id, pos));
@@ -950,11 +989,59 @@ bool llama_kv_paged_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p
     // suffix removal: p0 to end
     if ((uint32_t) p1 >= seq_len) {
         const uint32_t start_block = p0 / block_size;
-        // release blocks from start_block to end
-        for (uint32_t i = start_block; i < bt.size(); ++i) {
-            release_block(bt[i]);
+
+        if (start_block >= bt.size()) {
+            // p0 is beyond the current sequence length: nothing left to keep
+            for (uint32_t i = 0; i < bt.size(); ++i) {
+                release_block(bt[i]);
+            }
+            bt.clear();
+            llama_kv_cache::seq_rm(seq_id, p0, p1);
+            return true;
         }
-        bt.resize(start_block);
+
+        const uint32_t keep_in_block = p0 % block_size;
+
+        if (keep_in_block != 0) {
+            // p0 cuts inside a block: truncate that block (COW first if it is
+            // shared with other sequences) and release everything after it
+            uint32_t blk_id = bt[start_block];
+            if (blocks[blk_id].ref_count > 1) {
+                blk_id = cow_block(seq_id, start_block);
+            }
+            auto & blk = blocks[blk_id];
+            const uint32_t n_filled = (uint32_t) blk.token_ids.size();
+            if (n_filled > keep_in_block) {
+                // drop the tail tokens and their cell metadata
+                const uint32_t base = blk_id * block_size;
+                for (uint32_t off = keep_in_block; off < n_filled; ++off) {
+                    const uint32_t cell_idx = base + off;
+                    if (v_cells[0].seq_has(cell_idx, seq_id)) {
+                        v_cells[0].seq_rm(cell_idx, seq_id);
+                    }
+                }
+                blk.token_ids.resize(keep_in_block);
+                // the block hash is now stale: drop it so it gets recomputed
+                if (blk.hash != 0) {
+                    auto it = hash_to_block_id.find(blk.hash);
+                    if (it != hash_to_block_id.end() && it->second == blk_id) {
+                        hash_to_block_id.erase(it);
+                    }
+                    blk.hash = 0;
+                }
+            }
+            // release everything after the truncated block
+            for (uint32_t i = start_block + 1; i < bt.size(); ++i) {
+                release_block(bt[i]);
+            }
+            bt.resize(start_block + 1);
+        } else {
+            // p0 is block-aligned: release blocks from start_block onward
+            for (uint32_t i = start_block; i < bt.size(); ++i) {
+                release_block(bt[i]);
+            }
+            bt.resize(start_block);
+        }
 
         llama_kv_cache::seq_rm(seq_id, p0, p1);
         return true;

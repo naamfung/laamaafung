@@ -389,6 +389,7 @@ public:
     //
 
     uint32_t get_n_kv() const;
+    uint32_t get_n_stream() const;
 
     ggml_type type_k() const;
     ggml_type type_v() const;

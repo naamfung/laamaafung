@@ -173,6 +173,14 @@ private:
     // allocates a new block when pos % block_size == 0.
     void may_append(llama_seq_id seq_id, llama_pos pos);
 
+    // copy-on-write: duplicate the block at block_table[seq_id][block_idx]
+    // into a fresh private block for seq_id (used when writing to a block
+    // shared with other sequences). migrates seq_id's cell metadata to the
+    // copy and decrements the old block's ref_count. returns the new block id.
+    uint32_t cow_block(llama_seq_id seq_id, uint32_t block_idx);
+
+    // zero out the K/V data of a block
+
     // hash full blocks in [start_block, end_block) for seq_id using the
     // stored token_ids. Stores block.hash + hash_to_block_id.
     void hash_blocks(llama_seq_id seq_id, uint32_t start_block, uint32_t end_block);

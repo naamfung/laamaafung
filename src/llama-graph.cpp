@@ -30,7 +30,14 @@ static ggml_tensor * build_attn_inp_kq_mask(
         const llama_cparams & cparams) {
     const auto n_kv     = mctx->get_n_kv();
     const auto n_tokens = ubatch.n_tokens;
-    const auto n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
+
+    // The mask stream count must match the cache's K layout. The paged cache is
+    // always unified (single KV stream) even when cparams.kv_unified is false,
+    // so it must never be compressed; the multi-stream caches (SWA, MLA, LID)
+    // compress by n_seqs_unq. Compressing a single-stream K against n_seqs_unq
+    // breaks the flash/soft-max mask shape assertions and the non-flash kernel
+    // requires one mask row per token anyway.
+    const auto n_stream = mctx->get_n_stream() == 1 ? 1 : ubatch.n_seqs_unq;
 
     // flash attention requires an f16 mask
     const auto type = cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
@@ -49,7 +56,7 @@ static bool can_reuse_kq_mask(
         const llama_cparams & cparams) {
     const auto n_kv     = mctx->get_n_kv();
     const auto n_tokens = ubatch.n_tokens;
-    const auto n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
+    const auto n_stream = mctx->get_n_stream() == 1 ? 1 : ubatch.n_seqs_unq;
 
     bool res = true;
 
