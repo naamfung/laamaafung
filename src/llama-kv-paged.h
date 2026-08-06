@@ -207,7 +207,10 @@ private:
     // empty, preempt (swap out) the tail block of the LRU active seq that is
     // not exclude_seq until a block becomes available. asserts if no seq can
     // be preempted (e.g. exclude_seq is the only active seq).
-    uint32_t alloc_block(llama_seq_id exclude_seq = -1);
+    // when preferred_id != ~0u and that block is free, it is allocated first:
+    // this keeps single-sequence chains physically contiguous so that
+    // cell_index(pos) stays monotonic, which reduces CUDA graph resets.
+    uint32_t alloc_block(llama_seq_id exclude_seq = -1, uint32_t preferred_id = ~0u);
 
     // preempt one block from the LRU active seq != exclude_seq: release the
     // tail block of that seq, clear the victim's cell metadata for the

@@ -114,7 +114,7 @@ void llama_kv_paged_cache::touch(uint32_t block_id) {
     blocks[block_id].last_used = ++lru_counter;
 }
 
-uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq) {
+uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq, uint32_t preferred_id) {
     while (free_block_ids.empty()) {
         if (!cached_block_ids.empty()) {
             // evict LRU cached block (ref_count==0, hash!=0)
@@ -147,8 +147,20 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq) {
         }
     }
 
-    const uint32_t block_id = free_block_ids.front();
-    free_block_ids.pop_front();
+    uint32_t block_id;
+    if (preferred_id != ~0u && preferred_id < n_blocks) {
+        auto it = std::find(free_block_ids.begin(), free_block_ids.end(), preferred_id);
+        if (it != free_block_ids.end()) {
+            block_id = preferred_id;
+            free_block_ids.erase(it);
+        } else {
+            block_id = free_block_ids.front();
+            free_block_ids.pop_front();
+        }
+    } else {
+        block_id = free_block_ids.front();
+        free_block_ids.pop_front();
+    }
 
     auto & blk = blocks[block_id];
     GGML_ASSERT(blk.ref_count == 0);
@@ -305,7 +317,8 @@ void llama_kv_paged_cache::may_append(llama_seq_id seq_id, llama_pos pos) {
                     (int) (sit != swapped_seqs.end()), seq_length(seq_id), (int) llama_memory_is_swapped(this, seq_id));
         }
         GGML_ASSERT((uint32_t) pos == bt.size() * block_size && "paged cache: non-contiguous positions are not supported");
-        bt.push_back(alloc_block(seq_id));
+        const uint32_t preferred_id = bt.empty() ? ~0u : (bt.back() + 1);
+        bt.push_back(alloc_block(seq_id, preferred_id));
     }
 
     // lazy COW: if the block is shared (ref_count > 1), copy it before writing.
@@ -1468,7 +1481,12 @@ void llama_kv_paged_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_d
     // without corrupting src's token_ids / K-V data
     if (n_part > 0 && n_full < bt_src.size()) {
         const uint32_t src_blk = bt_src[n_full];
-        const uint32_t new_blk = alloc_block(seq_id_src);
+        // keep the destination chain physically contiguous: prefer the block
+        // right after the last shared full block so bt_dst stays monotonic
+        const uint32_t preferred_id = (n_full > 0 && n_full - 1 < bt_dst.size())
+                                            ? bt_dst[n_full - 1] + 1
+                                            : ~0u;
+        const uint32_t new_blk = alloc_block(seq_id_src, preferred_id);
 
         copy_block_data(src_blk, new_blk, n_part);
 

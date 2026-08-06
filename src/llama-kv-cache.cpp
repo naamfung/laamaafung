@@ -1557,6 +1557,9 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
         result = std::max(std::min(cells.size(), std::max(n_pad_cur, GGML_PAD(cells.used_max_p1(), n_pad_cur))), result);
     }
 
+    LLAMA_LOG_DEBUG("%s: n_kv = %u, cells.size = %u, used_max_p1 = %u, n_pad_cur = %u, n_stream = %u\n",
+            __func__, result, (uint32_t) v_cells[sinfo.strm[0]].size(), (uint32_t) v_cells[sinfo.strm[0]].used_max_p1(), n_pad_cur, sinfo.n_stream());
+
     return result;
 }
 
