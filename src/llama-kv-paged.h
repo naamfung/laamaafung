@@ -8,6 +8,7 @@
 #include <deque>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // vllm-style paged KV cache.
@@ -156,6 +157,12 @@ private:
 
     // preemption priority per sequence (default 0 = LRU-only behavior)
     std::unordered_map<llama_seq_id, int32_t> seq_priorities;
+
+    // sequences with tokens still pending in the current batch. preemption
+    // must never swap out one of these: its remaining tokens would hit an
+    // empty block_table mid-batch. only sequences outside the batch (finished
+    // requests holding cache) are eligible victims.
+    std::unordered_set<llama_seq_id> in_flight_seqs;
 
     // swap storage: per-seq CPU buffers for swapped-out K/V data
     struct swap_entry_t {

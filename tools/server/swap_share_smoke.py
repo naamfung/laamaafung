@@ -39,6 +39,21 @@ def get(path, timeout=30):
     with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
+def get_metric(name, timeout=30):
+    # /metrics returns prometheus text: "name value" lines
+    try:
+        with urllib.request.urlopen(BASE + "/metrics", timeout=timeout) as r:
+            txt = r.read().decode()
+        for line in txt.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parts = line.split()
+                if parts and parts[0].split(":")[-1] == name:
+                    return float(parts[1])
+    except Exception:
+        pass
+    return None
+
 def main():
     for _ in range(180):
         try:
@@ -56,6 +71,7 @@ def main():
     out_first = {}
     out_last = {}
     pe_times = []
+    swap0 = get_metric("kv_swap_out_count") or 0
 
     for rnd in range(ROUNDS):
         # each round: N_SLOTS concurrent requests, suffix length grows to force
@@ -96,13 +112,13 @@ def main():
                 out_last[i] = content
 
         if rnd % 5 == 0 or rnd == ROUNDS - 1:
-            try:
-                props = get("/props")
-                bt = props.get("kv_blocks_total", "n/a")
-                bu = props.get("kv_blocks_used", "n/a")
-            except Exception:
-                bt = bu = "n/a"
-            print(f"round {rnd}/{ROUNDS}: wall={wall:.1f}s ok={ok} fail={fail} blocks_used={bu}/{bt}")
+            sw = get_metric("kv_swap_out_count")
+            if sw is not None and sw > swap0:
+                swap_seen = True
+            bu = get_metric("kv_blocks_used")
+            bt = get_metric("kv_blocks_total")
+            print(f"round {rnd}/{ROUNDS}: wall={wall:.1f}s ok={ok} fail={fail} "
+                  f"blocks_used={bu}/{bt} swap_out={sw}")
 
     # stability: first vs last round outputs (same prompts? no - prompts vary by
     # rnd, so compare slot i of round 0 and round ROUNDS-1 only structurally)
@@ -115,9 +131,11 @@ def main():
                 stable = False
 
     pe_avg = sum(pe_times) / len(pe_times) if pe_times else 0
-    print(f"== result: ok={ok} fail={fail} stable={stable} ==")
+    print(f"== result: ok={ok} fail={fail} swap_seen={swap_seen} stable={stable} ==")
     print(f"prompt_eval avg={pe_avg:.0f}ms (varying prompt length; sharing keeps cache_n high)")
-    print("NOTE: swap confirmation is read from the server log (kv_swap_out_count is not on /props)")
+    if not swap_seen:
+        print("note: no swap triggered - the pool (n_ctx = slots x slot_len) absorbs pressure by"
+              " evicting cached blocks; swap correctness is covered by test-kv-paged scenario E")
 
     if fail == 0 and stable:
         print("SWAP_SHARE_SMOKE PASS")

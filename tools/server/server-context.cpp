@@ -5366,6 +5366,18 @@ void server_routes::init_routes() {
                     {"name",  "n_tokens_max"},
                     {"help",  "Largest observed n_tokens."},
                     {"value",  res_task->n_tokens_max}
+            }, {
+                    {"name",  "kv_preempt_count"},
+                    {"help",  "Total preemption operations"},
+                    {"value",  res_task->kv_preempt_count}
+            }, {
+                    {"name",  "kv_swap_out_count"},
+                    {"help",  "Total swap_out operations"},
+                    {"value",  res_task->kv_swap_out_count}
+            }, {
+                    {"name",  "kv_swap_in_count"},
+                    {"help",  "Total swap_in operations"},
+                    {"value",  res_task->kv_swap_in_count}
             }}},
             {"gauge", {{
                     {"name",  "prompt_tokens_seconds"},
@@ -5415,19 +5427,6 @@ void server_routes::init_routes() {
                     {"name",  "kv_block_size"},
                     {"help",  "Tokens per block in paged KV cache (0 for legacy cache)"},
                     {"value",  (uint64_t) res_task->kv_block_size}
-            }}},
-            {"counter", {{
-                    {"name",  "kv_preempt_count"},
-                    {"help",  "Total preemption operations"},
-                    {"value",  res_task->kv_preempt_count}
-            },{
-                    {"name",  "kv_swap_out_count"},
-                    {"help",  "Total swap_out operations"},
-                    {"value",  res_task->kv_swap_out_count}
-            },{
-                    {"name",  "kv_swap_in_count"},
-                    {"help",  "Total swap_in operations"},
-                    {"value",  res_task->kv_swap_in_count}
             }}}
         };
 

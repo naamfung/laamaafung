@@ -724,7 +724,7 @@ struct common_params {
     // "advanced" endpoints are disabled by default for better security
     bool endpoint_slots   = true;
     bool endpoint_props   = false; // only control POST requests, not GET
-    bool endpoint_metrics = false;
+    bool endpoint_metrics = true;
 
     // enable built-in tools
     std::vector<std::string> server_tools;

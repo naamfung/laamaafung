@@ -172,6 +172,7 @@ bool llama_kv_paged_cache::preempt_one(llama_seq_id exclude_seq) {
     int32_t min_prio = std::numeric_limits<int32_t>::max();
     for (auto & [sid, bt] : block_tables) {
         if (sid == exclude_seq) continue;
+        if (in_flight_seqs.count(sid)) continue;
         if (bt.empty()) continue;
         const auto pit = seq_priorities.find(sid);
         const int32_t prio = pit != seq_priorities.end() ? pit->second : 0;
@@ -1000,6 +1001,15 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
         }
     }
 
+    // the whole batch is in-flight until processing completes: preemption
+    // must not swap out any of these sequences mid-batch
+    in_flight_seqs.clear();
+    for (auto & ub : filtered_ubatches) {
+        for (uint32_t i = 0; i < ub.n_tokens; ++i) {
+            in_flight_seqs.insert(ub.seq_id[i][0]);
+        }
+    }
+
     // track first modified block per seq for post-batch hashing.
     // unlike "first new block", this also covers the case where a previously
     // partial block becomes full during decode - essential for incremental
@@ -1013,6 +1023,7 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
     for (auto & ubatch : filtered_ubatches) {
         sinfos.push_back(process_ubatch(ubatch, first_modified_block));
     }
+    in_flight_seqs.clear();
 
     // hash newly completed full blocks. hash_blocks skips already-hashed
     // blocks, so starting from first_modified_block is safe even if some
@@ -1067,12 +1078,21 @@ llama_kv_cache::slot_info llama_kv_paged_cache::process_ubatch(
 }
 
 llama_kv_cache::slot_info_vec_t llama_kv_paged_cache::prepare(const std::vector<llama_ubatch> & ubatches) {
-    // Non-sharing path for externally-sliced ubatches: used by
+    // non-sharing path for externally-sliced ubatches: used by
     // llama_memory_hybrid, where the recurrent layers impose their own ubatch
     // slicing, so init_batch's split/share/filter flow cannot be applied.
     // Blocks are allocated immediately from the pool; slot cell indices are
     // the physical cell offsets of each token.
     std::unordered_map<llama_seq_id, uint32_t> first_modified_block;
+
+    // the whole batch is in-flight until processing completes: preemption
+    // must not swap out any of these sequences mid-batch
+    in_flight_seqs.clear();
+    for (auto & ub : ubatches) {
+        for (uint32_t i = 0; i < ub.n_tokens; ++i) {
+            in_flight_seqs.insert(ub.seq_id[i][0]);
+        }
+    }
 
     slot_info_vec_t sinfos;
     sinfos.reserve(ubatches.size());
@@ -1080,6 +1100,7 @@ llama_kv_cache::slot_info_vec_t llama_kv_paged_cache::prepare(const std::vector<
     for (auto & ubatch : ubatches) {
         sinfos.push_back(process_ubatch(ubatch, first_modified_block));
     }
+    in_flight_seqs.clear();
 
     // hash newly completed full blocks
     for (auto & [seq_id, start] : first_modified_block) {
