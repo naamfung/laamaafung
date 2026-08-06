@@ -1,12 +1,70 @@
 #include "llama-memory-hybrid.h"
 
 #include "llama-impl.h"
+#include "llama-kv-paged.h"
 #include "llama-model.h"
 #include "llama-context.h"
 
 //
 // llama_memory_hybrid
 //
+
+namespace {
+
+// build the attention-side KV cache: vllm-style paged by default, legacy
+// contiguous when paged_attn is false
+std::unique_ptr<llama_kv_cache> make_attn_cache(
+        const llama_model & model,
+        const llama_hparams & hparams,
+              ggml_type   type_k,
+              ggml_type   type_v,
+                   bool   v_trans,
+                   bool   offload,
+               uint32_t   kv_size,
+               uint32_t   n_pad,
+               uint32_t   n_swa,
+         llama_swa_type   swa_type,
+               uint32_t   n_seq_max,
+                   bool   unified,
+                   bool   paged_attn,
+    const llama_memory_hybrid::layer_filter_cb & filter_attn) {
+    const llama_memory_hybrid::layer_filter_cb filter = filter_attn == nullptr
+        ? [&](int32_t il) { return !hparams.is_recr(il); }
+        : filter_attn;
+
+    if (paged_attn) {
+        return std::make_unique<llama_kv_paged_cache>(
+                model,
+                hparams,
+                type_k,
+                type_v,
+                v_trans,
+                offload,
+                kv_size,
+                n_seq_max,
+                n_pad,
+                filter);
+    }
+    return std::make_unique<llama_kv_cache>(
+            model,
+            hparams,
+            type_k,
+            type_v,
+            v_trans,
+            offload,
+            unified,
+            kv_size,
+            n_seq_max,
+            n_pad,
+            n_swa,
+            swa_type,
+            nullptr,
+            filter,
+            nullptr,
+            nullptr);
+}
+
+} // namespace
 
 llama_memory_hybrid::llama_memory_hybrid(
         const llama_model & model,
@@ -27,30 +85,14 @@ llama_memory_hybrid::llama_memory_hybrid(
                  uint32_t   n_rs_seq,
                      bool   offload,
                      bool   unified,
+                     bool   paged_attn,
                             /* layer filters */
     const layer_filter_cb & filter_attn,
     const layer_filter_cb & filter_recr) :
     hparams(model.hparams),
-    mem_attn(new llama_kv_cache(
-        model,
-        model.hparams,
-        type_k,
-        type_v,
-        v_trans,
-        offload,
-        unified,
-        kv_size,
-        n_seq_max,
-        n_pad,
-        n_swa,
-        swa_type,
-        nullptr,
-        filter_attn == nullptr ?
-            [&](int32_t il) { return !hparams.is_recr(il); }
-            : filter_attn,
-        nullptr,
-        nullptr
-    )),
+    mem_attn(make_attn_cache(
+        model, model.hparams, type_k, type_v, v_trans, offload,
+        kv_size, n_pad, n_swa, swa_type, n_seq_max, unified, paged_attn, filter_attn)),
     mem_recr(new llama_memory_recurrent(
         model,
         type_r,

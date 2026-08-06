@@ -186,12 +186,13 @@ static void check(bool cond, const char * what) {
 }
 
 // usage:
-//   test-kv-paged.exe [-m model.gguf] [-ngl N] [-ctx N] [-seq N] [-fa 0|1|2]
+//   test-kv-paged.exe [-m model.gguf] [-ngl N] [-ctx N] [-seq N] [-fa 0|1|2] [-force]
 //   -m   load a real model from file (default: build a random-weight mock model)
 //   -ngl number of layers to offload to GPU (default 0)
 //   -ctx context size (default 0 = model default)
 //   -seq n_seq_max (default 16)
 //   -fa  flash attention: 0=disabled 1=auto (default) 2=enabled
+//   -force run even for hybrid/SWA models (attn side is paged by default in v15)
 int main(int argc, char ** argv) {
     llama_backend_init();
     const char * model_path = nullptr;
@@ -199,6 +200,7 @@ int main(int argc, char ** argv) {
     uint32_t n_ctx_arg = 0;
     uint32_t n_seq_max = 16;
     int flash_attn = 1;
+    bool force = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -211,6 +213,8 @@ int main(int argc, char ** argv) {
             n_seq_max = (uint32_t) atoi(argv[++i]);
         } else if (strcmp(argv[i], "-fa") == 0 && i + 1 < argc) {
             flash_attn = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-force") == 0) {
+            force = true;
         } else {
             fprintf(stderr, "unknown argument: %s\n", argv[i]);
             return 2;
@@ -241,8 +245,9 @@ int main(int argc, char ** argv) {
 
     // only pure-attention (non-recurrent, non-hybrid, non-SWA) models use the
     // paged KV cache; bail out cleanly instead of crashing during context init
-    if (llama_model_is_recurrent(model.get()) || llama_model_is_hybrid(model.get()) ||
-        llama_model_n_swa(model.get()) > 0) {
+    // (unless -force, e.g. hybrid models whose attn side is paged by default)
+    if (!force && (llama_model_is_recurrent(model.get()) || llama_model_is_hybrid(model.get()) ||
+        llama_model_n_swa(model.get()) > 0)) {
         fprintf(stderr, "SKIP: model does not use the paged KV cache (recurrent/hybrid/SWA); paged tests require a pure-attention dense model\n");
         return 0;
     }

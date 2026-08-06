@@ -43,6 +43,25 @@ public:
             uint32_t n_ubatch,
             bool embd_all) override;
 
+    // process one externally-sliced ubatch: allocate blocks, append tokens,
+    // build cell-index slot info. shared by init_batch (after prefix
+    // filtering) and prepare (hybrid path).
+    slot_info process_ubatch(
+            const llama_ubatch & ubatch,
+            std::unordered_map<llama_seq_id, uint32_t> & first_modified_block);
+
+    // externally-sliced ubatch processing WITHOUT prefix sharing: used by
+    // llama_memory_hybrid, whose recurrent layers impose their own ubatch
+    // slicing (init_batch's split/share/filter flow cannot be used there)
+    slot_info_vec_t prepare(const std::vector<llama_ubatch> & ubatches) override;
+
+    // cell-metadata update on K/V write. Same as the base cache but WITHOUT
+    // the "purge overwritten positions" pass: in the block layout the
+    // pos->cell mapping is fixed per sequence (block_table), so overwriting a
+    // cell never breaks positional continuity, and partial-range seq_rm is
+    // not supported by the paged cache.
+    void apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch) override;
+
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
     bool get_can_shift() const override;

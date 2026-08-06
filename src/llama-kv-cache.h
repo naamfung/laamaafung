@@ -195,7 +195,7 @@ public:
 
     // find places for the provided ubatches in the cache, returns the slot infos
     // return empty vector on failure
-    slot_info_vec_t prepare(const std::vector<llama_ubatch> & ubatches);
+    virtual slot_info_vec_t prepare(const std::vector<llama_ubatch> & ubatches);
 
     bool update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info);
 
@@ -205,7 +205,7 @@ public:
     slot_info find_slot(const llama_ubatch & ubatch, bool cont) const;
 
     // emplace the ubatch context into slot: [sinfo.idxs[0...ubatch.n_tokens - 1]]
-    void apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch);
+    virtual void apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch);
 
     //
     // input API

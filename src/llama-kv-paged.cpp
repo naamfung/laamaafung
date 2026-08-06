@@ -872,38 +872,7 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
     sinfos.reserve(filtered_ubatches.size());
 
     for (auto & ubatch : filtered_ubatches) {
-        slot_info sinfo;
-        sinfo.s0 = 0;
-        sinfo.s1 = 0;
-        sinfo.resize(1);
-        sinfo.strm[0] = 0;
-        sinfo.idxs[0].reserve(ubatch.n_tokens);
-
-        for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
-            const llama_seq_id seq_id = ubatch.seq_id[i][0];
-            const llama_pos    pos    = ubatch.pos[i * ubatch.n_pos];
-
-            // record the block index of the first token processed for this
-            // seq. this block may already exist (partial) and become full
-            // during this batch, or it may be newly allocated.
-            const uint32_t block_idx = (uint32_t) pos / block_size;
-            auto fmb_it = first_modified_block.find(seq_id);
-            if (fmb_it == first_modified_block.end() || block_idx < fmb_it->second) {
-                first_modified_block[seq_id] = block_idx;
-            }
-
-            may_append(seq_id, pos);
-
-            // append token to the block that contains this position (contiguous
-            // positions guarantee it equals the last block)
-            auto & bt   = block_tables[seq_id];
-            auto & blk  = blocks[bt[block_idx]];
-            blk.token_ids.push_back(ubatch.token[i]);
-
-            sinfo.idxs[0].push_back(cell_index(seq_id, pos));
-        }
-
-        sinfos.push_back(std::move(sinfo));
+        sinfos.push_back(process_ubatch(ubatch, first_modified_block));
     }
 
     // hash newly completed full blocks. hash_blocks skips already-hashed
@@ -916,6 +885,112 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
     }
 
     return std::make_unique<llama_kv_cache_context>(this, std::move(sinfos), std::move(filtered_ubatches));
+}
+
+llama_kv_cache::slot_info llama_kv_paged_cache::process_ubatch(
+        const llama_ubatch & ubatch,
+        std::unordered_map<llama_seq_id, uint32_t> & first_modified_block) {
+    slot_info sinfo;
+    sinfo.s0 = 0;
+    sinfo.s1 = 0;
+    sinfo.resize(1);
+    sinfo.strm[0] = 0;
+    sinfo.idxs[0].reserve(ubatch.n_tokens);
+
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch.seq_id[i][0];
+        const llama_pos    pos    = ubatch.pos[i * ubatch.n_pos];
+
+        // record the block index of the first token processed for this
+        // seq. this block may already exist (partial) and become full
+        // during this batch, or it may be newly allocated.
+        const uint32_t block_idx = (uint32_t) pos / block_size;
+        auto fmb_it = first_modified_block.find(seq_id);
+        if (fmb_it == first_modified_block.end() || block_idx < fmb_it->second) {
+            first_modified_block[seq_id] = block_idx;
+        }
+
+        may_append(seq_id, pos);
+
+        // append token to the block that contains this position (contiguous
+        // positions guarantee it equals the last block)
+        auto & bt   = block_tables[seq_id];
+        auto & blk  = blocks[bt[block_idx]];
+        blk.token_ids.push_back(ubatch.token[i]);
+
+        sinfo.idxs[0].push_back(cell_index(seq_id, pos));
+    }
+
+    return sinfo;
+}
+
+llama_kv_cache::slot_info_vec_t llama_kv_paged_cache::prepare(const std::vector<llama_ubatch> & ubatches) {
+    // Non-sharing path for externally-sliced ubatches: used by
+    // llama_memory_hybrid, where the recurrent layers impose their own ubatch
+    // slicing, so init_batch's split/share/filter flow cannot be applied.
+    // Blocks are allocated immediately from the pool; slot cell indices are
+    // the physical cell offsets of each token.
+    std::unordered_map<llama_seq_id, uint32_t> first_modified_block;
+
+    slot_info_vec_t sinfos;
+    sinfos.reserve(ubatches.size());
+
+    for (auto & ubatch : ubatches) {
+        sinfos.push_back(process_ubatch(ubatch, first_modified_block));
+    }
+
+    // hash newly completed full blocks
+    for (auto & [seq_id, start] : first_modified_block) {
+        auto it = block_tables.find(seq_id);
+        if (it == block_tables.end()) continue;
+        hash_blocks(seq_id, start, (uint32_t) it->second.size());
+    }
+
+    return sinfos;
+}
+
+void llama_kv_paged_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch) {
+    // Same cell-metadata update as the base cache, but without the
+    // "purge overwritten positions" pass - in the block layout the
+    // pos->cell mapping is fixed per sequence (block_table), so overwriting
+    // a cell never breaks positional continuity (see llama_kv_cache::apply_ubatch).
+    assert(ubatch.n_tokens == sinfo.n_stream()*sinfo.size());
+
+    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+        for (uint32_t ii = 0; ii < sinfo.size(); ++ii) {
+            const uint32_t i = s*sinfo.size() + ii;
+
+            auto & cells = v_cells[sinfo.strm[s]];
+
+            const auto idx = sinfo.idxs[s][ii];
+
+            if (!cells.is_empty(idx)) {
+                assert(cells.seq_count(idx) == 1);
+                cells.rm(idx);
+            }
+
+            cells.pos_set(idx, ubatch.pos[i]);
+
+            if (ubatch.is_pos_2d()) {
+                llama_kv_cell_ext ext {
+                    /*.x =*/ ubatch.pos[i + ubatch.n_tokens*2],
+                    /*.y =*/ ubatch.pos[i + ubatch.n_tokens],
+                };
+                cells.ext_set(idx, ext);
+            }
+
+            for (int32_t ss = 0; ss < ubatch.n_seq_id[i]; ss++) {
+                cells.seq_add(idx, ubatch.seq_id[i][ss]);
+            }
+        }
+    }
+
+    // move the head at the end of the slot
+    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+        auto & head = v_heads[sinfo.strm[s]];
+
+        head = sinfo.idxs[s].back() + 1;
+    }
 }
 
 llama_memory_context_ptr llama_kv_paged_cache::init_update(llama_context * lctx, bool optimize) {

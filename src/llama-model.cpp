@@ -2223,6 +2223,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr));
                     } else {
+                        // v15: the attention side of hybrid models (qwen35/qwen35moe)
+                        // uses the vllm-style paged KV cache by default.
+                        // env: LLAMA_KV_LEGACY=1 restores the original contiguous attn cache.
+                        const char * legacy_env = getenv("LLAMA_KV_LEGACY");
+                        const bool hybrid_paged = !(legacy_env && legacy_env[0] == '1');
+
                         res = new llama_memory_hybrid(
                             /* model             */ *this,
                             /* attn_type_k       */ params.type_k,
@@ -2239,6 +2245,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* n_rs_seq          */ cparams.n_rs_seq,
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
+                            /* paged_attn        */ hybrid_paged,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr));
                     }
