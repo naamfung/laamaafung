@@ -310,12 +310,24 @@ llama_context::llama_context(
 
             // Decode: 6x multiplier covers CUDA graph buffers + attention intermediates.
             // Prefill: 3x KV for attention temp, plus MoE expert routing buffers.
-            size_t per_token_decode  = kv_per_ubatch_token * 6;
-            size_t per_token_prefill = kv_per_ubatch_token * 3 + moe_per_token;
+            // MLP/MoE activation intermediates scale with n_ff, not KV size, and occupy
+            // GPU memory when the layers are offloaded, so account for them explicitly.
+            size_t act_per_token = 0;
+            if (model.hparams.n_expert_used > 0) {
+                act_per_token = moe_per_token;
+            } else {
+                act_per_token = 2 * (size_t) model.hparams.n_ff() * sizeof(float);
+            }
+            size_t per_token_decode  = kv_per_ubatch_token * 6 + act_per_token;
+            size_t per_token_prefill = kv_per_ubatch_token * 3 + act_per_token;
 
-            // Free memory after reserving the full KV cache, with safety margin
+            // Free memory after reserving the full KV cache, with safety margin.
+            // Full offload leaves all intermediates in GPU memory, so apply a
+            // tighter margin there (WDDM free-mem reports can be optimistic).
+            const bool full_offload = model.n_gpu_layers() > model.hparams.n_layer_all;
+            const float safety_margin = full_offload ? 0.75f : 0.80f;
             size_t avail_mem = free_mem_total > kv_cache_total ? (free_mem_total - kv_cache_total) : 0;
-            size_t safe_mem  = (size_t)(avail_mem * 0.78);
+            size_t safe_mem  = (size_t)(avail_mem * safety_margin);
 
             // Context-based conservative cap (refined tiers including 128K+ and 256K+)
             int32_t max_ubatch_by_ctx;
@@ -349,9 +361,9 @@ llama_context::llama_context(
                     n_ubatch_prefill_calc = std::min(n_ubatch_prefill_calc, static_cast<int32_t>(2048));
                 }
 
-                LLAMA_LOG_INFO("%s: n_ubatch auto (free: %zu MB, KV: %zu MB, avail: %zu MB, MoE/tok: %zu B): %d (prefill: %d)\n",
+                LLAMA_LOG_INFO("%s: n_ubatch auto (free: %zu MB, KV: %zu MB, avail: %zu MB, MoE/tok: %zu B, act/tok: %zu B): %d (prefill: %d)\n",
                     __func__, free_mem_mb, kv_cache_total / (1024 * 1024), avail_mem / (1024 * 1024),
-                    moe_per_token, n_ubatch_calc, n_ubatch_prefill_calc);
+                    moe_per_token, act_per_token, n_ubatch_calc, n_ubatch_prefill_calc);
             } else {
                 n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch_by_ctx);
                 if (ggml_is_numa()) {
