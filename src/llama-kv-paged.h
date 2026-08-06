@@ -22,6 +22,10 @@ public:
     const uint32_t block_size;
     const uint32_t n_blocks;
 
+    // lossless K/V compression for swap_out (LLAMA_KV_SWAP_COMPRESS=1;
+    // default 0 keeps the vLLM behavior of raw copies)
+    const bool swap_compress;
+
     llama_kv_paged_cache(
             const llama_model & model,
           const llama_hparams & hparams,
@@ -148,8 +152,11 @@ private:
     // swap storage: per-seq CPU buffers for swapped-out K/V data
     struct swap_entry_t {
         std::vector<llama_token> tokens;
-        std::vector<std::vector<uint8_t>> k_data;  // per-layer
+        std::vector<std::vector<uint8_t>> k_data;  // per-layer (compressed or raw)
         std::vector<std::vector<uint8_t>> v_data;
+        std::vector<size_t> k_raw_size;  // uncompressed size per layer (when compressed)
+        std::vector<size_t> v_raw_size;
+        bool compressed = false;
         uint32_t n_tokens = 0;
     };
     std::unordered_map<llama_seq_id, swap_entry_t> swapped_seqs;

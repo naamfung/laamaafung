@@ -42,6 +42,9 @@ add_library(llama
             unicode.cpp
             unicode.h
             ${LLAMA_MODELS_SOURCES}
+            ../vendor/miniz/miniz.c
+            ../vendor/miniz/miniz_tdef.c
+            ../vendor/miniz/miniz_tinfl.c
             )
 
 set_target_properties(llama PROPERTIES
@@ -53,6 +56,7 @@ set_target_properties(llama PROPERTIES
 target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
 target_include_directories(llama PRIVATE ${CMAKE_SOURCE_DIR}/examples/gguf-hash/deps/xxhash)
+target_include_directories(llama PRIVATE ../vendor/miniz)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)

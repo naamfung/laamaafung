@@ -1,5 +1,7 @@
 #include "llama-kv-paged.h"
 
+#include "miniz.h"
+
 #include "llama-impl.h"
 #include "llama-io.h"
 #include "llama-model.h"
@@ -77,7 +79,11 @@ llama_kv_paged_cache::llama_kv_paged_cache(
             nullptr,
             nullptr),
     block_size(detect_block_size(model, offload)),
-    n_blocks(kv_size / block_size) {
+    n_blocks(kv_size / block_size),
+    swap_compress([]() {
+        const char * env = std::getenv("LLAMA_KV_SWAP_COMPRESS");
+        return env && env[0] == '1';
+    }()) {
 
     GGML_ASSERT(n_blocks > 0 && "paged cache requires kv_size >= block_size");
 
@@ -531,6 +537,30 @@ bool llama_kv_paged_cache::swap_out(llama_seq_id seq_id) {
     // wait for all async copies to complete before freeing blocks
     swap_synchronize();
 
+    // optional lossless compression of the K/V data before storing to the
+    // swap buffer (LLAMA_KV_SWAP_COMPRESS=1). reduces CPU swap memory at the
+    // cost of compress/decompress CPU time; swap_in restores bit-exact data.
+    if (swap_compress) {
+        for (size_t il = 0; il < layers.size(); il++) {
+            auto compress_layer = [](std::vector<uint8_t> & data, std::vector<size_t> & raw_sizes, size_t il_idx) {
+                if (data.empty()) return;
+                const size_t raw_size = data.size();
+                std::vector<uint8_t> comp(mz_compressBound((mz_ulong) raw_size));
+                mz_ulong comp_size = (mz_ulong) comp.size();
+                if (mz_compress2(comp.data(), &comp_size, data.data(), (mz_ulong) raw_size, MZ_DEFAULT_LEVEL) == MZ_OK) {
+                    comp.resize(comp_size);
+                    data = std::move(comp);
+                    if (raw_sizes.size() <= il_idx) raw_sizes.resize(il_idx + 1);
+                    raw_sizes[il_idx] = raw_size;
+                }
+                // on failure keep the raw data
+            };
+            compress_layer(entry.k_data[il], entry.k_raw_size, il);
+            compress_layer(entry.v_data[il], entry.v_raw_size, il);
+        }
+        entry.compressed = true;
+    }
+
     // clear cell metadata for the seq
     for (uint32_t block_id : bt) {
         auto & blk = blocks[block_id];
@@ -587,6 +617,36 @@ bool llama_kv_paged_cache::swap_in(llama_seq_id seq_id) {
 
     // copy K/V data from CPU to GPU, block by block. use async copies to
     // pipeline all layers on the swap stream, then sync once at the end.
+    // if the swap data was stored compressed, decompress it once up front
+    // (bit-exact, so the restored K/V matches the original).
+    std::vector<std::vector<uint8_t>> k_raw, v_raw;
+    if (entry.compressed) {
+        k_raw.resize(layers.size());
+        v_raw.resize(layers.size());
+        for (size_t il = 0; il < layers.size(); il++) {
+            // a layer is only decompressed when it was actually compressed
+            // (k_raw_size[il] > 0); compression may have been skipped/failed
+            if (!entry.k_data[il].empty() && entry.k_raw_size.size() > il && entry.k_raw_size[il] > 0) {
+                k_raw[il].resize(entry.k_raw_size[il]);
+                mz_ulong out_size = (mz_ulong) k_raw[il].size();
+                if (mz_uncompress(k_raw[il].data(), &out_size,
+                        entry.k_data[il].data(), (mz_ulong) entry.k_data[il].size()) != MZ_OK) {
+                    LLAMA_LOG_ERROR("%s: K decompression failed for layer %zu\n", __func__, il);
+                    return false;
+                }
+            }
+            if (!entry.v_data[il].empty() && entry.v_raw_size.size() > il && entry.v_raw_size[il] > 0) {
+                v_raw[il].resize(entry.v_raw_size[il]);
+                mz_ulong out_size = (mz_ulong) v_raw[il].size();
+                if (mz_uncompress(v_raw[il].data(), &out_size,
+                        entry.v_data[il].data(), (mz_ulong) entry.v_data[il].size()) != MZ_OK) {
+                    LLAMA_LOG_ERROR("%s: V decompression failed for layer %zu\n", __func__, il);
+                    return false;
+                }
+            }
+        }
+    }
+
     token_off = 0;
     for (uint32_t block_id : bt) {
         uint32_t n_filled = (uint32_t) blocks[block_id].token_ids.size();
@@ -595,34 +655,36 @@ bool llama_kv_paged_cache::swap_in(llama_seq_id seq_id) {
         for (size_t il = 0; il < layers.size(); il++) {
             auto & layer = layers[il];
             if (layer.k && !entry.k_data[il].empty()) {
+                const std::vector<uint8_t> & k_src = (k_raw.size() > il && !k_raw[il].empty()) ? k_raw[il] : entry.k_data[il];
                 size_t row_size = ggml_row_size(layer.k->type, layer.k->ne[0]);
                 ggml_backend_t backend = get_swap_backend(layer.k);
                 if (backend) {
                     swap_backends_used.push_back(backend);
                     ggml_backend_tensor_set_async(
                         backend, layer.k,
-                        entry.k_data[il].data() + token_off * row_size,
+                        k_src.data() + token_off * row_size,
                         cell_start * row_size, n_filled * row_size);
                 } else {
                     ggml_backend_tensor_set(
                         layer.k,
-                        entry.k_data[il].data() + token_off * row_size,
+                        k_src.data() + token_off * row_size,
                         cell_start * row_size, n_filled * row_size);
                 }
             }
             if (layer.v && !entry.v_data[il].empty()) {
+                const std::vector<uint8_t> & v_src = (v_raw.size() > il && !v_raw[il].empty()) ? v_raw[il] : entry.v_data[il];
                 size_t row_size = ggml_row_size(layer.v->type, layer.v->ne[0]);
                 ggml_backend_t backend = get_swap_backend(layer.v);
                 if (backend) {
                     swap_backends_used.push_back(backend);
                     ggml_backend_tensor_set_async(
                         backend, layer.v,
-                        entry.v_data[il].data() + token_off * row_size,
+                        v_src.data() + token_off * row_size,
                         cell_start * row_size, n_filled * row_size);
                 } else {
                     ggml_backend_tensor_set(
                         layer.v,
-                        entry.v_data[il].data() + token_off * row_size,
+                        v_src.data() + token_off * row_size,
                         cell_start * row_size, n_filled * row_size);
                 }
             }
