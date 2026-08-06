@@ -10,13 +10,23 @@
 
 ### 克隆指南
 
-推薦優先克隆穩定分支 `v7`，適合穩定使用。
+推薦優先克隆穩定分支 `v12` 或 `v7`，適合穩定使用。
 
-如須測試最新功能，可以克隆開發分支 `master`。
+如需體驗最新功能，推薦克隆最新分支 `v15`；如須測試開發中的功能，可以克隆開發分支 `master`。
 
 - **克隆穩定分支（推薦）**：
   ```sh
+  git clone -b v12 https://github.com/naamfung/laamaafung.git
+  ```
+  或
+  ```sh
   git clone -b v7 https://github.com/naamfung/laamaafung.git
+  ```
+
+- **克隆最新分支（v15）**：
+  如需體驗 v15 最新功能，可執行：
+  ```sh
+  git clone -b v15 https://github.com/naamfung/laamaafung.git
   ```
 
 - **回退版本（v6）**：
