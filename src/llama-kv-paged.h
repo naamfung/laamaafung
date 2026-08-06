@@ -96,6 +96,11 @@ public:
     uint32_t find_prefix (const llama_token * tokens, uint32_t n) const override;
     uint32_t share_prefix(llama_seq_id seq_id, const llama_token * tokens, uint32_t n) override;
 
+    // chain hash of the block at block_idx of seq_id (0 when unavailable);
+    // used to budget recurrent chunk snapshots for running sequences that
+    // complete a block mid-generation
+    uint64_t get_block_hash(llama_seq_id seq_id, uint32_t block_idx) const;
+
     // swap preemption: save/restore a seq's K/V data to/from CPU memory
     bool is_swapped(llama_seq_id seq_id) const override;
     bool swap_out  (llama_seq_id seq_id) override;

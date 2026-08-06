@@ -122,6 +122,7 @@ public:
     bool next()  override;
     bool apply() override;
     void flush_snapshots() override;
+    bool needs_snapshot_sync() const override;
 
     llama_memory_status  get_status() const override;
     const llama_ubatch & get_ubatch() const override;

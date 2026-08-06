@@ -716,9 +716,16 @@ bool llama_kv_paged_cache::swap_in(llama_seq_id seq_id) {
     return true;
 }
 
+uint64_t llama_kv_paged_cache::get_block_hash(llama_seq_id seq_id, uint32_t block_idx) const {
+    auto it = block_tables.find(seq_id);
+    if (it == block_tables.end() || block_idx >= it->second.size()) {
+        return 0;
+    }
+    return blocks[it->second[block_idx]].hash;
+}
+
 uint32_t llama_kv_paged_cache::find_prefix(const llama_token * tokens, uint32_t n) const {
     if (n < block_size) return 0;
-
     const uint32_t n_blocks_check = n / block_size;
     uint64_t prev_hash = 0;
     uint32_t matched = 0;

@@ -1599,7 +1599,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // snapshot region (hybrid prefix sharing; the graph itself does not write
     // the unconsumed snapshot columns). synchronize first so the state
     // write-backs from the graph are visible to the backend copy.
-    if (mctx) {
+    if (mctx && mctx->needs_snapshot_sync()) {
         ggml_backend_sched_synchronize(sched.get());
         mctx->flush_snapshots();
     }

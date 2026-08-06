@@ -178,6 +178,17 @@ public:
         chunk_hashes[seq_id] = std::move(hashes);
     }
 
+    // budget a single chunk hash for a running sequence (used when a
+    // mid-generation token completes a block and the block hash is already
+    // known from the attention-side block hash chain)
+    void set_chunk_hash(llama_seq_id seq_id, uint32_t chunk_idx, uint64_t hash) {
+        auto & v = chunk_hashes[seq_id];
+        if (v.size() <= chunk_idx) {
+            v.resize(chunk_idx + 1, 0);
+        }
+        v[chunk_idx] = hash;
+    }
+
     uint32_t get_block_size() const {
         return block_size;
     }
@@ -276,6 +287,12 @@ private:
     // small no-alloc context used to build the source/destination view tensors
     // for flush_snapshots()
     struct ggml_context * ctx_tmp = nullptr;
+
+    // true when the current ubatch scheduled snapshot writes that must be
+    // synchronized and flushed after the graph compute (see flush_snapshots)
+    bool needs_snapshot_sync() const override {
+        return !snap_writes.empty() && mem->n_snap > 0;
+    }
 
     void schedule_snap_writes();
 

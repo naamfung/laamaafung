@@ -78,6 +78,10 @@ struct llama_memory_context_i {
     // recurrent state snapshots scheduled by apply() into the snapshot region
     // (used by hybrid prefix sharing). default: no-op.
     virtual void flush_snapshots() {}
+
+    // true when the current ubatch scheduled snapshot writes that must be
+    // synchronized and flushed after the graph compute (see flush_snapshots)
+    virtual bool needs_snapshot_sync() const { return false; }
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;

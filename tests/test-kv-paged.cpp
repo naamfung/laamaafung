@@ -598,6 +598,63 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // scenario I: running-sequence chunk snapshots. a sequence that completes
+    // a block mid-generation (decode) writes a snapshot, so a future request
+    // sharing that chunk skips the recurrent recomputation. needs two spare
+    // sequences (4/5), hence n_seq_max >= 6.
+    if (llama_model_is_hybrid(model.get()) && n_seq_max >= 6) {
+        const uint32_t P_LEN = 6 * BS;                       // same prefix as scenario H
+        const std::vector<llama_token> P = get_tokens(P_LEN, n_vocab, 300);
+        const uint32_t W_LEN = 2 * BS;                       // continuation: 2 full blocks
+        const uint32_t SH_LEN = P_LEN + W_LEN;               // shared prefix: P + W (ends on the old-seq snapshot boundary)
+        const std::vector<llama_token> W = get_tokens(W_LEN, n_vocab, 400);
+        const std::vector<llama_token> V = get_tokens(BS + 4, n_vocab, 401);
+
+        // seq 4: prefill P, continue with W (completes blocks -> old-seq
+        // snapshot path), then the suffix as the full recomputation reference
+        decode(model.get(), lctx.get(), 4, P, 0, P_LEN);
+        decode(model.get(), lctx.get(), 4, W, P_LEN, W_LEN);
+        const std::vector<float> ref_i = decode(model.get(), lctx.get(), 4, V, P_LEN + W_LEN, (uint32_t) V.size());
+
+        // seq 5: [P + W] (not outputs) + suffix (outputs);
+        // the shared prefix crosses the boundary snapshot written by seq 4's
+        // continuation, so the recurrent side restores from it
+        {
+            llama_batch batch = llama_batch_init(SH_LEN + (uint32_t) V.size(), 0, 1);
+            for (uint32_t i = 0; i < P_LEN; i++) {
+                common_batch_add(batch, P[i], i, {5}, false);
+            }
+            for (uint32_t i = 0; i < W_LEN; i++) {
+                common_batch_add(batch, W[i], P_LEN + i, {5}, false);
+            }
+            for (uint32_t i = 0; i < (uint32_t) V.size(); i++) {
+                common_batch_add(batch, V[i], SH_LEN + i, {5}, true);
+            }
+            batch.n_tokens = SH_LEN + (uint32_t) V.size();
+            if (llama_decode(lctx.get(), batch)) {
+                llama_batch_free(batch);
+                throw std::runtime_error("failed to decode hybrid old-seq snapshot batch");
+            }
+
+            std::vector<float> shared_i;
+            shared_i.reserve(V.size() * n_vocab);
+            for (uint32_t i = 0; i < (uint32_t) V.size(); i++) {
+                const float * logits_ith = llama_get_logits_ith(lctx.get(), SH_LEN + i);
+                shared_i.insert(shared_i.end(), logits_ith, logits_ith + n_vocab);
+            }
+            llama_batch_free(batch);
+
+            const double nmse_i = nmse(shared_i, ref_i);
+            fprintf(stderr, "DEBUG hybrid old-seq snapshot nmse=%g\n", nmse_i);
+            if (n_gpu_layers == 0) {
+                check(nmse_i < 1e-5, "I: old-seq chunk snapshot is bit-exact");
+            } else {
+                fprintf(stderr, "WARN: GPU kernel non-determinism - I nmse=%g\n", nmse_i);
+                check(nmse_i < 0.01, "I: old-seq chunk snapshot within tolerance");
+            }
+        }
+    }
+
     fprintf(stderr, "all paged cache tests passed\n");
     return 0;
 }

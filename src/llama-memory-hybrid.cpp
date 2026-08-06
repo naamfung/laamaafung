@@ -178,6 +178,29 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
             return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
+        // budget chunk hashes for running sequences that complete a block in
+        // this batch: their newly-completed chunks become shareable by future
+        // requests. new sequences were fully budgeted in setup_prefix_sharing;
+        // overwriting with the (identical) attention-side chain hash is a no-op.
+        {
+            const auto * paged = dynamic_cast<const llama_kv_paged_cache *>(mem_attn.get());
+            if (paged != nullptr) {
+                const uint32_t block_size = paged->block_size;
+                for (const auto & ub : ubatches) {
+                    for (uint32_t i = 0; i < ub.n_tokens; ++i) {
+                        const llama_seq_id seq = ub.seq_id[i][0];
+                        const llama_pos pos = ub.pos[i];
+                        if (pos >= 0 && (uint32_t) pos % block_size == block_size - 1) {
+                            const uint64_t h = paged->get_block_hash(seq, (uint32_t) pos / block_size);
+                            if (h != 0) {
+                                mem_recr->set_chunk_hash(seq, (uint32_t) pos / block_size, h);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         return std::make_unique<llama_memory_hybrid_context>(
                 this, std::move(heads_attn), std::move(ubatches));
     } while(false);
@@ -461,6 +484,10 @@ bool llama_memory_hybrid_context::apply() {
 
 void llama_memory_hybrid_context::flush_snapshots() {
     ctx_recr->flush_snapshots();
+}
+
+bool llama_memory_hybrid_context::needs_snapshot_sync() const {
+    return ctx_recr->needs_snapshot_sync();
 }
 
 llama_memory_status llama_memory_hybrid_context::get_status() const {
