@@ -201,6 +201,7 @@ int main(int argc, char ** argv) {
     uint32_t n_seq_max = 16;
     int flash_attn = 1;
     bool force = false;
+    bool legacy = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -215,10 +216,17 @@ int main(int argc, char ** argv) {
             flash_attn = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-force") == 0) {
             force = true;
+        } else if (strcmp(argv[i], "-legacy") == 0) {
+            legacy = true;
         } else {
             fprintf(stderr, "unknown argument: %s\n", argv[i]);
             return 2;
         }
+    }
+
+    if (legacy) {
+        // force the legacy contiguous cache (create_memory reads this env var)
+        _putenv_s("LLAMA_KV_LEGACY", "1");
     }
 
     gguf_context_ptr gguf_ctx;
@@ -256,6 +264,10 @@ int main(int argc, char ** argv) {
     ctx_params.n_ctx = n_ctx_arg;
     ctx_params.n_ubatch = 64;
     ctx_params.n_seq_max = n_seq_max;
+    if (legacy) {
+        // seq_cp (used by the legacy diagnostic) requires a full (unified) KV buffer
+        ctx_params.kv_unified = true;
+    }
     ctx_params.flash_attn_type = flash_attn == 0 ? LLAMA_FLASH_ATTN_TYPE_DISABLED
         : flash_attn == 2 ? LLAMA_FLASH_ATTN_TYPE_ENABLED
         : LLAMA_FLASH_ATTN_TYPE_AUTO;
@@ -267,7 +279,24 @@ int main(int argc, char ** argv) {
     llama_memory_t mem = llama_get_memory(lctx.get());
     llama_memory_metrics m = llama_memory_get_metrics(mem);
     if (m.block_size == 0) {
-        throw std::runtime_error("expected a paged cache (block_size == 0)");
+        // not a paged cache (e.g. LLAMA_KV_LEGACY=1): run the diagnostic
+        // legacy branch which verifies that shared prefixes are bit-exact
+        // under flash attention when the KV layout is contiguous
+        if (!legacy) {
+            throw std::runtime_error("expected a paged cache (block_size == 0)");
+        }
+        const uint32_t n_vocab_legacy = llama_vocab_n_tokens(llama_model_get_vocab(model.get()));
+        const std::vector<llama_token> T_l = get_tokens(96, n_vocab_legacy, 42);
+        decode(model.get(), lctx.get(), 0, T_l, 0, 96);
+        const std::vector<float> ref_l = decode(model.get(), lctx.get(), 0, T_l, 96, 1);
+        // share the prefix via seq_cp (contiguous cell copy) and decode the same token
+        llama_memory_seq_cp(mem, 0, 1, 0, 96);
+        const std::vector<float> shared_l = decode(model.get(), lctx.get(), 1, T_l, 96, 1);
+        const double nmse_l = nmse(shared_l, ref_l);
+        fprintf(stderr, "DEBUG legacy shared-prefix nmse=%g\n", nmse_l);
+        check(nmse_l < 1e-5, "legacy: contiguous-layout shared prefix is bit-exact under flash");
+        fprintf(stderr, "legacy diagnostic passed\n");
+        return 0;
     }
     const uint32_t BS = m.block_size;
     const uint32_t n_ctx = llama_n_ctx(lctx.get());
