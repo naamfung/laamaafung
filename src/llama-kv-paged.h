@@ -143,7 +143,7 @@ private:
 
     // block pool + allocation index
     std::vector<block_t>        blocks;
-    std::deque<uint32_t>        free_block_ids;     // ref_count==0, hash==0 (truly free)
+    std::set<uint32_t>          free_block_ids;     // ref_count==0, hash==0 (truly free, ordered for contiguous allocation)
     std::set<uint32_t>          used_block_ids;     // ref_count>0 (in use)
     std::set<uint32_t>          cached_block_ids;   // ref_count==0, hash!=0 (evictable)
     // hash -> one or more physical blocks with that content. multiple blocks

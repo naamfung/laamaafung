@@ -7,6 +7,7 @@
 #include "llama-model.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -102,7 +103,7 @@ llama_kv_paged_cache::llama_kv_paged_cache(
 
     blocks.resize(n_blocks);
     for (uint32_t i = 0; i < n_blocks; ++i) {
-        free_block_ids.push_back(i);
+        free_block_ids.insert(i);
     }
 }
 
@@ -115,9 +116,28 @@ void llama_kv_paged_cache::touch(uint32_t block_id) {
 }
 
 uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq, uint32_t preferred_id) {
+    // Optimization 1: if preferred_id is a valid cached block (ref_count==0, has
+    // hash), evict it ahead of the LRU scan so it enters the free pool first.
+    // This maximizes pref_hit for running sequences whose tail block's neighbor
+    // was previously used as prefix cache.
+    if (preferred_id != ~0u && preferred_id < n_blocks) {
+        auto cached_it = cached_block_ids.find(preferred_id);
+        if (cached_it != cached_block_ids.end()) {
+            auto & blk = blocks[preferred_id];
+            GGML_ASSERT(blk.ref_count == 0);
+            if (blk.hash != 0) {
+                hash_to_block_id_erase(hash_to_block_id, blk.hash, preferred_id);
+            }
+            blk.hash = 0;
+            blk.token_ids.clear();
+            cached_block_ids.erase(cached_it);
+            free_block_ids.insert(preferred_id);
+        }
+    }
+
     while (free_block_ids.empty()) {
         if (!cached_block_ids.empty()) {
-            // evict LRU cached block (ref_count==0, hash!=0)
+            // Evict LRU cached block (ref_count==0, hash!=0)
             uint32_t evict_id = 0;
             uint64_t min_used = std::numeric_limits<uint64_t>::max();
             bool found = false;
@@ -136,7 +156,7 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq, uint32_t pr
             blk.hash = 0;
             blk.token_ids.clear();
             cached_block_ids.erase(evict_id);
-            free_block_ids.push_back(evict_id);
+            free_block_ids.insert(evict_id);
         } else {
             // no free, no cached: preempt (swap out) a block from an LRU seq.
             // loops until a block actually frees up (shared blocks only drop
@@ -148,18 +168,42 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq, uint32_t pr
     }
 
     uint32_t block_id;
+    static std::atomic<uint32_t> s_alloc_cnt{0};
+    static std::atomic<uint32_t> s_pref_hit_cnt{0};
+    bool pref_hit = false;
     if (preferred_id != ~0u && preferred_id < n_blocks) {
-        auto it = std::find(free_block_ids.begin(), free_block_ids.end(), preferred_id);
+        auto it = free_block_ids.find(preferred_id);
         if (it != free_block_ids.end()) {
             block_id = preferred_id;
             free_block_ids.erase(it);
+            pref_hit = true;
         } else {
-            block_id = free_block_ids.front();
-            free_block_ids.pop_front();
+            // Optimization 2: ordered free pool. Choose the smallest free id
+            // that is >= preferred_id (contiguous-growth direction). If none
+            // exists, wrap to the smallest free id available. This keeps the
+            // physical cell indices monotonic for a single sequence even when
+            // the exact preferred block is occupied, minimizing CUDA graph
+            // property churn caused by discontinuous SET_ROWS indices.
+            auto lb = free_block_ids.lower_bound(preferred_id);
+            if (lb != free_block_ids.end()) {
+                block_id = *lb;
+                free_block_ids.erase(lb);
+            } else {
+                block_id = *free_block_ids.begin();
+                free_block_ids.erase(free_block_ids.begin());
+            }
         }
     } else {
-        block_id = free_block_ids.front();
-        free_block_ids.pop_front();
+        block_id = *free_block_ids.begin();
+        free_block_ids.erase(free_block_ids.begin());
+    }
+    const uint32_t tot = s_alloc_cnt.fetch_add(1) + 1;
+    if (pref_hit) s_pref_hit_cnt.fetch_add(1);
+    if (tot == 1 || tot % 256 == 0) {
+        const uint32_t hits = s_pref_hit_cnt.load();
+        LLAMA_LOG_INFO("%s: alloc_block total=%u pref_hit=%u pref_hit_rate=%.1f%% last block_id=%u (preferred=%u, %s)\n",
+                __func__, tot, hits, tot ? hits * 100.0 / tot : 0.0,
+                block_id, preferred_id, pref_hit ? "HIT" : (preferred_id == ~0u ? "none" : "MISS"));
     }
 
     auto & blk = blocks[block_id];
@@ -233,7 +277,7 @@ void llama_kv_paged_cache::release_block(uint32_t block_id) {
             // keep in cached set for prefix reuse, evictable via LRU
             cached_block_ids.insert(block_id);
         } else {
-            free_block_ids.push_back(block_id);
+            free_block_ids.insert(block_id);
         }
     }
 }
@@ -1321,7 +1365,7 @@ void llama_kv_paged_cache::clear(bool data) {
     hash_to_block_id.clear();
     lru_counter = 0;
     for (uint32_t i = 0; i < n_blocks; ++i) {
-        free_block_ids.push_back(i);
+        free_block_ids.insert(i);
     }
     block_tables.clear();
     protected_seqs.clear();
@@ -1682,7 +1726,7 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
             }
             blk.ref_count = 0;
             cached_block_ids.insert(bid);
-            free_block_ids.erase(std::remove(free_block_ids.begin(), free_block_ids.end(), bid), free_block_ids.end());
+            free_block_ids.erase(bid);
             touch(bid); // freshly restored blocks are newest
             if (blk.hash != 0) {
                 hash_to_block_id.emplace(blk.hash, bid);
@@ -1775,7 +1819,7 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
                 io.read(&bid, sizeof(bid));
                 bt[i] = bid;
                 blocks[bid].ref_count++;
-                free_block_ids.erase(std::remove(free_block_ids.begin(), free_block_ids.end(), bid), free_block_ids.end());
+                free_block_ids.erase(bid);
                 used_block_ids.insert(bid);
             }
         }
@@ -1799,7 +1843,7 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
                 io.read(blk.token_ids.data(), n_tokens * sizeof(llama_token));
             }
             blk.ref_count++;
-            free_block_ids.erase(std::remove(free_block_ids.begin(), free_block_ids.end(), bid), free_block_ids.end());
+            free_block_ids.erase(bid);
             if (blk.ref_count == 1) {
                 cached_block_ids.erase(bid);
                 used_block_ids.insert(bid);

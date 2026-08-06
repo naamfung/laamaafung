@@ -2655,9 +2655,24 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
         ggml_cuda_graph::node_properties prop = {};
         memcpy(&prop.node, cgraph->nodes[i], sizeof(ggml_tensor));
 
+        // INPUT tensors (k_idxs, v_idxs, kq_mask, pos, etc.) have their data in the
+        // scheduler's double/triple input buffers, so their data pointers flip between
+        // copies every alloc_graph. This is expected and does not change the captured
+        // graph topology: kernel launches inside CUDA graphs tolerate pointer updates
+        // via cudaGraphExecUpdate as long as the shape/layout stays the same. So we
+        // suppress the data pointer comparison for INPUT tensors (both on the node
+        // itself and on its sources) to avoid spurious warmup resets that kill reuse.
+        if (cgraph->nodes[i]->flags & GGML_TENSOR_FLAG_INPUT) {
+            prop.node.data = nullptr;
+        }
+
         for (int j = 0; j < GGML_MAX_SRC; ++j) {
             if (cgraph->nodes[i]->src[j]) {
-                prop.node_src_data_ptrs[j] = cgraph->nodes[i]->src[j]->data;
+                if (cgraph->nodes[i]->src[j]->flags & GGML_TENSOR_FLAG_INPUT) {
+                    prop.node_src_data_ptrs[j] = nullptr;
+                } else {
+                    prop.node_src_data_ptrs[j] = cgraph->nodes[i]->src[j]->data;
+                }
                 memcpy(prop.node_src_ne[j], cgraph->nodes[i]->src[j]->ne, sizeof(prop.node_src_ne[j]));
                 memcpy(prop.node_src_nb[j], cgraph->nodes[i]->src[j]->nb, sizeof(prop.node_src_nb[j]));
             }
