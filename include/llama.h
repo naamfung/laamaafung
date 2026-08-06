@@ -809,6 +809,11 @@ extern "C" {
     // Swap preemption: restore a seq's K/V from CPU swap buffer back to GPU
     LLAMA_API bool llama_memory_swap_in(llama_memory_t mem, llama_seq_id seq_id);
 
+    // Preemption priority: higher values are retained longer under capacity
+    // pressure; the lowest-priority seq is preempted first (ties by LRU).
+    // Non-paged caches ignore it.
+    LLAMA_API void llama_memory_seq_set_priority(llama_memory_t mem, llama_seq_id seq_id, int32_t priority);
+
     // Paged cache prefix lookup: returns the number of tokens in the longest
     // matching prefix that is already cached (a multiple of block_size).
     // Returns 0 if no prefix is cached or mem is not a paged cache.

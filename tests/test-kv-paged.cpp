@@ -442,6 +442,12 @@ int main(int argc, char ** argv) {
             W.push_back(get_tokens(W_LEN, n_vocab, 50 + i));
         }
 
+        // preemption priority: sequences 4-6 get a high priority, 7-9 stay at
+        // the default (0), so under pressure the low-priority ones are victimized
+        for (int i = 0; i < n_press && i < 3; i++) {
+            llama_memory_seq_set_priority(mem, 4 + i, 10);
+        }
+
         for (int i = 0; i < n_press; i++) {
             const llama_seq_id s = 4 + i;
             if (llama_memory_is_swapped(mem, s)) {
@@ -452,6 +458,22 @@ int main(int argc, char ** argv) {
 
         m = llama_memory_get_metrics(mem);
         check(m.preempt_count > 0, "E: capacity pressure triggered preemption");
+
+        // the high-priority sequences (4-6) must have survived intact; at least
+        // one low-priority sequence (7-9) must have been preempted
+        {
+            bool high_intact = true;
+            for (int i = 0; i < 3; i++) {
+                high_intact &= (llama_memory_seq_pos_max(mem, 4 + i) == W_LEN - 1);
+            }
+            check(high_intact, "E: high-priority sequences retained");
+            bool low_preempted = false;
+            for (int i = 3; i < n_press; i++) {
+                const llama_seq_id s = 4 + i;
+                low_preempted |= llama_memory_is_swapped(mem, s) || llama_memory_seq_pos_max(mem, s) < W_LEN - 1;
+            }
+            check(low_preempted, "E: low-priority sequences preempted first");
+        }
 
         // every sequence must still be able to continue decoding (swap-in path)
         for (int i = 0; i < n_press; i++) {

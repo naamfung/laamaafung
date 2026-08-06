@@ -140,15 +140,19 @@ uint32_t llama_kv_paged_cache::alloc_block(llama_seq_id exclude_seq) {
 }
 
 bool llama_kv_paged_cache::preempt_one(llama_seq_id exclude_seq) {
-    // find the LRU active seq != exclude_seq: the seq whose last block has
-    // the smallest last_used timestamp
+    // find the victim seq != exclude_seq: the lowest-priority seq first,
+    // ties broken by LRU (smallest last_used of its last block)
     llama_seq_id victim = -1;
     uint64_t min_used = std::numeric_limits<uint64_t>::max();
+    int32_t min_prio = std::numeric_limits<int32_t>::max();
     for (auto & [sid, bt] : block_tables) {
         if (sid == exclude_seq) continue;
         if (bt.empty()) continue;
+        const auto pit = seq_priorities.find(sid);
+        const int32_t prio = pit != seq_priorities.end() ? pit->second : 0;
         const uint64_t lu = blocks[bt.back()].last_used;
-        if (lu < min_used) {
+        if (prio < min_prio || (prio == min_prio && lu < min_used)) {
+            min_prio = prio;
             min_used = lu;
             victim = sid;
         }
@@ -325,6 +329,13 @@ void llama_kv_paged_cache::dealloc_seq(llama_seq_id seq_id) {
         release_block(*bit);
     }
     block_tables.erase(it);
+    seq_priorities.erase(seq_id);
+}
+
+void llama_kv_paged_cache::seq_set_priority(llama_seq_id seq_id, int32_t priority) {
+    // keep the entry even for default priority so a later seq_id reuse does
+    // not inherit a stale priority (dealloc_seq erases it on release)
+    seq_priorities[seq_id] = priority;
 }
 
 uint32_t llama_kv_paged_cache::cell_index(llama_seq_id seq_id, llama_pos pos) const {

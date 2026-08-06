@@ -96,6 +96,10 @@ public:
     bool is_swapped(llama_seq_id seq_id) const override;
     bool swap_out  (llama_seq_id seq_id) override;
     bool swap_in   (llama_seq_id seq_id) override;
+
+    // preemption priority: higher values are retained longer under capacity
+    // pressure; the lowest-priority seq is preempted first (ties by LRU)
+    void seq_set_priority(llama_seq_id seq_id, int32_t priority) override;
     uint32_t n_swapped_tokens() const;
 
     // metrics for monitoring
@@ -137,6 +141,9 @@ private:
 
     // per-seq physical block table (block_table[seq][i] -> physical block id)
     std::unordered_map<llama_seq_id, std::vector<uint32_t>> block_tables;
+
+    // preemption priority per sequence (default 0 = LRU-only behavior)
+    std::unordered_map<llama_seq_id, int32_t> seq_priorities;
 
     // swap storage: per-seq CPU buffers for swapped-out K/V data
     struct swap_entry_t {

@@ -126,6 +126,14 @@ struct llama_memory_i {
     virtual bool swap_out  (llama_seq_id seq_id) { (void) seq_id; return false; }
     virtual bool swap_in   (llama_seq_id seq_id) { (void) seq_id; return false; }
 
+    // set the preemption priority of a sequence: higher values are retained
+    // longer under capacity pressure (the lowest-priority seq is preempted
+    // first). default implementation ignores it (non-paged caches).
+    virtual void seq_set_priority(llama_seq_id seq_id, int32_t priority) {
+        (void) seq_id;
+        (void) priority;
+    }
+
     // paged cache prefix lookup: returns the number of matching tokens (a
     // multiple of block_size) for the given token sequence, 0 on miss or for
     // non-paged memory. Only fully-filled blocks participate in matching.
