@@ -43,7 +43,7 @@
 #define LLAMA_FILE_MAGIC_GGSQ 0x67677371u // 'ggsq'
 
 #define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
-#define LLAMA_SESSION_VERSION 9
+#define LLAMA_SESSION_VERSION 10
 
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
 #define LLAMA_STATE_SEQ_VERSION 2
@@ -909,6 +909,13 @@ extern "C" {
                const llama_token * tokens,
                           size_t   n_token_count),
         "use llama_state_save_file instead");
+
+    // Save/load the paged prefix cache (whole block pool + K/V data) to/from
+    // a file, with a model fingerprint header. save returns bytes written
+    // (0 = error). load verifies the fingerprint and returns false on
+    // mismatch or any read error.
+    LLAMA_API size_t llama_state_cache_save(struct llama_context * ctx, const char * filepath);
+    LLAMA_API bool   llama_state_cache_load(struct llama_context * ctx, const char * filepath);
 
     // Get the exact size needed to copy the state of a single sequence
     LLAMA_API size_t llama_state_seq_get_size(

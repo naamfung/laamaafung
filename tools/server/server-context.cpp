@@ -3514,6 +3514,51 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     res->n_erased = n_erased;
                     queue_results.send(std::move(res));
                 } break;
+            case SERVER_TASK_TYPE_CACHE_SAVE:
+            case SERVER_TASK_TYPE_CACHE_LOAD:
+                {
+                    const bool is_save = task.type == SERVER_TASK_TYPE_CACHE_SAVE;
+
+                    // loading replaces the whole pool, which would corrupt any
+                    // in-flight request; defer until all slots are idle
+                    if (!is_save) {
+                        bool busy = false;
+                        for (auto & slot : slots) {
+                            if (slot.is_processing()) {
+                                busy = true;
+                                break;
+                            }
+                        }
+                        if (busy) {
+                            SRV_DBG("cache load deferred: slots busy, id_task = %d\n", task.id);
+                            queue_tasks.defer(std::move(task));
+                            break;
+                        }
+                    }
+
+                    const int64_t t_start = ggml_time_us();
+
+                    size_t n_bytes = 0;
+                    if (is_save) {
+                        n_bytes = llama_state_cache_save(ctx_tgt, task.cache_action.filepath.c_str());
+                    } else {
+                        const bool ok = llama_state_cache_load(ctx_tgt, task.cache_action.filepath.c_str());
+                        if (!ok) {
+                            send_error(task, "failed to load cache file (missing or fingerprint mismatch)", ERROR_TYPE_SERVER);
+                            break;
+                        }
+                    }
+
+                    const int64_t t_end = ggml_time_us();
+                    const double t_ms = (t_end - t_start) / 1000.0;
+
+                    auto res = std::make_unique<server_task_result_cache>();
+                    res->id      = task.id;
+                    res->is_save = is_save;
+                    res->n_bytes = n_bytes;
+                    res->t_ms    = t_ms;
+                    queue_results.send(std::move(res));
+                } break;
             case SERVER_TASK_TYPE_GET_LORA:
                 {
                     // TODO @ngxson : make lora_adapters a dedicated member of server_context
@@ -5656,6 +5701,79 @@ void server_routes::init_routes() {
         }
 
         res->error(format_error_response("Invalid action", ERROR_TYPE_INVALID_REQUEST));
+        return res;
+    };
+
+    // save/load the whole paged prefix cache to/from a file (main-thread task)
+    this->post_cache_save = [this](const server_http_req & req) {
+        auto res = create_response();
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (...) {
+            res->error(format_error_response("invalid JSON body", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        const std::string path = body.value("path", "");
+        if (path.empty()) {
+            res->error(format_error_response("missing 'path'", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
+        server_task task(SERVER_TASK_TYPE_CACHE_SAVE);
+        task.id = res->rd.get_new_id();
+        task.cache_action.filepath = path;
+        res->rd.post_task(std::move(task));
+
+        auto result = res->rd.next(req.should_stop);
+        if (!result) {
+            return res; // connection closed
+        }
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+        auto * res_task = dynamic_cast<server_task_result_cache *>(result.get());
+        GGML_ASSERT(res_task != nullptr);
+        if (res_task->n_bytes == 0) {
+            res->error(format_error_response("failed to save cache", ERROR_TYPE_SERVER));
+            return res;
+        }
+        res->ok(res_task->to_json());
+        return res;
+    };
+
+    this->post_cache_load = [this](const server_http_req & req) {
+        auto res = create_response();
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (...) {
+            res->error(format_error_response("invalid JSON body", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        const std::string path = body.value("path", "");
+        if (path.empty()) {
+            res->error(format_error_response("missing 'path'", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
+        server_task task(SERVER_TASK_TYPE_CACHE_LOAD);
+        task.id = res->rd.get_new_id();
+        task.cache_action.filepath = path;
+        res->rd.post_task(std::move(task));
+
+        auto result = res->rd.next(req.should_stop);
+        if (!result) {
+            return res; // connection closed
+        }
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+        auto * res_task = dynamic_cast<server_task_result_cache *>(result.get());
+        GGML_ASSERT(res_task != nullptr);
+        res->ok(res_task->to_json());
         return res;
     };
 

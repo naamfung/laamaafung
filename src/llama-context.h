@@ -166,6 +166,17 @@ struct llama_context {
                 size_t   n_token_capacity,
                 size_t * n_token_count_out);
 
+    // prefix-cache persistence: save/load the whole paged block pool (used +
+    // cached blocks, block tables, cell metadata, K/V data) with a model
+    // fingerprint header. load verifies the fingerprint and rejects files that
+    // do not match this model/context. save returns bytes written (0 = error).
+    size_t state_cache_save(const char * filepath);
+    bool   state_cache_load(const char * filepath);
+
+    // paged block size of the active KV cache (0 if not paged); part of the
+    // cache-file fingerprint
+    uint32_t kv_block_size() const;
+
     bool state_save_file(
             const char * filepath,
      const llama_token * tokens,
@@ -278,6 +289,10 @@ private:
     //
 
     const llama_model & model;
+
+    // original context parameters (type_k/type_v etc.) - needed for the
+    // cache-file fingerprint
+    const llama_context_params params;
 
     llama_cparams cparams;
 

@@ -77,6 +77,7 @@ llama_context::llama_context(
         const llama_model & model,
               llama_context_params params) :
     model(model),
+    params(std::move(params)),
     cvec(std::make_unique<llama_adapter_cvec>()),
     loras(std::make_unique<llama_adapter_loras>()),
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
@@ -3298,6 +3299,105 @@ bool llama_context::state_save_file(const char * filepath, const llama_token * t
     return true;
 }
 
+// prefix-cache file format: magic + version + model fingerprint + payload
+// (state_write_data output: the whole paged block pool + K/V data). the
+// fingerprint guards against loading K/V data from a different model or
+// context layout, which would produce silently wrong logits.
+static constexpr uint32_t LLAMA_CACHE_MAGIC   = 0xCA4B5047;
+static constexpr uint32_t LLAMA_CACHE_VERSION = 1;
+
+size_t llama_context::state_cache_save(const char * filepath) {
+    llama_file file(filepath, "wb");
+
+    const auto & cparams = get_cparams();
+    const uint32_t fp[9] = {
+        (uint32_t) model.arch,
+        (uint32_t) model.hparams.n_layer(),
+        (uint32_t) model.hparams.n_embd,
+        (uint32_t) model.hparams.n_head_kv(),
+        (uint32_t) model.hparams.n_ctx_train,
+        (uint32_t) params.type_k,
+        (uint32_t) params.type_v,
+        kv_block_size(),
+        cparams.n_ctx_seq,
+    };
+
+    file.write_u32(LLAMA_CACHE_MAGIC);
+    file.write_u32(LLAMA_CACHE_VERSION);
+    file.write_raw(fp, sizeof(fp));
+
+    const size_t n_state = state_get_size();
+    if (n_state == 0) {
+        return 0;
+    }
+    std::vector<uint8_t> buf(n_state);
+    const size_t n_written = state_get_data(buf.data(), n_state);
+    if (n_written == 0) {
+        return 0;
+    }
+
+    const uint64_t n_written_u64 = n_written;
+    file.write_raw(&n_written_u64, sizeof(n_written_u64));
+    file.write_raw(buf.data(), n_written);
+
+    return sizeof(fp) + 2 * sizeof(uint32_t) + sizeof(uint64_t) + n_written;
+}
+
+bool llama_context::state_cache_load(const char * filepath) {
+    llama_file file(filepath, "rb");
+
+    const uint32_t magic   = file.read_u32();
+    const uint32_t version = file.read_u32();
+    if (magic != LLAMA_CACHE_MAGIC || version != LLAMA_CACHE_VERSION) {
+        LLAMA_LOG_ERROR("%s: unknown (magic, version) for cache file: %08x, %08x\n", __func__, magic, version);
+        return false;
+    }
+
+    uint32_t fp[9];
+    file.read_raw(fp, sizeof(fp));
+    const auto & cparams = get_cparams();
+    const uint32_t fp_cur[9] = {
+        (uint32_t) model.arch,
+        (uint32_t) model.hparams.n_layer(),
+        (uint32_t) model.hparams.n_embd,
+        (uint32_t) model.hparams.n_head_kv(),
+        (uint32_t) model.hparams.n_ctx_train,
+        (uint32_t) params.type_k,
+        (uint32_t) params.type_v,
+        kv_block_size(),
+        cparams.n_ctx_seq,
+    };
+    if (memcmp(fp, fp_cur, sizeof(fp)) != 0) {
+        LLAMA_LOG_ERROR("%s: fingerprint mismatch - cache file does not match this model/context, ignoring\n", __func__);
+        return false;
+    }
+
+    uint64_t n_state_u64;
+    file.read_raw(&n_state_u64, sizeof(n_state_u64));
+    // sanity cap: a corrupt/foreign file must not trigger a huge allocation
+    if (n_state_u64 == 0 || n_state_u64 > (uint64_t) 8 * 1024 * 1024 * 1024) {
+        LLAMA_LOG_ERROR("%s: implausible state size %llu\n", __func__, (unsigned long long) n_state_u64);
+        return false;
+    }
+    const size_t n_state = (size_t) n_state_u64;
+    std::vector<uint8_t> buf(n_state);
+    file.read_raw(buf.data(), n_state);
+
+    return state_set_data(buf.data(), n_state) == n_state;
+}
+
+uint32_t llama_context::kv_block_size() const {
+    if (auto * paged = dynamic_cast<llama_kv_paged_cache *>(memory.get())) {
+        return paged->block_size;
+    }
+    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get())) {
+        if (auto * paged = dynamic_cast<llama_kv_paged_cache *>(hybrid->get_mem_attn())) {
+            return paged->block_size;
+        }
+    }
+    return 0;
+}
+
 size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * filepath, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
     llama_file file(filepath, "rb");
 
@@ -4368,7 +4468,6 @@ size_t llama_state_set_data(llama_context * ctx, const uint8_t * src, size_t siz
 
 bool llama_state_load_file(llama_context * ctx, const char * path_session, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
     ctx->synchronize();
-
     try {
         return ctx->state_load_file(path_session, tokens_out, n_token_capacity, n_token_count_out);
     } catch (const std::exception & err) {
@@ -4384,6 +4483,28 @@ bool llama_state_save_file(llama_context * ctx, const char * path_session, const
         return ctx->state_save_file(path_session, tokens, n_token_count);
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: error saving session file: %s\n", __func__, err.what());
+        return false;
+    }
+}
+
+size_t llama_state_cache_save(llama_context * ctx, const char * filepath) {
+    ctx->synchronize();
+
+    try {
+        return ctx->state_cache_save(filepath);
+    } catch (const std::exception & err) {
+        LLAMA_LOG_ERROR("%s: error saving cache file: %s\n", __func__, err.what());
+        return 0;
+    }
+}
+
+bool llama_state_cache_load(llama_context * ctx, const char * filepath) {
+    ctx->synchronize();
+
+    try {
+        return ctx->state_cache_load(filepath);
+    } catch (const std::exception & err) {
+        LLAMA_LOG_ERROR("%s: error loading cache file: %s\n", __func__, err.what());
         return false;
     }
 }

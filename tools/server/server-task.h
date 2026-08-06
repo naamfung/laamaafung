@@ -25,6 +25,8 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_SAVE,
     SERVER_TASK_TYPE_SLOT_RESTORE,
     SERVER_TASK_TYPE_SLOT_ERASE,
+    SERVER_TASK_TYPE_CACHE_SAVE,
+    SERVER_TASK_TYPE_CACHE_LOAD,
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
 };
@@ -179,6 +181,12 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_METRICS
     bool metrics_reset_bucket = false;
+
+    // used by SERVER_TASK_TYPE_CACHE_SAVE, SERVER_TASK_TYPE_CACHE_LOAD
+    struct cache_action {
+        std::string filepath;
+    };
+    cache_action cache_action;
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
@@ -574,6 +582,15 @@ struct server_task_result_slot_save_load : server_task_result {
 
 struct server_task_result_slot_erase : server_task_result {
     size_t n_erased;
+
+    virtual json to_json() override;
+};
+
+struct server_task_result_cache : server_task_result {
+    bool is_save; // true = save, false = load
+
+    size_t n_bytes;
+    double t_ms;
 
     virtual json to_json() override;
 };

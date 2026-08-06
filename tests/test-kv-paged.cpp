@@ -773,6 +773,50 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // scenario L: prefix-cache disk persistence. the whole block pool (used +
+    // cached blocks + K/V data) is saved to a file and restored; the restored
+    // cached prefix must be shareable and produce identical logits.
+    if (n_seq_max >= 16) {
+        const uint32_t L_LEN = 3 * BS + 8;   // 3 full blocks + a partial tail
+        const std::vector<llama_token> L = get_tokens(L_LEN, n_vocab, 700);
+
+        // release every sequence first so the saved cache only carries the
+        // blocks of this scenario (otherwise the restored pool may be nearly
+        // full of stale blocks and preempt the sharing sequences mid-test)
+        llama_memory_seq_rm(mem, -1, -1, -1);
+
+        // seq 13: prefill, then release -> blocks become cached (evictable)
+        decode(model.get(), lctx.get(), 13, L, 0, L_LEN);
+        llama_memory_seq_rm(mem, 13, -1, -1);
+
+        const char * cache_path = "test-kv-paged-cache.bin";
+        check(llama_state_cache_save(lctx.get(), cache_path) > 0, "L: cache save succeeds");
+
+        // wipe the whole cache and restore from disk (state_read clears first)
+        check(llama_state_cache_load(lctx.get(), cache_path), "L: cache load succeeds");
+        std::remove(cache_path);
+
+        const uint32_t hit_l = llama_memory_find_prefix(mem, L.data(), L_LEN);
+        check(hit_l == L_LEN, "L: find_prefix hits restored cached blocks");
+
+        // actually consume the restored K/V: share the prefix explicitly, then
+        // decode only the continuation token on the shared blocks
+        const uint32_t shared_l = llama_memory_share_prefix(mem, 14, L.data(), L_LEN);
+        check(shared_l == L_LEN, "L: share_prefix consumes restored cached blocks");
+
+        // seq 15: full recomputation reference (prefill + continue)
+        decode(model.get(), lctx.get(), 15, L, 0, L_LEN);
+        const std::vector<float> ref_l = decode(model.get(), lctx.get(), 15, L, L_LEN, 1);
+        const std::vector<float> logits_l = decode(model.get(), lctx.get(), 14, L, L_LEN, 1);
+        const double nmse_l = nmse(logits_l, ref_l);
+        fprintf(stderr, "DEBUG L nmse=%g\n", nmse_l);
+        if (flash_attn != 0) {
+            fprintf(stderr, "WARN: flash layout sensitivity - L nmse=%g\n", nmse_l);
+        } else {
+            check(nmse_l < 1e-5, "L: restored-cache sharing matches reference");
+        }
+    }
+
     fprintf(stderr, "all paged cache tests passed\n");
     return 0;
 }

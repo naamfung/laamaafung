@@ -1523,6 +1523,69 @@ void llama_kv_paged_cache::state_write(llama_io_write_i & io, llama_seq_id seq_i
     // write block pool (unique used blocks) first so state_read can reconstruct
     // block_tables before placing cells via block_table mapping
     if (seq_id < 0) {
+        // cached blocks (ref_count==0, hash!=0) first: they carry the
+        // cross-request sharing value, which is exactly what survives a
+        // restart if this state is persisted to disk
+        uint32_t n_cached = (uint32_t) cached_block_ids.size();
+        io.write(&n_cached, sizeof(n_cached));
+        for (uint32_t bid : cached_block_ids) {
+            io.write(&bid, sizeof(bid));
+            const auto & blk = blocks[bid];
+            io.write(&blk.hash, sizeof(blk.hash));
+            uint32_t n_tokens = (uint32_t) blk.token_ids.size();
+            io.write(&n_tokens, sizeof(n_tokens));
+            if (n_tokens > 0) {
+                io.write(blk.token_ids.data(), n_tokens * sizeof(llama_token));
+            }
+
+            // cached-block K/V: their cells were auto-reset on release, so the
+            // base state_write skips them. persist here - a restored cached
+            // block must carry its K/V or sharing it would produce garbage
+            // logits. layout mirrors llama_kv_cache::state_write_data.
+            const uint32_t v_trans = this->v_trans ? 1 : 0;
+            const uint32_t n_layer = (uint32_t) layers.size();
+            io.write(&v_trans, sizeof(v_trans));
+            io.write(&n_layer, sizeof(n_layer));
+            for (const auto & layer : layers) {
+                const uint32_t il = layer.il;
+                for (uint32_t s = 0; s < n_stream; ++s) {
+                    auto * k = layer.k_stream[s];
+                    auto * v = layer.v_stream[s];
+                    if (!k || !v) {
+                        continue;
+                    }
+
+                    const uint32_t n_embd_k_gqa = (uint32_t) k->ne[0];
+                    const int32_t k_type_i = (int32_t) k->type;
+                    const uint64_t k_size_row = ggml_row_size(k->type, n_embd_k_gqa);
+                    io.write(&k_type_i, sizeof(k_type_i));
+                    io.write(&k_size_row, sizeof(k_size_row));
+                    const size_t k_off = (size_t) bid * block_size * k_size_row;
+                    io.write_tensor(k, k_off, (size_t) n_tokens * k_size_row);
+
+                    const int32_t v_type_i = (int32_t) v->type;
+                    io.write(&v_type_i, sizeof(v_type_i));
+                    if (!v_trans) {
+                        const uint32_t n_embd_v_gqa = (uint32_t) v->ne[0];
+                        const uint64_t v_size_row = ggml_row_size(v->type, n_embd_v_gqa);
+                        io.write(&v_size_row, sizeof(v_size_row));
+                        const size_t v_off = (size_t) bid * block_size * v_size_row;
+                        io.write_tensor(v, v_off, (size_t) n_tokens * v_size_row);
+                    } else {
+                        const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(il);
+                        const uint32_t v_size_el = ggml_type_size(v->type);
+                        const uint32_t kv_size = (uint32_t) v->ne[1];
+                        io.write(&v_size_el, sizeof(v_size_el));
+                        io.write(&n_embd_v_gqa, sizeof(n_embd_v_gqa));
+                        for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                            const size_t src_offset = ((size_t) bid * block_size + (size_t) j * kv_size) * v_size_el;
+                            io.write_tensor(v, src_offset, (size_t) n_tokens * v_size_el);
+                        }
+                    }
+                }
+            }
+        }
+
         uint32_t n_unique = (uint32_t) used_block_ids.size();
         io.write(&n_unique, sizeof(n_unique));
         for (uint32_t bid : used_block_ids) {
@@ -1579,11 +1642,92 @@ void llama_kv_paged_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id,
     if (seq_id < 0) {
         clear(true);
 
+        // cached blocks (ref_count==0): restored as evictable cached blocks so
+        // the sharing value survives the roundtrip
+        uint32_t n_cached;
+        io.read(&n_cached, sizeof(n_cached));
+        for (uint32_t i = 0; i < n_cached; ++i) {
+            uint32_t bid;
+            io.read(&bid, sizeof(bid));
+            if (bid >= blocks.size()) {
+                throw std::runtime_error("cache state: block id out of range");
+            }
+            auto & blk = blocks[bid];
+            io.read(&blk.hash, sizeof(blk.hash));
+            uint32_t n_tokens;
+            io.read(&n_tokens, sizeof(n_tokens));
+            blk.token_ids.resize(n_tokens);
+            if (n_tokens > 0) {
+                io.read(blk.token_ids.data(), n_tokens * sizeof(llama_token));
+            }
+            blk.ref_count = 0;
+            cached_block_ids.insert(bid);
+            free_block_ids.erase(std::remove(free_block_ids.begin(), free_block_ids.end(), bid), free_block_ids.end());
+            touch(bid); // freshly restored blocks are newest
+            if (blk.hash != 0) {
+                hash_to_block_id.emplace(blk.hash, bid);
+            }
+
+            // restore the cached-block K/V (mirror of the write side)
+            uint32_t v_trans_f;
+            io.read(&v_trans_f, sizeof(v_trans_f));
+            uint32_t n_layer_f;
+            io.read(&n_layer_f, sizeof(n_layer_f));
+            GGML_ASSERT(n_layer_f == layers.size());
+            for (uint32_t il_f = 0; il_f < n_layer_f; ++il_f) {
+                auto & layer = layers[il_f];
+                for (uint32_t s = 0; s < n_stream; ++s) {
+                    auto * k = layer.k_stream[s];
+                    auto * v = layer.v_stream[s];
+                    if (!k || !v) {
+                        continue;
+                    }
+
+                    int32_t k_type_i;
+                    io.read(&k_type_i, sizeof(k_type_i));
+                    GGML_ASSERT(k_type_i == (int32_t) k->type);
+                    uint64_t k_size_row;
+                    io.read(&k_size_row, sizeof(k_size_row));
+                    std::vector<uint8_t> k_buf((size_t) n_tokens * k_size_row);
+                    io.read(k_buf.data(), k_buf.size());
+                    const size_t k_off = (size_t) bid * block_size * k_size_row;
+                    ggml_backend_tensor_set(k, k_buf.data(), k_off, k_buf.size());
+
+                    int32_t v_type_i;
+                    io.read(&v_type_i, sizeof(v_type_i));
+                    GGML_ASSERT(v_type_i == (int32_t) v->type);
+                    if (!v_trans_f) {
+                        uint64_t v_size_row;
+                        io.read(&v_size_row, sizeof(v_size_row));
+                        std::vector<uint8_t> v_buf((size_t) n_tokens * v_size_row);
+                        io.read(v_buf.data(), v_buf.size());
+                        const size_t v_off = (size_t) bid * block_size * v_size_row;
+                        ggml_backend_tensor_set(v, v_buf.data(), v_off, v_buf.size());
+                    } else {
+                        uint32_t v_size_el;
+                        io.read(&v_size_el, sizeof(v_size_el));
+                        uint32_t n_embd_v_gqa;
+                        io.read(&n_embd_v_gqa, sizeof(n_embd_v_gqa));
+                        const uint32_t kv_size = (uint32_t) v->ne[1];
+                        std::vector<uint8_t> v_buf((size_t) n_tokens * v_size_el);
+                        for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                            io.read(v_buf.data(), v_buf.size());
+                            const size_t dst_offset = ((size_t) bid * block_size + (size_t) j * kv_size) * v_size_el;
+                            ggml_backend_tensor_set(v, v_buf.data(), dst_offset, v_buf.size());
+                        }
+                    }
+                }
+            }
+        }
+
         uint32_t n_unique;
         io.read(&n_unique, sizeof(n_unique));
         for (uint32_t i = 0; i < n_unique; ++i) {
             uint32_t bid;
             io.read(&bid, sizeof(bid));
+            if (bid >= blocks.size()) {
+                throw std::runtime_error("cache state: block id out of range");
+            }
             auto & blk = blocks[bid];
             io.read(&blk.hash, sizeof(blk.hash));
             uint32_t n_tokens;

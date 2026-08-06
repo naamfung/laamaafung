@@ -1674,6 +1674,15 @@ json server_task_result_slot_erase::to_json() {
     };
 }
 
+json server_task_result_cache::to_json() {
+    return json {
+        { "ok",      !is_save || n_bytes > 0 },
+        { "is_save", is_save },
+        { "n_bytes", n_bytes },
+        { "t_ms",    t_ms },
+    };
+}
+
 //
 // server_task_result_get_lora
 //
