@@ -29,7 +29,7 @@ uint32_t llama_kv_paged_cache::detect_block_size(const llama_model & model, bool
         }
     }
 
-    // adaptive block size (P3): aim for roughly constant K/V bytes per block.
+    // adaptive block size: aim for roughly constant K/V bytes per block.
     // wide-KV models (large n_embd_k_gqa) use finer blocks to reduce
     // partial-tail waste on the last block; narrow-KV models use coarser
     // blocks to keep the block count (and management overhead) low.
