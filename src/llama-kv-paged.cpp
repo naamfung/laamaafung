@@ -1012,6 +1012,59 @@ llama_memory_context_ptr llama_kv_paged_cache::init_batch(
         return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
     }
 
+    // Fast path for decode batches: skip hash-chain prefix sharing when
+    // all tokens belong to sequences that already have a block table and
+    // none start at pos 0. This avoids O(N) hash-chain traversal and
+    // prefix lookups for every decode step.
+    bool is_decode_fast = true;
+    for (auto & ub : ubatches) {
+        for (uint32_t i = 0; i < ub.n_tokens; ++i) {
+            if (ub.pos[i] == 0) {
+                is_decode_fast = false;
+                break;
+            }
+            auto bt_it = block_tables.find(ub.seq_id[i][0]);
+            if (bt_it == block_tables.end() || bt_it->second.empty()) {
+                is_decode_fast = false;
+                break;
+            }
+        }
+        if (!is_decode_fast) break;
+    }
+
+    if (is_decode_fast) {
+        // the whole batch is in-flight until processing completes
+        in_flight_seqs.clear();
+        for (auto & ub : ubatches) {
+            for (uint32_t i = 0; i < ub.n_tokens; ++i) {
+                in_flight_seqs.insert(ub.seq_id[i][0]);
+            }
+        }
+
+        if (!pool_budget_fits(ubatches)) {
+            last_budget_failed = true;
+            in_flight_seqs.clear();
+            return std::make_unique<llama_kv_cache_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+        last_budget_failed = false;
+
+        std::unordered_map<llama_seq_id, uint32_t> first_modified_block;
+        slot_info_vec_t sinfos;
+        sinfos.reserve(ubatches.size());
+        for (auto & ubatch : ubatches) {
+            sinfos.push_back(process_ubatch(ubatch, first_modified_block));
+        }
+        in_flight_seqs.clear();
+
+        for (auto & [seq_id, start] : first_modified_block) {
+            auto it = block_tables.find(seq_id);
+            if (it == block_tables.end()) continue;
+            hash_blocks(seq_id, start, (uint32_t) it->second.size());
+        }
+
+        return std::make_unique<llama_kv_cache_context>(this, std::move(sinfos), std::move(ubatches));
+    }
+
     // Phase 3: hash-chain prefix sharing (multi-seq).
     // For each new seq (empty block_table) starting at pos 0, look up the
     // hash chain and share matching full blocks. Shared tokens are then

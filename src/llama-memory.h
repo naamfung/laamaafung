@@ -115,6 +115,14 @@ struct llama_memory_i {
     // status == LLAMA_MEMORY_STATUS_NO_UPDATE if there is nothing to update
     virtual llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) = 0;
 
+    // fast path: true if init_update is guaranteed to produce NO_UPDATE for the
+    // given optimize flag. callers can skip calling memory_update entirely when
+    // this returns false, avoiding unique_ptr construction and virtual dispatch.
+    virtual bool needs_update(bool optimize) const {
+        GGML_UNUSED(optimize);
+        return true;
+    }
+
     // getters
     virtual bool get_can_shift() const = 0;
 

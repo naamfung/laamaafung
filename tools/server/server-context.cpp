@@ -3809,146 +3809,13 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         // next token in priority order (see llama_server_scheduler)
         llama_server_scheduler::pre_decode_prepare(slots, llama_get_memory(ctx_tgt));
 
-        // protect every active slot from preemption: their requests still have
-        // queued work, so a reactive preempt (swap-out) would strand them (the
-        // pool budget then only counts evictable cached blocks, so an
-        // over-capacity batch fails cleanly instead of preempting a slot the
-        // next batch still needs)
+        // Combined single-pass iteration over slots:
+        //   1. protect active slots
+        //   2. detect paged-cache preemption
+        //   3. apply context-shift if needed
+        //   4. classify generating / drafting slots
+        // Previously 4 separate iterates; combined to reduce O(N) CPU overhead.
         llama_memory_t mem = llama_get_memory(ctx_tgt);
-        for (auto & slot : slots) {
-            // protect active slots; release the protection of idle ones so
-            // their cached blocks count as preemption capacity again
-            llama_memory_seq_protect(mem, slot.id, slot.is_processing());
-        }
-
-        // detect paged-cache preemption before any other work: another slot's
-        // alloc_block may have evicted some of this slot's tail KV positions.
-        // prompt-phase slots rewind prompt.tokens so the prefill loop replays
-        // them from input_tokens; generating slots set n_preempt_recovery and
-        // the replay happens in handle_last_sampled_token() (lost tokens are
-        // not in input_tokens, only in prompt.tokens).
-        iterate(slots, [&](server_slot & slot) {
-            if (!slot.is_processing() || slot.state == SLOT_STATE_STARTED) {
-                return;
-            }
-
-            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
-            const int n_cached = pos_max < 0 ? 0 : (int) pos_max + 1;
-            const int n_have   = slot.prompt.n_tokens();
-
-            if (n_cached >= n_have) {
-                return;
-            }
-
-            const int n_lost = n_have - n_cached;
-            SLT_WRN(slot, "preemption detected: state=%d, n_have=%d, n_cached=%d, n_lost=%d\n",
-                    (int) slot.state, n_have, n_cached, n_lost);
-
-            if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
-                // lost tokens are prompt tokens that exist in input_tokens;
-                // rewind prompt.tokens to n_cached and let the prefill loop
-                // re-add them. seq_rm at p0=n_cached is a no-op (cache already
-                // at n_cached).
-                slot.prompt.tokens.keep_first(n_cached);
-                slot.n_prompt_tokens_cache = n_cached;
-                slot.state = SLOT_STATE_PROCESSING_PROMPT;
-            } else if (slot.state == SLOT_STATE_GENERATING) {
-                // lost tokens are generated tokens (not in input_tokens);
-                // replay them in handle_last_sampled_token() before sampled
-                if (slot.prompt.tokens.has_mtmd) {
-                    // multimodal slots cannot rewind across image chunks safely
-                    send_error(slot, "preemption recovery not supported for multimodal slots", ERROR_TYPE_SERVER);
-                    slot.release();
-                    return;
-                }
-                slot.n_preempt_recovery = n_lost;
-                // discard any speculative draft; we recompute deterministically
-                slot.spec_draft.clear();
-                slot.spec_i_batch.clear();
-            }
-            // WAIT_OTHER: nothing to do; parent slot will trigger recovery
-        });
-
-        // apply context-shift if needed
-        // TODO: simplify and improve
-        iterate(slots, [&](server_slot & slot) {
-            if (slot.is_processing() && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
-                // skip context shift for slots that just started a new task
-                // the prompt processing code will clear the old KV cache
-                if (slot.state == SLOT_STATE_STARTED) {
-                    return;
-                }
-
-                if (!params_base.ctx_shift) {
-                    // this check is redundant (for good)
-                    // we should never get here, because generation should already stopped in process_token()
-                    send_error(slot, "context shift is disabled", ERROR_TYPE_SERVER);
-                    slot.release();
-                    return;
-                }
-
-                if (mctx) {
-                    // we should never reach this because params_base.ctx_shift is automatically disabled if mmproj is loaded
-                    // we don't support ctx_shift because an image chunk may contains multiple tokens
-                    GGML_ABORT("not supported by multimodal");
-                }
-
-                if (slot.task->is_parent() || slot.task->is_child()) {
-                    send_error(slot, "context shift cannot be used for shared prompt", ERROR_TYPE_SERVER);
-                    slot.release();
-                    return;
-                }
-
-                // Shift context
-                int n_keep = slot.task->params.n_keep < 0 ? slot.task->n_tokens() : slot.task->params.n_keep;
-
-                if (add_bos_token) {
-                    n_keep += 1;
-                }
-
-                n_keep = std::min(slot.n_ctx - 4, n_keep);
-
-                const int n_left    = slot.prompt.n_tokens() - n_keep;
-                int       n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 2);
-
-                // ref: https://github.com/ggml-org/llama.cpp/pull/24786
-                n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
-
-                {
-                    const auto & prompt_tokens = slot.prompt.tokens.get_tokens();
-                    int junction = n_keep + n_discard;
-                    int shift = check_tag_boundary(ctx_tgt, prompt_tokens, junction);
-                    if (shift != 0) {
-                        SLT_WRN(slot, "adjusted context shift boundary by %d tokens to avoid splitting a tag\n", shift);
-                        n_discard += shift;
-                        n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
-                    }
-                }
-
-                SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
-
-                slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
-                slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
-
-                // add generated tokens to cache
-                // ref: https://github.com/ggml-org/llama.cpp/pull/16818#discussion_r2473269481
-                {
-                    GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
-
-                    llama_tokens new_tokens = slot.prompt.tokens.get_tokens(); // copy
-                    for (size_t i = n_keep + n_discard; i < new_tokens.size(); i++) {
-                        new_tokens[i - n_discard] = new_tokens[i];
-                    }
-
-                    new_tokens.resize(slot.prompt.tokens.size() - n_discard);
-
-                    slot.prompt.clear();
-                    slot.prompt.tokens.insert(new_tokens);
-                }
-
-                slot.truncated = true;
-            }
-        });
 
         // start populating the batch for this iteration
         batch.clear();
@@ -3959,61 +3826,143 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         std::vector<server_slot *> generating;
         std::vector<server_slot *> drafting;
 
-        // determine which slots are generating and drafting
         iterate(slots, [&](server_slot & slot) {
-            if (slot.state != SLOT_STATE_GENERATING) {
-                return;
-            }
+            // ---- Step 1: protect active slots ----
+            llama_memory_seq_protect(mem, slot.id, slot.is_processing());
 
-            // check if we can batch this slot with the previous one
-            if (!slot_batched) {
-                slot_batched = &slot;
-            } else if (!slot_batched->can_batch_with(slot)) {
-                return;
-            }
+            // ---- Step 2: detect paged-cache preemption ----
+            if (slot.is_processing() && slot.state != SLOT_STATE_STARTED) {
+                const llama_pos pos_max = llama_memory_seq_pos_max(mem, slot.id);
+                const int n_cached = pos_max < 0 ? 0 : (int) pos_max + 1;
+                const int n_have   = slot.prompt.n_tokens();
 
-            generating.push_back(&slot);
+                if (n_cached < n_have) {
+                    const int n_lost = n_have - n_cached;
+                    SLT_WRN(slot, "preemption detected: state=%d, n_have=%d, n_cached=%d, n_lost=%d\n",
+                            (int) slot.state, n_have, n_cached, n_lost);
 
-            if (spec) {
-                common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
-
-                const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-                const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-
-                const int n_draft_max = slot.get_n_draft_max();
-
-                if (n_draft_max > 0) {
-                    GGML_ASSERT(slot.can_speculate());
-
-                    if (!slot.spec_draft.empty()) {
-                        // we have a previous (partial) draft to reuse
-                        if (use_ckpt_tgt) {
-                            GGML_ASSERT(!slot.spec_ckpt.empty());
+                    if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
+                        slot.prompt.tokens.keep_first(n_cached);
+                        slot.n_prompt_tokens_cache = n_cached;
+                        slot.state = SLOT_STATE_PROCESSING_PROMPT;
+                    } else if (slot.state == SLOT_STATE_GENERATING) {
+                        if (slot.prompt.tokens.has_mtmd) {
+                            send_error(slot, "preemption recovery not supported for multimodal slots", ERROR_TYPE_SERVER);
+                            slot.release();
+                        } else {
+                            slot.n_preempt_recovery = n_lost;
+                            slot.spec_draft.clear();
+                            slot.spec_i_batch.clear();
                         }
+                    }
+                }
+            }
+
+            // ---- Step 3: apply context-shift if needed ----
+            if (slot.is_processing() && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+                if (slot.state != SLOT_STATE_STARTED) {
+                    if (!params_base.ctx_shift) {
+                        send_error(slot, "context shift is disabled", ERROR_TYPE_SERVER);
+                        slot.release();
+                    } else if (mctx) {
+                        GGML_ABORT("not supported by multimodal");
+                    } else if (slot.task->is_parent() || slot.task->is_child()) {
+                        send_error(slot, "context shift cannot be used for shared prompt", ERROR_TYPE_SERVER);
+                        slot.release();
                     } else {
-                        GGML_ASSERT(slot.spec_i_batch.empty());
+                        int n_keep = slot.task->params.n_keep < 0 ? slot.task->n_tokens() : slot.task->params.n_keep;
+                        if (add_bos_token) {
+                            n_keep += 1;
+                        }
+                        n_keep = std::min(slot.n_ctx - 4, n_keep);
 
-                        llama_pos pos_end = slot.prompt.tokens.pos_next(slot.prompt.n_tokens());
-                        slot.spec_ckpt.update_pos(
-                                slot.prompt.n_tokens(),
-                                llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
-                                llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
-                                pos_end);
+                        const int n_left    = slot.prompt.n_tokens() - n_keep;
+                        int       n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 2);
+                        n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
 
-                        if (use_ckpt_dft) {
-                            slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                        {
+                            const auto & prompt_tokens = slot.prompt.tokens.get_tokens();
+                            int junction = n_keep + n_discard;
+                            int shift = check_tag_boundary(ctx_tgt, prompt_tokens, junction);
+                            if (shift != 0) {
+                                SLT_WRN(slot, "adjusted context shift boundary by %d tokens to avoid splitting a tag\n", shift);
+                                n_discard += shift;
+                                n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
+                            }
                         }
 
-                        slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
+                        SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
-                        common_speculative_get_draft_params(spec.get(), slot.id) = {
-                            /* .drafting = */ true,
-                            /* .n_max    = */ n_draft_max,
-                            /* .n_past   = */ slot.prompt.n_tokens(),
-                            /* .id_last  = */ slot.sampled,
-                            /* .prompt   = */ &slot.spec_prompt,
-                            /* .result   = */ &slot.spec_draft,
-                        };
+                        slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
+                        slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
+
+                        {
+                            GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
+                            llama_tokens new_tokens = slot.prompt.tokens.get_tokens();
+                            for (size_t i = n_keep + n_discard; i < new_tokens.size(); i++) {
+                                new_tokens[i - n_discard] = new_tokens[i];
+                            }
+                            new_tokens.resize(slot.prompt.tokens.size() - n_discard);
+                            slot.prompt.clear();
+                            slot.prompt.tokens.insert(new_tokens);
+                        }
+
+                        slot.truncated = true;
+                    }
+                }
+            }
+
+            // ---- Step 4: classify generating / drafting ----
+            if (slot.state == SLOT_STATE_GENERATING) {
+                if (!slot_batched) {
+                    slot_batched = &slot;
+                } else if (!slot_batched->can_batch_with(slot)) {
+                    return;
+                }
+
+                generating.push_back(&slot);
+
+                if (spec) {
+                    common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
+
+                    const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                    const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+
+                    const int n_draft_max = slot.get_n_draft_max();
+
+                    if (n_draft_max > 0) {
+                        GGML_ASSERT(slot.can_speculate());
+
+                        if (!slot.spec_draft.empty()) {
+                            // we have a previous (partial) draft to reuse
+                            if (use_ckpt_tgt) {
+                                GGML_ASSERT(!slot.spec_ckpt.empty());
+                            }
+                        } else {
+                            GGML_ASSERT(slot.spec_i_batch.empty());
+
+                            llama_pos pos_end = slot.prompt.tokens.pos_next(slot.prompt.n_tokens());
+                            slot.spec_ckpt.update_pos(
+                                    slot.prompt.n_tokens(),
+                                    llama_memory_seq_pos_min(mem, slot.id),
+                                    llama_memory_seq_pos_max(mem, slot.id),
+                                    pos_end);
+
+                            if (use_ckpt_dft) {
+                                slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                            }
+
+                            slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
+
+                            common_speculative_get_draft_params(spec.get(), slot.id) = {
+                                /* .drafting = */ true,
+                                /* .n_max    = */ n_draft_max,
+                                /* .n_past   = */ slot.prompt.n_tokens(),
+                                /* .id_last  = */ slot.sampled,
+                                /* .prompt   = */ &slot.spec_prompt,
+                                /* .result   = */ &slot.spec_draft,
+                            };
+                        }
 
                         drafting.push_back(&slot);
                     }

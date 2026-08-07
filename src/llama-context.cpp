@@ -1004,6 +1004,12 @@ bool llama_context::memory_update(bool optimize) {
         return false;
     }
 
+    // fast path: skip entirely if the memory implementation guarantees
+    // NO_UPDATE for the given flag.
+    if (!memory->needs_update(optimize)) {
+        return false;
+    }
+
     {
         const auto mctx = memory->init_update(this, optimize);
         switch (mctx->get_status()) {

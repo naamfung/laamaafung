@@ -69,6 +69,13 @@ public:
 
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
+    // paged cache: no K-shift, no stream copy -> init_update always returns
+    // NO_UPDATE, so callers can skip memory_update entirely for both flags.
+    bool needs_update(bool optimize) const override {
+        GGML_UNUSED(optimize);
+        return false;
+    }
+
     bool get_can_shift() const override;
 
     bool can_append(llama_seq_id seq_id, uint32_t n_tokens) const override;
