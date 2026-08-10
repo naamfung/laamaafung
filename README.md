@@ -88,7 +88,7 @@ D:/Programs/llama-cpp-repos/laamaafung-build-v12/bin/Release/llama-server.exe --
 
 當 MoE 專家層透過 `-ncmoe` 卸載到 CPU 時，CPU 與 GPU 之間每層都有同步開銷。若 CPU 使用全部物理核心做 MoE 計算，會與 CUDA driver 的 sync 調度競爭，反而降低 decode 吞吐量。設置 `LLAMA_THREADS_RATIO` 留出部分核心可顯著提升性能。
 
-以下為 **Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP**（Qwen35MOE 架構）在 **Xeon E5-2696 v3（18 核/18 線程）+ RTX 3060 Ti 8GB** 上的實測數據（`-ngl 99 -ncmoe 33 -ctk turbo4 -ctv turbo4 -ub 1024`）：
+以下為 **Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP**（Qwen35MOE 架構）在 **Xeon E5-2696 v3（18 核/18 線程）+ RTX 3060 Ti 8GB** 上的實測數據（`-ngl 99 -ncmoe 33 -ctk turbo4 -ctv turbo3 -ub 1024`）：
 
 | threads | ratio | tg128 (tok/s) | 變化 |
 | :---: | :---: | :---: | :---: |
@@ -175,6 +175,24 @@ llama_context::from_params: n_ubatch set to auto, selected value: 4096 based on 
 | `GGML_TURBO_MMA_FUSED` | `1`（開啟） | 控制 CUDA fused turbo MMA 路徑。設為 `0` 可關閉，回退到 VEC 路徑（功能完整，僅失去 tensor core 加速）。 |
 
 MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`、`Q->ne[1] <= 4`（解碼場景）、`Q->ne[0]` 為 128 或 256。條件不滿足時自動回退到 VEC 路徑，無需手動干預。
+
+---
+
+#### MoE 模型性能優化（計算與數據上傳重疊及 CPU 權重內存固定）
+
+針對 MoE（混合專家）模型，我們實現了以下性能優化：
+
+1. **計算與數據上傳重疊**：
+   在較大 batch size 下，幾乎所有專家都會被使用，因此無需等待路由 ID 的讀取回傳。系統會通過第二個 backend 實例（在同一設備上，使用自己的 stream）上傳完整的專家 tensors，並使用兩個 event-ordered staging slots，使得 N+1 張量的上傳與 N 張量的計算重疊。
+   
+   可通過環境變量 `GGML_SCHED_PREFETCH_EXPERTS=1` 啟用此優化。
+
+2. **CPU 權重內存固定優化**：
+   在模型加載完成後，對保留在系統內存中的權重內存頁進行固定（pin mmap-backed CPU weights），以實現更快的主機到設備（H2D）傳輸。這對於 MoE 專家權重在 prefill 階段動態加載到 GPU 時特別有效。
+   
+   可通過環境變量 `GGML_CUDA_REGISTER_HOST=1`（針對 CUDA 後端）啟用此優化。
+
+這些優化可顯著提升 MoE 模型的性能，例如在 Qwen3.6-35B-A3B 模型上，預取優化可將吞吐量從 1383 提升到 1663 t/s（在 RTX 3060 上，-ncmoe 26, ub 2048），而 CPU 權重內存固定優化可將吞吐量從 1144 提升到 1385 t/s。
 
 ---
 
@@ -438,11 +456,13 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="Agentic-Turbo-Coder"
 Glash 是基于我对 crush 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/glash
 
 
-### Inx
+### Rex
 
-从响应速度而言，我推荐使用 Inx ，其基于我对 Reasonix 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/inx
+从响应速度而言，我推荐使用 Rex ，其基于我对 Reasonix 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/rex
 
-克隆之后用「make build」编译，将得到的二进制程序放到你系统环境变量可搜索到的路径，启动终端运行「inx setup」选 ANTHROPIC 兼容协议配置好 laamaafung server 运行的端口。再次启动「inx」即可畅享本地模型支持下的编程乐趣。
+克隆之后用「make build」编译，将得到的二进制程序放到你系统环境变量可搜索到的路径，启动终端运行「rex setup」选 ANTHROPIC 兼容协议配置好 laamaafung server 运行的端口。再次启动「rex」即可畅享本地模型支持下的编程乐趣。
+
+由于 Reasonix 主线发布到其生产路径下的版本根本就不稳定，时神时鬼，不推荐直接使用 Reasonix，建议锁定一版自认稳定的版本或使用我维护的 Rex 版。
 
 ---
 
