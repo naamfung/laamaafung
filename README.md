@@ -19,10 +19,10 @@
   git clone -b v17 https://github.com/naamfung/laamaafung.git
   ```
 
-- **回退版本（v6）**：
-  如須使用舊版穩定分支 `v6`，可執行：
+- **回退版本（v12）**：
+  如須使用舊版穩定分支 `v12`，可執行：
   ```sh
-  git clone -b v6 https://github.com/naamfung/laamaafung.git
+  git clone -b v12 https://github.com/naamfung/laamaafung.git
   ```
 
 - **克隆開發分支**：
