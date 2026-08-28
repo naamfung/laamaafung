@@ -267,7 +267,11 @@ llama_pos server_tokens::pos_next(int64_t n_tokens) const {
     int64_t idx = 0;
     llama_pos pos = 0;
 
-    GGML_ASSERT(n_tokens <= (int64_t)tokens.size());
+    // clamp to the tokens available in this list - a caller may pass a token
+    // count taken from a full task while this list only holds a cached prefix
+    if (n_tokens > (int64_t) tokens.size()) {
+        n_tokens = (int64_t) tokens.size();
+    }
 
     while (idx < n_tokens) {
         const auto media_it = map_idx_to_media.find(idx);
