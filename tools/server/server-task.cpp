@@ -187,10 +187,15 @@ common_chat_msg task_result_state::update_chat_msg(
         // the tool call count regresses; the final parse at EOF (with
         // strict_eof_on_complete) will produce the correct result.
         if (is_partial && new_msg.tool_calls.size() < chat_msg.tool_calls.size()) {
-            SRV_TRC("partial parse regressed tool calls (%zu -> %zu), skipping update\n",
-                    chat_msg.tool_calls.size(), new_msg.tool_calls.size());
+            // log only once per distinct regressed count to avoid flooding the log
+            if (last_regressed_tool_calls != new_msg.tool_calls.size()) {
+                last_regressed_tool_calls = new_msg.tool_calls.size();
+                SRV_TRC("partial parse regressed tool calls (%zu -> %zu), skipping update\n",
+                        chat_msg.tool_calls.size(), new_msg.tool_calls.size());
+            }
             return chat_msg;
         }
+        last_regressed_tool_calls = std::numeric_limits<size_t>::max();
 
         chat_msg = new_msg;
         auto all_diffs = common_chat_msg_diff::compute_diffs(msg_prv_copy, chat_msg);

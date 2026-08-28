@@ -2595,7 +2595,13 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 // self-check prompt is an internal protocol using generic
                 // <complete>/<incomplete> markers that work across all vendors.
                 bool self_check_armed = false;
-                if (!slot.cached_messages.empty() && slot.self_check_phase == server_slot::SELF_CHECK_NONE) {
+                // the hidden self-check turn is truncated from the KV cache via
+                // sequence removal when it ends with <incomplete>. recurrent and
+                // hybrid caches only allow a rollback bounded by n_rs_seq, so the
+                // removal can fail there - skip self-check and use the direct
+                // EOG-suppression fallback below for such contexts instead
+                if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART &&
+                        !slot.cached_messages.empty() && slot.self_check_phase == server_slot::SELF_CHECK_NONE) {
                     std::string sc_prompt = build_self_check_prompt(slot);
                     if (!sc_prompt.empty()) {
                         llama_tokens sc_tokens = common_tokenize(ctx_tgt, sc_prompt, false, true);

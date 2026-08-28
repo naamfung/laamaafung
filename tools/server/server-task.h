@@ -4,6 +4,7 @@
 #include "llama.h"
 
 #include <string>
+#include <limits>
 #include <unordered_set>
 #include <list>
 #include <map>
@@ -116,6 +117,10 @@ struct task_result_state {
     std::string generated_text; // append new chunks of generated text here
     std::vector<std::string> generated_tool_call_ids;
     std::unordered_set<size_t> sent_tool_call_names;
+
+    // last partial tool-call count that we skipped due to regression, to log
+    // the regression only once per distinct count instead of on every token
+    size_t last_regressed_tool_calls = std::numeric_limits<size_t>::max();
 
     // for OpenAI Responses and Anthropic streaming API:
     // track output item / content block state across chunks
