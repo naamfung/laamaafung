@@ -723,10 +723,6 @@ struct common_params {
     std::string mcp_servers_config;   // path to JSON file with MCP server definitions
     std::string mcp_servers_json;     // inline JSON with MCP server definitions
 
-    // MCP server configs (Cursor-compatible JSON)
-    std::string mcp_servers_config;   // path to JSON file with MCP server definitions
-    std::string mcp_servers_json;     // inline JSON with MCP server definitions
-
     // router server configs
     std::string models_dir    = "";     // directory containing models for the router server
     std::string models_preset = "";     // directory containing model presets for the router server
@@ -1043,17 +1039,9 @@ enum common_context_seq_rm_type {
 // note: clears the memory of the context
 common_context_seq_rm_type common_context_can_seq_rm(llama_context * ctx);
 
-struct common_memory {
-    llama_context * ctx_tgt = nullptr;
-    llama_context * ctx_dft = nullptr;
-
-    void init(llama_context * ctx_tgt, llama_context * ctx_dft = nullptr);
-
-    // aborts execution on failure
-    void seq_rm (llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
-    void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const;
-    void seq_cp (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
-};
+void common_context_seq_rm (llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+void common_context_seq_cp (llama_context * ctx, llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1);
+void common_context_seq_add(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta);
 
 struct common_memory {
     llama_context * ctx_tgt = nullptr;
