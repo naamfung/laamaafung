@@ -65,7 +65,7 @@ struct common_reasoning_budget_ctx {
     size_t force_pos;         // next position in forced_tokens to force
 
     int32_t end_match;        // index into end_matcher.seqs of the sequence that transitioned to DONE, -1 if none
-    bool   was_forced;        // true if the DONE state was reached via FORCING (budget exhausted or manual)
+bool   was_forced;        // true if the DONE state was reached via FORCING (budget exhausted or manual)
 };
 
 static const char * common_reasoning_budget_name(const struct llama_sampler * /*smpl*/) {
@@ -222,6 +222,8 @@ static struct llama_sampler_i common_reasoning_budget_i = {
     /* .backend_accept    = */ nullptr,
     /* .backend_apply     = */ nullptr,
     /* .backend_set_input = */ nullptr,
+    /* .backend_reset     = */ nullptr,
+    /* .copy_state        = */ nullptr,
 };
 
 static struct llama_sampler * common_reasoning_budget_clone(const struct llama_sampler * smpl) {

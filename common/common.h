@@ -250,7 +250,7 @@ struct common_params_sampling {
     float   temp               = 0.80f;  // <= 0.0 to sample greedily, 0.0 to not output probabilities
     float   dynatemp_range     = 0.00f;  // 0.0 = disabled
     float   dynatemp_exponent  = 1.00f;  // controls how entropy maps to temperature in dynamic temperature sampler
-    int32_t penalty_last_n     = 64;     // last n tokens to penalize (0 = disable penalty, -1 = context size)
+    int32_t penalty_last_n     = 64;     // last n tokens to penalize (0 = disable penalty)
     float   penalty_repeat     = 1.00f;  // 1.0 = disabled
     float   penalty_freq       = 0.00f;  // 0.0 = disabled
     float   penalty_present    = 0.00f;  // 0.0 = disabled
@@ -353,10 +353,6 @@ struct common_params_sampling {
 
     bool backend_sampling = false;
 
-    bool has_logit_bias() const {
-        return !logit_bias.empty();
-    }
-
     // print the parameters into a string
     std::string print() const;
 };
@@ -455,14 +451,6 @@ struct common_params_speculative {
     }
 };
 
-struct common_params_vocoder {
-    struct common_params_model model;
-
-    std::string speaker_file; // speaker file path
-
-    bool use_guide_tokens = false; // enable guide tokens to improve TTS accuracy
-};
-
 struct common_params_diffusion {
     int32_t steps         = 128;
     bool    visual_mode   = false;
@@ -518,6 +506,7 @@ struct common_params {
     int32_t n_parallel            =     1; // number of parallel sequences to decode
     int32_t n_sequences           =     1; // number of sequences to decode
     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
+    int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
     int32_t grp_attn_n            =     1; // group-attention factor
     int32_t grp_attn_w            =   512; // group-attention width
     int32_t n_print               =    -1; // print token count every n tokens (-1 = disabled)
@@ -543,7 +532,7 @@ struct common_params {
     std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
-    enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_MMAP; // how to load the model
+    enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_AUTO; // how to load the model
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;
@@ -560,7 +549,6 @@ struct common_params {
 
     struct common_params_sampling    sampling;
     struct common_params_speculative speculative;
-    struct common_params_vocoder     vocoder;
     struct common_params_diffusion   diffusion;
 
     struct common_params_model model;
@@ -653,9 +641,10 @@ struct common_params {
 
     // multimodal models (see tools/mtmd)
     struct common_params_model mmproj;
-    bool mmproj_use_gpu = true;     // use GPU for multimodal model
-    bool no_mmproj = false;         // explicitly disable multimodal model
-    std::vector<std::string> image; // path to image file(s) ; TODO: change the name to "media"
+    bool mmproj_use_gpu = true;                 // use GPU for multimodal model
+    ggml_backend_dev_t mmproj_device = nullptr; // GPU device to use for multimodal model
+    bool no_mmproj = false;                     // explicitly disable multimodal model
+    std::vector<std::string> image;             // path to image file(s) ; TODO: change the name to "media"
     int image_min_tokens = -1;
     int image_max_tokens = -1;
     int mtmd_batch_max_tokens = 1024;
@@ -728,6 +717,11 @@ struct common_params {
 
     // enable built-in tools
     std::vector<std::string> server_tools;
+    std::string server_tools_runtime;
+
+    // MCP server configs (Cursor-compatible JSON)
+    std::string mcp_servers_config;   // path to JSON file with MCP server definitions
+    std::string mcp_servers_json;     // inline JSON with MCP server definitions
 
     // MCP server configs (Cursor-compatible JSON)
     std::string mcp_servers_config;   // path to JSON file with MCP server definitions
@@ -803,6 +797,12 @@ struct common_params {
     llama_progress_callback load_progress_callback = NULL;
     void *                  load_progress_callback_user_data = NULL;
     bool no_alloc = false; // Don't allocate model buffers
+
+    // TTS params
+    std::string tts_lang = "";
+    std::string tts_speaker_file = "";
+
+    bool is_gen_docs = false; // whether we are running inside llama-gen-docs
 };
 
 // call once at the start of a program if it uses libcommon
@@ -928,6 +928,15 @@ std::string string_from(const struct llama_context * ctx, const struct llama_bat
 bool glob_match(const std::string & pattern, const std::string & str);
 
 //
+// Environment utils
+//
+
+// portable environment access, an unset variable reads as an empty string
+// and setting an empty value unsets the variable
+std::string common_get_env(const std::string & name);
+void        common_set_env(const std::string & name, const std::string & value);
+
+//
 // Filesystem utils
 //
 
@@ -937,6 +946,7 @@ bool fs_is_directory(const std::string & path);
 
 std::string fs_get_cache_directory();
 std::string fs_get_cache_file(const std::string & filename);
+std::string fs_get_config_directory();
 
 struct common_file_info {
     std::string path;
@@ -984,9 +994,8 @@ using common_init_result_ptr = std::unique_ptr<common_init_result>;
 
 common_init_result_ptr common_init_from_params(common_params & params, bool model_only = false);
 
-struct llama_model_params     common_model_params_to_llama  (      common_params & params);
-struct llama_context_params   common_context_params_to_llama(const common_params & params);
-struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const common_cpu_params & params);
+struct llama_model_params   common_model_params_to_llama  (      common_params & params);
+struct llama_context_params common_context_params_to_llama(const common_params & params);
 
 // clear LoRA adapters from context, then apply new list of adapters
 void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
@@ -996,6 +1005,28 @@ std::string common_get_model_endpoint();
 
 // for testing purposes
 char * common_get_model_or_exit(int, char*[]);
+
+//
+// Threadpool utils
+//
+
+struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const common_cpu_params & params);
+
+struct common_threadpools {
+    common_threadpools() = default;
+    ~common_threadpools();
+
+    common_threadpools(const common_threadpools &) = delete;
+    common_threadpools & operator=(const common_threadpools &) = delete;
+
+    void init(llama_context * ctx, const common_params & params);
+
+private:
+    ggml_threadpool * threadpool       = nullptr;
+    ggml_threadpool * threadpool_batch = nullptr;
+
+    decltype(ggml_threadpool_free) * free_fn = nullptr;
+};
 
 //
 // Context utils
@@ -1012,10 +1043,17 @@ enum common_context_seq_rm_type {
 // note: clears the memory of the context
 common_context_seq_rm_type common_context_can_seq_rm(llama_context * ctx);
 
-// aborts execution on failure
-void common_context_seq_rm (llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1);
-void common_context_seq_add(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta);
-void common_context_seq_cp (llama_context * ctx, llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1);
+struct common_memory {
+    llama_context * ctx_tgt = nullptr;
+    llama_context * ctx_dft = nullptr;
+
+    void init(llama_context * ctx_tgt, llama_context * ctx_dft = nullptr);
+
+    // aborts execution on failure
+    void seq_rm (llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
+    void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const;
+    void seq_cp (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
+};
 
 struct common_memory {
     llama_context * ctx_tgt = nullptr;

@@ -24,6 +24,20 @@
   ```sh
   git clone -b v12 https://github.com/naamfung/laamaafung.git
   ```
+<div align="center">
+
+<b>LLM inference in C/C++</b>
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp?filter=v*&color=brightgreen)](https://github.com/ggml-org/llama.cpp/releases?q=tag:v0)
+[![Nightly](https://img.shields.io/github/v/release/ggml-org/llama.cpp?label=nightly&filter=b*&color=orange)](https://github.com/ggml-org/llama.cpp/releases?q=b)
+[![Server](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/server.yml?label=Server)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
+[![Docker](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/docker.yml?label=Docker)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
+[![Winget](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/winget.yml?label=Winget)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
+
+[ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md) / [maintainer PRs](https://github.com/ggml-org/llama.cpp/issues?q=is%3Apr%20is%3Aopen%20draft%3AFalse%20(author%3Argerganov%20OR%20author%3AKitaitiMakoto%20OR%20author%3Adanbev%20OR%20author%3Aaldehir%20OR%20author%3Amax-krasnyansky%20OR%20author%3ACISC%20OR%20author%3Aggerganov%20OR%20author%3Aam17an%20OR%20author%3Abartowski1182%20OR%20author%3Anikwen%20OR%20author%3Ahipudding%20OR%20author%3AServeurpersoCom%20OR%20author%3Apwilkin%20OR%20author%3Areeselevine%20OR%20author%3Angxson%20OR%20author%3Ajeffbolznv%20OR%20author%3Amarty1885%20OR%20author%3A0cc4m%20OR%20author%3ATitaniumtown%20OR%20author%3Aangt%20OR%20author%3AIMbackK%20OR%20author%3Aarthw%20OR%20author%3AJohannesGaessler%20OR%20author%3AORippler%20OR%20author%3Aruixiang63%20OR%20author%3Axctan%20OR%20author%3Aallozaur%20OR%20author%3Ayomaytk%20OR%20author%3Aaendk%20OR%20author%3Agaugarg-nv%20OR%20author%3Ataronaeo%20OR%20author%3Aforforever73%20OR%20author%3Alhez%20OR%20author%3Anetrunnereve%20OR%20author%3Afairydreaming)%20sort%3Aupdated-desc) / [dev stats](https://github.com/ggml-org/llama.cpp-dev) / [lib llama API](https://github.com/ggml-org/llama.cpp/issues/9289) / [llama-server REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
+
+</div>
 
 - **克隆開發分支**：
   ```sh
@@ -61,6 +75,40 @@ Q80 + TURBO4：
 ```sh
 D:/Programs/llama-cpp-repos/laamaafung/build-v11/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all -ngld all --n-cpu-moe 33 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v turbo4 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
+A few options to get `llama.cpp` installed on your machine:
+
+- Visit https://llama.app and follow the instructions
+- Run with Docker - see our [Docker documentation](docs/docker.md)
+- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
+- Build from source by cloning this repository - check out [our build guide](docs/build.md)
+
+Once installed:
+
+```sh
+# Download and run a model directly from Hugging Face
+llama cli -hf ggml-org/Qwen3.5-0.8B-GGUF
+
+# Launch OpenAI-compatible API server
+llama serve -hf ggml-org/Qwen3.5-0.8B-GGUF
+```
+
+<table align="center">
+    <tr>
+        <td align="center" width=50%>
+            <img width="1310" height="888" alt="VLM session with `llama cli`" src="https://github.com/user-attachments/assets/88726b48-1713-48aa-a525-95a02e78afc4" />
+            <i>VLM session with <b>llama cli</b></i>
+        </td>
+        <td align="center">
+            <img width="1392" height="958" alt="Built-in web UI against `llama serve` running Qwen 3.6" src="https://github.com/user-attachments/assets/b402f972-2e32-4def-8771-8d849f08cf2e" />
+            <i>Built-in web UI against <b>llama serve</b></i>
+        </td>
+    </tr>
+<table>
+
+## Description
+
+The main goal of `llama.cpp` is to enable LLM (and VLM) inference with minimal setup and state-of-the-art performance on
+a wide range of hardware - locally and in the cloud.
 
 TURBO4 + TURBO3：
 
@@ -471,3 +519,64 @@ Glash 是基于我对 crush 的本地化适配，提供终端環境下的编程�
 `llama.cpp` is a C/C++ library for LLM inference, designed to enable efficient model inference with minimal setup on a wide range of hardware (Apple Silicon, x86/ARM CPUs, NVIDIA/AMD GPUs, Vulkan, WebGPU, etc.). 
 
 This `laamaafung` fork is based on the `llama.cpp` upstream codebase, focusing on fixing inference engine issues that prevent models from successfully driving agentic long-horizon tasks.
+The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-org/ggml) library.
+
+## Supported backends
+
+| Backend | Target devices |
+| --- | --- |
+| [BLAS](docs/build.md#blas-build) | All |
+| [BLIS](docs/backend/BLIS.md) | All |
+| [CANN](docs/build.md#cann) | Ascend NPU |
+| [CUDA](docs/build.md#cuda) | Nvidia GPU |
+| [HIP](docs/build.md#hip) | AMD GPU |
+| [Hexagon [In Progress]](docs/backend/snapdragon/README.md) | Snapdragon |
+| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
+| [MUSA](docs/build.md#musa) | Moore Threads GPU |
+| [Metal](docs/build.md#metal-build) | Apple Silicon |
+| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
+| [OpenVINO [In Progress]](docs/backend/OPENVINO.md) | Intel CPUs, GPUs, and NPUs |
+| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
+| [SYCL](docs/backend/SYCL.md) | Intel GPU |
+| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
+| [Vulkan](docs/build.md#vulkan) | GPU |
+| [WebGPU](docs/build.md#webgpu) | All |
+| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
+
+## Documentation
+
+#### Tools
+
+- [cli](tools/cli/README.md)
+- [completion](tools/completion/README.md)
+- [server](tools/server/README.md)
+- [GBNF grammars](grammars/README.md)
+
+#### Development
+
+- [How to build](docs/build.md)
+- [Running on Docker](docs/docker.md)
+- [Build on Android](docs/android.md)
+- [Multi-GPU usage](docs/multi-gpu.md)
+- [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
+- [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
+- [XCFramework](docs/xcframework.md)
+- [Completions](docs/completions.md)
+- [Models](docs/models.md)
+- [Release process](docs/release.md)
+
+## Contributing
+
+- Contributors can open PRs
+- Collaborators will be invited based on contributions
+- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
+- Any help with managing issues, PRs and projects is very appreciated!
+- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
+
+## Acknowledgements
+
+- [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
+- [nothings/stb](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
+- [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
+- [mackron/miniaudio](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
+- [sheredom/subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain

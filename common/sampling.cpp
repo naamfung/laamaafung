@@ -210,7 +210,6 @@ std::string common_params_sampling::print() const {
 
 static llama_sampler * common_sampler_chain_build(const struct llama_model * model, const struct common_params_sampling & params) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
-
     llama_sampler_chain_params lparams = llama_sampler_chain_default_params();
 
     lparams.no_perf = params.no_perf;
@@ -447,7 +446,7 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         }
     }
 
-    rbudget = common_sampler_reasoning_budget_init(vocab, params, prefill_tokens);
+rbudget = common_sampler_reasoning_budget_init(vocab, params, prefill_tokens);
 
     llama_sampler * chain = common_sampler_chain_build(model, params);
 
@@ -482,7 +481,7 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_TAU)       { params_think.mirostat_tau       = params.reasoning_mirostat_tau; }
         if (config & COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA)       { params_think.mirostat_eta       = params.reasoning_mirostat_eta; }
 
-        chain_think = common_sampler_chain_build(model, params_think);
+chain_think = common_sampler_chain_build(model, params_think);
     }
 
     if (grmr && params.backend_sampling) {
@@ -653,6 +652,26 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
         /* .cur            = */ gsmpl->cur,
         /* .cur_p          = */ gsmpl->cur_p,
     };
+}
+
+void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
+    if (!src || !dst || src == dst) {
+        return;
+    }
+
+    GGML_ASSERT((src->grmr == nullptr) == (dst->grmr == nullptr));
+    GGML_ASSERT((src->rbudget == nullptr) == (dst->rbudget == nullptr));
+
+    llama_sampler_copy(src->grmr,    dst->grmr);
+    llama_sampler_copy(src->rbudget, dst->rbudget);
+    llama_sampler_copy(src->chain,   dst->chain);
+
+    dst->params     = src->params;
+    dst->prev       = src->prev;
+    dst->cur        = src->cur;
+    dst->cur_p      = src->cur_p;
+    dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
+    dst->t_total_us = src->t_total_us;
 }
 
 void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {

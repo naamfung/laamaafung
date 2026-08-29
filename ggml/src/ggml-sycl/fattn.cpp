@@ -90,84 +90,6 @@ static void ggml_sycl_flash_attn_ext_vec(ggml_backend_sycl_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
 #endif // GGML_SYCL_FA_ALL_QUANTS
 
-#ifdef GGML_SYCL_TURBO_QUANT
-    // Turbo KV cache type combos
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO2_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO2_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO2_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE( 64, GGML_TYPE_F16,       GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_F16,       GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_F16,       GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_F16,       GGML_TYPE_TURBO2_0)
-
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO3_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO3_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO3_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO3_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE( 64, GGML_TYPE_F16,       GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_F16,       GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_F16,       GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_F16,       GGML_TYPE_TURBO3_0)
-
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO4_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO4_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO4_0, GGML_TYPE_F16)
-    FATTN_VEC_CASE( 64, GGML_TYPE_F16,       GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_F16,       GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_F16,       GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_F16,       GGML_TYPE_TURBO4_0)
-
-    // q8_0 + turbo combos
-    FATTN_VEC_CASE( 64, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO2_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO2_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO2_0,  GGML_TYPE_Q8_0)
-
-    FATTN_VEC_CASE( 64, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO3_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO3_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO3_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO3_0,  GGML_TYPE_Q8_0)
-
-    FATTN_VEC_CASE( 64, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_Q8_0,      GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(128, GGML_TYPE_TURBO4_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(256, GGML_TYPE_TURBO4_0,  GGML_TYPE_Q8_0)
-    FATTN_VEC_CASE(512, GGML_TYPE_TURBO4_0,  GGML_TYPE_Q8_0)
-
-    // Cross-turbo K/V combos
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO3_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO2_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO3_0)
-#endif // GGML_SYCL_TURBO_QUANT
-
     GGML_ABORT("Not match KV type in vec");
 }
 
@@ -175,7 +97,7 @@ static void ggml_sycl_flash_attn_ext_vec(ggml_backend_sycl_context & ctx, ggml_t
 enum best_fattn_kernel {
     BEST_FATTN_KERNEL_NONE     =   0,
     BEST_FATTN_KERNEL_VEC      = 100,
-    BEST_FATTN_KERNEL_ONEDNN   = 150, // added enum for onednn==150
+    BEST_FATTN_KERNEL_ONEDNN   = 150, // oneDNN SDPA: native F16 (PR #25222)
     BEST_FATTN_KERNEL_TILE     = 200,
     BEST_FATTN_KERNEL_MKL      = 300,
 };
@@ -207,6 +129,14 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
     bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+
+    // XMX-accelerated path: oneDNN SDPA (native F16 and dequant+non-F16).
+    // ONEDNN requires min 32 query tokens — short-circuit decode to avoid
+    // calling _supported() on every decode FA call.
+    if (Q->ne[1] >= 32
+        && ggml_sycl_flash_attn_ext_onednn_supported(dst)) {
+        return BEST_FATTN_KERNEL_ONEDNN;
+    }
 
     // MKL path: XMX-accelerated GEMM for prompt processing (all KV cache types).
     // The MKL kernel converts non-F16 K/V to F16 via to_fp16_sycl before GEMM,
@@ -245,7 +175,6 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
             return BEST_FATTN_KERNEL_MKL;
         }
     }
-
     for (const ggml_tensor * t : {Q, K, V, mask}) {
         if (t == nullptr || ggml_is_quantized(t->type)) {
             continue;
@@ -284,17 +213,8 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
             return BEST_FATTN_KERNEL_NONE;
     }
 
-    const bool K_is_turbo = (K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0);
-    const bool V_is_turbo = (V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0);
-
-#ifndef GGML_SYCL_TURBO_QUANT
-    if (K_is_turbo || V_is_turbo) {
-        return BEST_FATTN_KERNEL_NONE;
-    }
-#endif // GGML_SYCL_TURBO_QUANT
-
 #ifndef GGML_SYCL_FA_ALL_QUANTS
-    if (K->type != V->type && !K_is_turbo && !V_is_turbo) {
+    if (K->type != V->type) {
         return BEST_FATTN_KERNEL_NONE;
     }
 #endif // GGML_SYCL_FA_ALL_QUANTS
@@ -302,6 +222,7 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
     switch (K->type) {
         case GGML_TYPE_F32:
         case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
             break;
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -312,38 +233,19 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
             break;
-        case GGML_TYPE_TURBO2_0:
-        case GGML_TYPE_TURBO3_0:
-        case GGML_TYPE_TURBO4_0:
-            break;
         default:
             return BEST_FATTN_KERNEL_NONE;
-    }
-
-    if (V_is_turbo || K_is_turbo) {
-        if (Q->ne[0] > 512) {
-            return BEST_FATTN_KERNEL_NONE;
-        }
-        // Cross-turbo K/V combos supported (turbo2<->turbo3, turbo2<->turbo4, turbo3<->turbo4)
-        if (K_is_turbo && !V_is_turbo && V->type != GGML_TYPE_F16 && V->type != GGML_TYPE_Q8_0) {
-            return BEST_FATTN_KERNEL_NONE;
-        }
-        if (V_is_turbo && !K_is_turbo && K->type != GGML_TYPE_F16 && K->type != GGML_TYPE_Q8_0) {
-            return BEST_FATTN_KERNEL_NONE;
-        }
-        // softcap+turbo is valid for D<=512: softcap is applied post-dot-product, independent of K/V quantization.
     }
 
     if (mask && mask->ne[2] != 1) {
         return BEST_FATTN_KERNEL_NONE;
     }
 
-    // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
-    const bool can_use_vector_kernel = Q->ne[0] <= 512 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0;
-
-    if (V_is_turbo || K_is_turbo) {
-        return BEST_FATTN_KERNEL_NONE;
-    }
+    // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes.
+    // BF16 is excluded: the VEC kernel has no BF16 template (it needs GGML_SYCL_FA_ALL_QUANTS for non-F16/Q4_0/Q8_0).
+    const bool has_bf16 = (K->type == GGML_TYPE_BF16 || V->type == GGML_TYPE_BF16);
+    const bool can_use_vector_kernel = Q->ne[0] <= 512 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0
+        && !has_bf16;
 
     // Fused-XMX path: oneDNN Graph SDPA (flash attention). Strictly
     // additive -- taken only when statically supported, otherwise falls through to VEC/TILE below.
@@ -385,6 +287,7 @@ void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst
         const char * kname = "TILE";
         best_fattn_kernel k = ggml_sycl_get_best_fattn_kernel(ctx.device, dst);
         if (k == BEST_FATTN_KERNEL_MKL)  kname = "MKL";
+        if (k == BEST_FATTN_KERNEL_ONEDNN)  kname = "ONEDNN";
         if (k == BEST_FATTN_KERNEL_VEC)  kname = "VEC";
         int64_t delta = 0;
         if (Dk == 256) {
@@ -401,7 +304,8 @@ void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst
                 (long long)V_dbg->ne[1]);
     }
 
-    switch (ggml_sycl_get_best_fattn_kernel(ggml_sycl_get_device(), dst)) {
+    const best_fattn_kernel fk = ggml_sycl_get_best_fattn_kernel(ggml_sycl_get_device(), dst);
+    switch (fk) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("Not support Flash-Attention");
         case BEST_FATTN_KERNEL_ONEDNN:
@@ -440,6 +344,7 @@ void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst
             q->wait();
             const char * kname = "???";
             best_fattn_kernel kb = ggml_sycl_get_best_fattn_kernel(ctx.device, dst);
+            if (kb == BEST_FATTN_KERNEL_ONEDNN) kname = "ONEDNN";
             if (kb == BEST_FATTN_KERNEL_MKL) kname = "MKL";
             if (kb == BEST_FATTN_KERNEL_TILE) kname = "TILE";
             if (kb == BEST_FATTN_KERNEL_VEC) kname = "VEC";
@@ -463,6 +368,7 @@ void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst
             }
         }
     }
+
 }
 
 bool ggml_sycl_flash_attn_ext_supported(int device, const ggml_tensor * dst) {

@@ -16,7 +16,7 @@ enum common_reasoning_budget_state {
 };
 
 // Creates a reasoning budget sampler that limits token generation inside a
-// reasoning block (e.g. between <think> and </think>).
+// reasoning block (e.g. between  thinking and  response).
 //
 // State machine: IDLE -> COUNTING -> WAITING_UTF8 -> FORCING -> DONE
 //   IDLE:         passthrough, watching for a start sequence
