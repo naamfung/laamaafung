@@ -1,6 +1,7 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
+#include "fattn-mma-q4_0.cuh"
 #include "fattn-mma-turbo.cuh"
 #include "fattn-tile.cuh"
 #include "fattn-vec.cuh"
@@ -232,6 +233,16 @@ static void ggml_cuda_flash_attn_ext_mma_turbo_prefill(ggml_backend_cuda_context
     if (Q->ne[1] <= 16) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 16, 1, type_K, type_V>(ctx, dst); return; }
     if (Q->ne[1] <= 32) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 32, 1, type_K, type_V>(ctx, dst); return; }
     ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 64, 1, type_K, type_V>(ctx, dst);
+}
+
+template <int DKQ, int DV, ggml_type type_K, ggml_type type_V>
+static void ggml_cuda_flash_attn_ext_mma_q4_0(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * Q = dst->src[0];
+    // ncols2 == 8 (gqa_ratio > 4, enforced by ggml_cuda_fattn_mma_use_quantized_kv).
+    // ncols1 in {1,2,4} covers Q->ne[1] <= FATTN_MMA_Q_MAX_NCOLS1 == 8.
+    if (Q->ne[1] <= 1) { ggml_cuda_flash_attn_ext_mma_q4_0_case<DKQ, DV, 1, 8, type_K, type_V>(ctx, dst); return; }
+    if (Q->ne[1] <= 2) { ggml_cuda_flash_attn_ext_mma_q4_0_case<DKQ, DV, 2, 8, type_K, type_V>(ctx, dst); return; }
+    ggml_cuda_flash_attn_ext_mma_q4_0_case<DKQ, DV, 4, 8, type_K, type_V>(ctx, dst); // Q->ne[1] in {3,4,...,8}
 }
 
 // Env latch for the fused turbo MMA path (decode + prefill). DEFAULT ON.
@@ -689,9 +700,16 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                         return BEST_FATTN_KERNEL_VEC;
                     }
                     // Before Ada the MMA kernel must dequantize the whole K/V cache to F16 on every
-                    // call. For small batches that costs more than the attention itself.
-                    if (ggml_cuda_fattn_vec_use_gqa(device, dst)) {
-                        return BEST_FATTN_KERNEL_VEC;
+                    // call. For small batches that costs more than the attention itself. When it
+                    // dequantizes Q4_0 inline instead that reason disappears from Q->ne[1] == 2
+                    // upwards, so the read-once MMA wins over the GQA vector kernel there.
+                    const bool mma_q_claims =
+                        ggml_cuda_fattn_mma_use_quantized_kv(cc, dst) &&
+                        Q->ne[1] >= ggml_cuda_fattn_mma_q_mode();
+                    if (!mma_q_claims) {
+                        if (ggml_cuda_fattn_vec_use_gqa(device, dst)) {
+                            return BEST_FATTN_KERNEL_VEC;
+                        }
                     }
                 }
             }
@@ -769,9 +787,14 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
 
     switch (kernel) {
         case BEST_FATTN_KERNEL_TILE:
-        case BEST_FATTN_KERNEL_MMA_F16:
             need_f16_K = true;
             need_f16_V = true;
+            break;
+        case BEST_FATTN_KERNEL_MMA_F16:
+            // The inline-dequant Q4_0 variant reads the quantized cache directly, so no
+            // F16 scratch copy of it is reserved. Must agree with the launch path.
+            need_f16_K = !ggml_cuda_fattn_mma_use_quantized_kv(ggml_cuda_info().devices[device].cc, dst);
+            need_f16_V = need_f16_K;
             break;
         case BEST_FATTN_KERNEL_VEC:
             need_f16_K = K->type == GGML_TYPE_F32;
@@ -853,6 +876,16 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 }
             }
         }
+    }
+
+    // Fused Q4_0 MMA path: on Turing/Ampere a Q4_0 verify batch dequantizes inline instead
+    // of converting the whole cache to F16 on every call. Gated by GGML_CUDA_FATTN_MMA_Q.
+    // Pre-empts the GQA vector kernel for Q->ne[1] >= mma_q_mode, so the MMA read-once
+    // behaviour wins for small verify batches. Only DKQ == DV == 256 is instantiated.
+    if (ggml_cuda_fattn_mma_use_quantized_kv(ggml_cuda_info().devices[ggml_cuda_get_device()].cc, dst) &&
+            dst->src[0]->ne[1] >= ggml_cuda_fattn_mma_q_mode()) {
+        ggml_cuda_flash_attn_ext_mma_q4_0<256, 256, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0>(ctx, dst);
+        return;
     }
 
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
