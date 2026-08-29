@@ -2076,7 +2076,9 @@ static __global__ void flash_attn_ext_f16(
     ggml_cuda_pdl_sync(); // TODO optimize placement
 
     // ne31==1 is a sentinel set by launch_fattn when built-in causal masking is enabled.
-    const int causal = (ne31 == 1);
+    // A single-token decode also has mask->ne[1]==1, so only treat as causal when no
+    // explicit mask tensor is supplied (causal passes mask_ptr==nullptr).
+    const int causal = (ne31 == 1) && (mask_ptr == nullptr);
 
 #if defined(FLASH_ATTN_AVAILABLE) && (defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE))
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
