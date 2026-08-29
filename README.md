@@ -464,6 +464,11 @@ Glash 是基于我对 crush 的本地化适配，提供终端環境下的编程�
 
 由于 Reasonix 主线发布到其生产路径下的版本根本就不稳定，时神时鬼，不推荐直接使用 Reasonix，建议锁定一版自认稳定的版本或使用我维护的 Rex 版。
 
+
+### Dsc
+
+推荐在本地模型环境中使用 Dsc 作为编程代理：https://github.com/naamfung/dsc
+
 ---
 
 ## llama.cpp
