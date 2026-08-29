@@ -3111,9 +3111,6 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
     if (flags & TENSOR_SKIP) {
         const int skip = TENSOR_NOT_REQUIRED | TENSOR_SKIP;
 
-    if (flags & TENSOR_SKIP) {
-        const int skip = TENSOR_NOT_REQUIRED | TENSOR_SKIP;
-
         create_tensor(tn(LLM_TENSOR_ATTN_QKV, "weight", bid), {n_embd_, n_embd_qkv}, skip | TENSOR_SKIP_IF_VIRTUAL);
         create_tensor(tn(LLM_TENSOR_ATTN_QKV, "bias",   bid), {n_embd_qkv},          skip | TENSOR_SKIP_IF_VIRTUAL);
         create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", bid), {n_embd_, n_embd_q_},  skip);

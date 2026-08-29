@@ -383,7 +383,7 @@ void ggml_cuda_mul_mat_tq(ggml_backend_cuda_context & ctx,
     if (use_dp4a) {
         // NVIDIA TQ4_1S: dp4a int8 path (optimized for Turing+ dp4a throughput)
         const int n_total_blocks = n_total_elements / 32;
-        ggml_cuda_pool_alloc<block_q8_1> q8_1_buf(ctx.pool(id), n_total_blocks);
+        ggml_cuda_pool_alloc<block_q8_1> q8_1_buf(ctx.pool(), n_total_blocks);
 
         // Phase 1: Pre-rotate all tokens → q8_1
         {
@@ -409,7 +409,7 @@ void ggml_cuda_mul_mat_tq(ggml_backend_cuda_context & ctx,
         }
     } else {
         // Scalar half path: TQ3_1S (all vendors) + TQ4_1S on AMD (dp4a regresses on RDNA4)
-        ggml_cuda_pool_alloc<half> act_buf(ctx.pool(id), n_total_elements);
+        ggml_cuda_pool_alloc<half> act_buf(ctx.pool(), n_total_elements);
 
         {
             const int n_total_blocks = n_total_elements / 32;
@@ -535,7 +535,7 @@ void ggml_cuda_mul_mat_tq4_1s_cublas(ggml_backend_cuda_context & ctx,
     const int64_t n_elements = ne00 * ne01;
 
     // Step 1: TQ4_1S → fp16 via warp-cooperative dequant (WHT in-warp)
-    ggml_cuda_pool_alloc<half> src0_f16(ctx.pool(id), n_elements);
+    ggml_cuda_pool_alloc<half> src0_f16(ctx.pool(), n_elements);
     {
         const to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(GGML_TYPE_TQ4_1S);
         GGML_ASSERT(to_fp16 != nullptr);
@@ -543,7 +543,7 @@ void ggml_cuda_mul_mat_tq4_1s_cublas(ggml_backend_cuda_context & ctx,
     }
 
     // Step 2: src1 f32 → fp16
-    ggml_cuda_pool_alloc<half> src1_f16(ctx.pool(id), ne10 * ne11);
+    ggml_cuda_pool_alloc<half> src1_f16(ctx.pool(), ne10 * ne11);
     {
         const to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(GGML_TYPE_F32);
         GGML_ASSERT(to_fp16 != nullptr);
@@ -556,9 +556,9 @@ void ggml_cuda_mul_mat_tq4_1s_cublas(ggml_backend_cuda_context & ctx,
     const float beta  = 0.0f;
     const int64_t ldc = dst->ne[0];  // M
 
-    CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
+    CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(), stream));
     CUBLAS_CHECK(
-        cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
+        cublasGemmEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne00,
                 &alpha, src0_f16.get(), CUDA_R_16F, ne00,
                         src1_f16.get(), CUDA_R_16F, ne10,

@@ -2647,7 +2647,6 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 #endif
                 }
             }
-        }
 
         if (!use_cuda_graph) {
             break;
