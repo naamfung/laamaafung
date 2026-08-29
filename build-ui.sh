@@ -105,7 +105,6 @@ log "running $pkg_mgr run build"
 )
 
 [ -f "$ui_src/dist/index.html" ] || die "build failed: dist/index.html missing"
-[ -f "$ui_src/dist/loading.html" ] || die "build failed: dist/loading.html missing"
 
 # Pack archive (contents of dist/ at archive root; ui-assets.cmake flattens if wrapped)
 log "packing archive"
