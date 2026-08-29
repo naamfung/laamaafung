@@ -43,9 +43,20 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
 
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 
+    // A drafter GGUF may carry a truncated LM head plus a d2t tensor mapping its rows back to
+    // target token ids. Only the head shrinks: the MTP input embedding gathers tok_embd by
+    // full-vocab id (see graph_mtp), so tok_embd must stay at n_vocab rows.
+    int64_t n_vocab_draft = n_vocab;
+    const struct ggml_tensor * d2t_meta = ml.get_tensor_meta("d2t");
+    if (d2t_meta) {
+        n_vocab_draft = d2t_meta->ne[0];
+        d2t = create_tensor(tn(LLM_TENSOR_D2T), { n_vocab_draft }, 0);
+        LLAMA_LOG_INFO("%s: QWEN35 using d2t mapping (draft_vocab_size = %lld)\n", __func__, (long long) n_vocab_draft);
+    }
+
     // output
     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
-    output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+    output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab_draft }, TENSOR_NOT_REQUIRED);
 
     // if output is NULL, init from the input tok embed
     if (output == NULL) {
@@ -219,7 +230,9 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    // LM head
+    // LM head. This path has no d2t scatter, so a truncated head would emit logits indexed by
+    // draft ids. Unreachable today (a d2t model is MTP-only), but fail loudly if that changes.
+    GGML_ASSERT(!model.d2t && "QWEN35: d2t (truncated vocab) is only supported on the MTP graph");
     cur = build_lora_mm(model.output, cur, model.output_s);
 
     cb(cur, "result_output", -1);
@@ -638,6 +651,24 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
     GGML_ASSERT(head_w && "QWEN35 MTP: missing LM head (nextn.shared_head_head or model.output)");
     cur = build_lora_mm(head_w, cur, head_s);
+
+    // Scatter a truncated draft head back into target vocabulary space, leaving unmapped rows
+    // at -inf so downstream samplers see a normal full-width logits row (same as EAGLE3).
+    if (model.d2t) {
+        const int64_t n_draft_vocab = cur->ne[0];
+        const int64_t n_outputs     = cur->ne[1];
+        const int64_t n_vocab       = (int64_t) model.vocab.n_tokens();
+
+        GGML_ASSERT(model.d2t->type == GGML_TYPE_I64);
+        GGML_ASSERT(model.d2t->ne[0] == n_draft_vocab);
+
+        ggml_tensor * logits = ggml_fill(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, n_vocab, n_outputs), -INFINITY);
+        cur = ggml_set_rows(ctx0, logits,
+                ggml_reshape_3d(ctx0, cur,       1,             n_draft_vocab, n_outputs),
+                ggml_reshape_3d(ctx0, model.d2t, n_draft_vocab, 1,             1));
+        cur = ggml_reshape_2d(ctx0, cur, n_vocab, n_outputs);
+    }
+
     cb(cur, "result_output", -1);
 
     res->t_logits = cur;

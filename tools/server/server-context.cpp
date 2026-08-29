@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <cinttypes>
 #include <exception>
 #include <iterator>
@@ -4345,10 +4346,17 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         // yield to the queue, so we can still handle metrics tasks while decoding
         // note: the sync is done here too, so that the wait is also covered by the yield
         int ret = 0;
+        // Vendored (patch 0001): per-phase spec-decode profiling. The timer wraps the decode
+        // inside the yield so the measured span matches the pre-#27133 call site semantics.
+        static const bool spec_prof = std::getenv("LLAMA_SPEC_PROF") != nullptr;
         queue_tasks.yield_to_queue([&]() {
+            const int64_t spec_prof_t0 = spec_prof ? ggml_time_us() : 0;
             ret = llama_decode(ctx_tgt, batch_view);
             if (ret == 0 && has_output) {
                 llama_synchronize(ctx_tgt);
+            }
+            if (spec_prof) {
+                common_spec_prof_add_target_decode(batch_view.n_tokens, ggml_time_us() - spec_prof_t0);
             }
         });
 

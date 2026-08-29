@@ -369,6 +369,24 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
                 return ne11 <= MMVQ_MAX_BATCH_SIZE;
         }
     }
+    // Vendored, opt-in per backend: GGML_CUDA_MMVQ_NE11_MAX lowers the dense-path MMVQ batch cap.
+    // Measured on this host (RTX 3090, Qwen3.8-27B Q4_K): forward-step cost crosses over to the
+    // tiled MMQ path at ne11 ~ 3.4 (MMVQ marginal 5.55 ms/token vs MMQ 0.39), so the qwen3.8
+    // backend sets 3 to route speculative verify batches of 4-8 onto MMQ. The crossover is
+    // model-size dependent (a blanket 3 cost gemma4-A4B 34% of its decode), hence env-gated with
+    // the stock threshold as default. Empty or invalid values fall back to the stock threshold.
+    // ggml_cuda_mul_mat_id (MoE expert routing) is unaffected either way.
+    if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
+        static const int ne11_max = [] {
+            const char * env = getenv("GGML_CUDA_MMVQ_NE11_MAX");
+            if (env == nullptr || *env == '\0') {
+                return int(MMVQ_MAX_BATCH_SIZE);
+            }
+            const int v = atoi(env);
+            return (v >= 1 && v <= MMVQ_MAX_BATCH_SIZE) ? v : int(MMVQ_MAX_BATCH_SIZE);
+        }();
+        return ne11 <= ne11_max;
+    }
     return ne11 <= MMVQ_MAX_BATCH_SIZE;
 }
 
