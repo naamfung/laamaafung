@@ -9985,7 +9985,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // steps of this class of model had no coverage at all.
     for (ggml_type type_KV : { GGML_TYPE_Q4_0, GGML_TYPE_Q8_0 }) {
         for (int64_t kv : { 512, 4096, 33024 }) { // 33024 == 129*256, an unaligned number of KV tiles
-            for (int nb : { 1, 2, 3, 4 }) {
+            // nb 3-8 are the speculative-decoding verify batch sizes, nb 9 is above the cap on the
+            // GQA-batched vector kernel and must fall back to the kernel for large batch sizes.
+            for (int nb : { 1, 2, 3, 4, 5, 6, 8, 9 }) {
                 test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0,
                                                                 GGML_PREC_F32, type_KV, type_KV));
             }
@@ -9999,11 +10001,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
         // Attention sinks, logit softcap and multiple sequences: the GQA-batched kernel indexes all
         // three per Q head or per sequence, so these must be handled and not just fall back.
-        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, true,  true,  0,    0,
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 5, true,  true,  0,    0,
                                                         GGML_PREC_F32, type_KV, type_KV));
-        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, true,  false, 0,    10.0f,
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 5, true,  false, 0,    10.0f,
                                                         GGML_PREC_F32, type_KV, type_KV));
-        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 2}, 8192, 2, true,  false, 0,    0,
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 2}, 8192, 5, true,  false, 0,    0,
                                                         GGML_PREC_F32, type_KV, type_KV));
         // No mask, ALiBi, non-contiguous Q and a KV length that is not a multiple of FATTN_KQ_STRIDE:
         // each of these disables the GQA optimization, so they must fall back and stay correct.
@@ -10412,6 +10414,28 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         for (int hs : { 64, 128, }) {
             for (int nr : { 1, 4, }) {
                 test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {nr, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+            }
+        }
+    }
+
+    // Qwen3.x-27B geometry (head size 256, 4 KV heads, GQA ratio 6) with quantized KV, swept over
+    // the speculative-decoding verify batch sizes. This is where the GQA vector kernel that reads
+    // the cache once per token crosses over the Q4_0 inline-dequant MMA kernel. 54016 == 211*256
+    // is the deep agentic payload, 1024 and 4096 bracket the occupancy cutoff.
+    for (ggml_type type_KV : { GGML_TYPE_Q4_0, GGML_TYPE_Q8_0 }) { // the crossover depends on the KV size
+        for (int kv : { 1024, 4096, 54016 }) {
+            for (int nb : { 1, 2, 3, 4, 5, 6, 8, 9 }) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type_KV, type_KV));
+            }
+        }
+    }
+
+    // Same geometry with F16 K/V, which on this arch selects the identical MMA kernel minus the
+    // cache conversion. T(q4_0) - T(f16) at a fixed shape is therefore the conversion's own cost.
+    for (ggml_type type_KV : { GGML_TYPE_F16, GGML_TYPE_Q4_0 }) {
+        for (int kv : { 4096, 8192, 16384, 32768, 54016 }) {
+            for (int nb : { 1, 4 }) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type_KV, type_KV));
             }
         }
     }

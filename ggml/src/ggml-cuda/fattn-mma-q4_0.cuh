@@ -65,7 +65,7 @@ static bool ggml_cuda_fattn_mma_use_quantized_kv(const int cc, const ggml_tensor
         return false;
     }
 
-    // Only DKQ == DV == 256 with ncols2 == 8 is instantiated (see mma_q_supported).
+    // Only DKQ == DV == 256 is instantiated (see DECL_FATTN_MMA_Q4_0_ALL).
     if (Q->ne[0] != 256 || V->ne[0] != 256) {
         return false;
     }
