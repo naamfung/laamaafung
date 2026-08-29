@@ -81,6 +81,14 @@ class ServerStore {
 				this.error = null;
 				this.status = null;
 				this.detectRole(props);
+				// Trigger the server tools fetch now that we know whether the
+				// server was started with --tools. Passing the flag lets toolsStore
+				// skip the /tools request (and avoid a 403) when tools are disabled.
+				// Dynamic import avoids a circular dependency:
+				// server.svelte -> tools.svelte -> mcp.svelte -> server.svelte
+				void import('$lib/stores/tools.svelte').then(({ toolsStore }) =>
+					toolsStore.fetchServerTools(props.builtin_tools_enabled)
+				);
 			} catch (error: unknown) {
 				this.error = error instanceof Error ? error.message : String(error);
 				this.status = error instanceof ApiError ? error.status : null;
