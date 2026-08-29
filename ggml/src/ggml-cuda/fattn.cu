@@ -558,7 +558,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     return BEST_FATTN_KERNEL_NONE;
 #endif// FLASH_ATTN_AVAILABLE
 
-    const ggml_tensor * KQV   = dst;
     const ggml_tensor * Q     = dst->src[0];
     const ggml_tensor * K     = dst->src[1];
     const ggml_tensor * V     = dst->src[2];
@@ -567,23 +566,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     const int gqa_ratio = Q->ne[2] / K->ne[2];
     GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
 
-    float max_bias = 0.0f;
-    memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
-
     // The effective batch size for the kernel can be increased by gqa_ratio.
     // The kernel versions without this optimization are also used for ALiBi, if there is no mask, or if the KV cache is not padded,
-    bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
-    for (const ggml_tensor * t : {Q, K, V, mask}) {
-        if (t == nullptr || ggml_is_quantized(t->type)) {
-            continue;
-        }
-        for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
-            if (t->nb[i] % 16 != 0) {
-                gqa_opt_applies = false;
-                break;
-            }
-        }
-    }
+    const bool gqa_opt_applies = ggml_cuda_fattn_gqa_opt_applies(dst);
 
     const int cc = ggml_cuda_info().devices[device].cc;
 
@@ -701,6 +686,11 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                     }
                 } else {
                     if (Q->ne[1] == 1) {
+                        return BEST_FATTN_KERNEL_VEC;
+                    }
+                    // Before Ada the MMA kernel must dequantize the whole K/V cache to F16 on every
+                    // call. For small batches that costs more than the attention itself.
+                    if (ggml_cuda_fattn_vec_use_gqa(device, dst)) {
                         return BEST_FATTN_KERNEL_VEC;
                     }
                 }

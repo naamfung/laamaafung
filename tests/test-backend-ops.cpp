@@ -9973,11 +9973,49 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                         GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
     }
 
-    // dense-allocated (non-view) quant K/V at batch >= 64, in cache and native layouts
+// dense-allocated (non-view) quant K/V at batch >= 64, in cache and native layouts
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {4, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 1024, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, false));
+
+    // Small-batch quantized-KV cases at head size 256 with grouped-query attention (Qwen3.x-27B geometry:
+    // 4 KV heads, GQA ratio 6). The sweep above only tests quantized KV for head sizes 64 and 72 and only
+    // tests GQA ratio 6 for F16 KV, so the kernels used for decode and for speculative-decoding verify
+    // steps of this class of model had no coverage at all.
+    for (ggml_type type_KV : { GGML_TYPE_Q4_0, GGML_TYPE_Q8_0 }) {
+        for (int64_t kv : { 512, 4096, 33024 }) { // 33024 == 129*256, an unaligned number of KV tiles
+            for (int nb : { 1, 2, 3, 4 }) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0,
+                                                                GGML_PREC_F32, type_KV, type_KV));
+            }
+        }
+        // GQA ratios other than 6, i.e. the other numbers of Q heads that a block can be given:
+        for (int nr2 : { 2, 4, 8 }) {
+            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {nr2, 1}, 8192, 2, true, false, 0, 0,
+                                                            GGML_PREC_F32, type_KV, type_KV));
+            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 2, {nr2, 1}, 8192, 2, true, false, 0, 0,
+                                                            GGML_PREC_F32, type_KV, type_KV));
+        }
+        // Attention sinks, logit softcap and multiple sequences: the GQA-batched kernel indexes all
+        // three per Q head or per sequence, so these must be handled and not just fall back.
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, true,  true,  0,    0,
+                                                        GGML_PREC_F32, type_KV, type_KV));
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, true,  false, 0,    10.0f,
+                                                        GGML_PREC_F32, type_KV, type_KV));
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 2}, 8192, 2, true,  false, 0,    0,
+                                                        GGML_PREC_F32, type_KV, type_KV));
+        // No mask, ALiBi, non-contiguous Q and a KV length that is not a multiple of FATTN_KQ_STRIDE:
+        // each of these disables the GQA optimization, so they must fall back and stay correct.
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, false, false, 0,    0,
+                                                        GGML_PREC_F32, type_KV, type_KV));
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, true,  false, 8.0f, 0,
+                                                        GGML_PREC_F32, type_KV, type_KV));
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 8192, 2, true,  false, 0,    0,
+                                                        GGML_PREC_F32, type_KV, type_KV, {0, 2, 1, 3}));
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 1000, 2, true,  false, 0,    0,
+                                                        GGML_PREC_F32, type_KV, type_KV));
+    }
 
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
