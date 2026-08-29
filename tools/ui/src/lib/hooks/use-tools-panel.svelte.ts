@@ -1,6 +1,6 @@
 import { CLI_FLAGS } from '$lib/constants';
 import { ToolSource } from '$lib/enums';
-import { conversationsStore, mcpStore, toolsStore } from '$lib/stores';
+import { conversationsStore, mcpStore, serverStore, toolsStore } from '$lib/stores';
 import type { ToolGroup } from '$lib/types';
 import { SvelteSet } from 'svelte/reactivity';
 
@@ -95,8 +95,10 @@ export function useToolsPanel(): UseToolsPanelReturn {
 	}
 
 	function handleOpen(): void {
+		const builtinToolsEnabled = serverStore.props?.builtin_tools_enabled;
+
 		if (toolsStore.serverTools.length === 0 && !toolsStore.loading) {
-			toolsStore.fetchServerTools();
+			toolsStore.fetchServerTools(builtinToolsEnabled);
 		}
 
 		mcpStore.runHealthChecksForServers(mcpStore.getServers().filter((s) => s.enabled));
