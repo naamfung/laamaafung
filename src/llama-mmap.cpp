@@ -650,6 +650,27 @@ size_t llama_mmap::register_host(size_t first, size_t last, bool (*reg_fn)(void 
     host_reg_addr  = reg_addr;
     host_unreg_fn  = unreg_fn;
     return last - first;
+#elif defined(_WIN32)
+    if (host_reg_addr || !reg_fn || !unreg_fn || last <= first) {
+        return 0;
+    }
+
+    // expand outward to the page boundaries retained by unmap_fragment
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const size_t page_size = si.dwPageSize;
+
+    first = first & ~(page_size - 1);
+    last  = (last + page_size - 1) & ~(page_size - 1);
+
+    void * reg_addr = (uint8_t *) pimpl->addr + first;
+    if (!reg_fn(reg_addr, last - first)) {
+        return 0;
+    }
+
+    host_reg_addr  = reg_addr;
+    host_unreg_fn  = unreg_fn;
+    return last - first;
 #else
     GGML_UNUSED(first);
     GGML_UNUSED(last);
