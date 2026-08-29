@@ -444,6 +444,11 @@ Glash 是基于我对 crush 的本地化适配，提供终端環境下的编程�
 
 克隆之后用「make build」编译，将得到的二进制程序放到你系统环境变量可搜索到的路径，启动终端运行「inx setup」选 ANTHROPIC 兼容协议配置好 laamaafung server 运行的端口。再次启动「inx」即可畅享本地模型支持下的编程乐趣。
 
+
+### Dsc
+
+推荐在本地模型环境中使用 Dsc 作为编程代理：https://github.com/naamfung/dsc
+
 ---
 
 ## llama.cpp
