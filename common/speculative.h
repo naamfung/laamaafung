@@ -83,6 +83,12 @@ void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);
 
+// LLAMA_SPEC_PROF: lightweight wall-time instrumentation, active only when the
+// LLAMA_SPEC_PROF env var is set. Implemented in speculative.cpp so callers
+// outside this TU (e.g. tools/server) can feed it target-decode timings.
+void common_spec_prof_add_target_decode(int n_tokens, int64_t us);
+void common_spec_prof_dump();
+
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }
 };

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -28,6 +29,112 @@
 
 #define SPEC_VOCAB_MAX_SIZE_DIFFERENCE  128
 #define SPEC_VOCAB_CHECK_START_TOKEN_ID 5
+
+// ---------------------------------------------------------------------------
+// LLAMA_SPEC_PROF: lightweight wall-time instrumentation for the DFlash
+// speculative-decoding pipeline. Active only when the LLAMA_SPEC_PROF env
+// var is set; the check is a cheap static bool so it's a no-op otherwise.
+// Single-threaded access (spec/draft calls run on one thread), no locks.
+// ---------------------------------------------------------------------------
+static bool spec_prof_enabled() {
+    static const bool enabled = std::getenv("LLAMA_SPEC_PROF") != nullptr;
+    return enabled;
+}
+
+namespace {
+
+struct spec_prof_counter {
+    int64_t calls    = 0;
+    int64_t total_us = 0;
+
+    void add(int64_t us) {
+        calls++;
+        total_us += us;
+    }
+};
+
+using spec_prof_hist = std::map<int, std::pair<int64_t, int64_t>>; // n -> (count, total_us)
+
+void spec_prof_hist_add(spec_prof_hist & hist, int n, int64_t us) {
+    auto & h = hist[n];
+    h.first  += 1;
+    h.second += us;
+}
+
+struct spec_prof_registry {
+    spec_prof_counter embd_layer_inp;   // (a) first llama_get_embeddings_layer_inp per process()
+    spec_prof_counter feature_gather;   // (b) nested memcpy loop filling features_buf
+    spec_prof_counter encode;           // (c) llama_encode(ctx_dft, enc_batch)
+    spec_prof_counter embd_nextn_copy;  // (d) llama_get_embeddings_nextn + memcpy into batch_inject.embd
+    spec_prof_counter decode_inject;    // (e) llama_decode(ctx_dft, batch_inject)
+    spec_prof_counter decode_noise;     // (f) llama_decode(ctx_dft, batch) - 16-token noise decode
+    spec_prof_counter sample_loop;      // (g) sampling loop over positions
+
+    spec_prof_hist encode_hist;        // keyed by n_chunk
+    spec_prof_hist target_decode_hist; // keyed by batch_view.n_tokens (server-context.cpp)
+
+    int64_t target_decode_calls = 0;
+};
+
+spec_prof_registry g_spec_prof;
+
+void spec_prof_dump_line(const char * label, const spec_prof_counter & c) {
+    if (c.calls == 0) {
+        return;
+    }
+    fprintf(stderr, "[spec-prof] %-16s calls=%8" PRId64 " total_ms=%10.3f mean_us=%10.3f\n",
+            label, c.calls, c.total_us / 1000.0, (double) c.total_us / c.calls);
+}
+
+void spec_prof_dump_hist(const char * label, const spec_prof_hist & hist) {
+    if (hist.empty()) {
+        return;
+    }
+    fprintf(stderr, "[spec-prof] %s:", label);
+    for (const auto & kv : hist) {
+        const int64_t count = kv.second.first;
+        const int64_t total = kv.second.second;
+        fprintf(stderr, " n=%d: %" PRId64 "x %.1fus", kv.first, count, count ? (double) total / count : 0.0);
+    }
+    fprintf(stderr, "\n");
+}
+
+} // namespace
+
+void common_spec_prof_dump() {
+    if (!spec_prof_enabled()) {
+        return;
+    }
+    fprintf(stderr, "[spec-prof] ---- dump ----\n");
+    spec_prof_dump_line("embd_layer_inp",  g_spec_prof.embd_layer_inp);
+    spec_prof_dump_line("feature_gather",  g_spec_prof.feature_gather);
+    spec_prof_dump_line("encode",          g_spec_prof.encode);
+    spec_prof_dump_line("embd_nextn_copy", g_spec_prof.embd_nextn_copy);
+    spec_prof_dump_line("decode_inject",   g_spec_prof.decode_inject);
+    spec_prof_dump_line("decode_noise",    g_spec_prof.decode_noise);
+    spec_prof_dump_line("sample_loop",     g_spec_prof.sample_loop);
+    spec_prof_dump_hist("encode_hist (n_chunk)",           g_spec_prof.encode_hist);
+    spec_prof_dump_hist("target_decode_hist (n_tokens)",   g_spec_prof.target_decode_hist);
+}
+
+void common_spec_prof_add_target_decode(int n_tokens, int64_t us) {
+    if (!spec_prof_enabled()) {
+        return;
+    }
+    spec_prof_hist_add(g_spec_prof.target_decode_hist, n_tokens, us);
+
+    if (++g_spec_prof.target_decode_calls % 25 == 0) {
+        common_spec_prof_dump();
+    }
+}
+
+namespace {
+struct spec_prof_atexit_registrar {
+    spec_prof_atexit_registrar() {
+        std::atexit(common_spec_prof_dump);
+    }
+} g_spec_prof_atexit_registrar;
+} // namespace
 
 const std::map<std::string, common_speculative_type> common_speculative_type_from_name_map = {
     {"none",          COMMON_SPECULATIVE_TYPE_NONE},
@@ -904,6 +1011,20 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
     }
 };
 
+// linear argmax over a raw logits row; first-max-wins on ties (same as the unstable
+// sort/partial-sort the general sampler chain would otherwise use to reach data[0]).
+static llama_token spec_argmax(const float * logits, int32_t n_vocab) {
+    llama_token best_id = 0;
+    float best_logit = logits[0];
+    for (int32_t i = 1; i < n_vocab; ++i) {
+        if (logits[i] > best_logit) {
+            best_logit = logits[i];
+            best_id = i;
+        }
+    }
+    return best_id;
+}
+
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
 struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     common_params_speculative_draft params;
@@ -919,6 +1040,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     int32_t n_embd_dec = 0;  // draft hidden size
     int32_t n_embd_enc = 0;  // target_layer_ids_n * target_hidden_size
     int32_t n_embd_tgt = 0;  // target model hidden size
+
+    int32_t n_vocab_dft = 0; // draft model vocab size, cached for the greedy fast path
 
     int32_t     block_size    = 0;
     llama_token mask_token_id = 0;
@@ -955,6 +1078,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         n_embd_tgt    = llama_model_n_embd(model_tgt);
         n_embd_dec    = llama_model_n_embd(model_dft);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
+        n_vocab_dft   = llama_vocab_n_tokens(llama_model_get_vocab(model_dft));
 
         // read the trained block size from the dflash.block_size metadata key
         block_size = 16;
@@ -1094,6 +1218,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
         const int32_t n_ubatch = (int32_t) llama_n_ubatch(ctx_dft);
 
+        const bool prof = spec_prof_enabled();
+        bool first_embd_call = true; // (a) times only the first llama_get_embeddings_layer_inp of this process()
+
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             if (i_batch_beg[seq_id] < 0) {
                 continue;
@@ -1105,16 +1232,32 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
                 // gather this chunk's target features, interleaved by extract layer
                 features_buf.resize((size_t) n_chunk * n_embd_enc);
+                int64_t t_gather_us = 0;
                 for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
-                    const float * layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+                    const float * layer;
+                    if (prof && first_embd_call) {
+                        const int64_t t0 = ggml_time_us();
+                        layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+                        g_spec_prof.embd_layer_inp.add(ggml_time_us() - t0);
+                        first_embd_call = false;
+                    } else {
+                        layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+                    }
                     if (!layer) {
                         GGML_ABORT("DFlash: target layer %d input not extracted.", target_layer_ids[k]);
                     }
+                    const int64_t t_gather0 = prof ? ggml_time_us() : 0;
                     for (int32_t i = 0; i < n_chunk; ++i) {
                         float       * dst = features_buf.data() + (size_t) i * n_embd_enc + k * (size_t) n_embd_tgt;
                         const float * src = layer + (size_t) (i_batch_beg[seq_id] + offset + i) * n_embd_tgt;
                         std::memcpy(dst, src, (size_t) n_embd_tgt * sizeof(float));
                     }
+                    if (prof) {
+                        t_gather_us += ggml_time_us() - t_gather0;
+                    }
+                }
+                if (prof) {
+                    g_spec_prof.feature_gather.add(t_gather_us);
                 }
 
                 // fuse extracted features through DFlash encoder
@@ -1128,19 +1271,29 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     /*.logits   =*/ nullptr,
                 };
 
+                const int64_t t_enc0 = prof ? ggml_time_us() : 0;
                 int32_t rc = llama_encode(ctx_dft, enc_batch);
+                if (prof) {
+                    const int64_t us = ggml_time_us() - t_enc0;
+                    g_spec_prof.encode.add(us);
+                    spec_prof_hist_add(g_spec_prof.encode_hist, (int) n_chunk, us);
+                }
                 if (rc != 0) {
                     LOG_ERR("%s: llama_encode(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
                             __func__, rc, (int) n_chunk, (int) offset);
                     return false;
                 }
 
+                const int64_t t_nextn0 = prof ? ggml_time_us() : 0;
                 const float * inp_g = llama_get_embeddings_nextn(ctx_dft);
                 GGML_ASSERT(inp_g && "DFlash encoder produced no output.");
 
                 // inject the DFlash decoder K/V cache at the tokens' target positions
                 batch_inject.n_tokens = n_chunk;
                 std::memcpy(batch_inject.embd, inp_g, (size_t) n_chunk * n_embd_dec * sizeof(float));
+                if (prof) {
+                    g_spec_prof.embd_nextn_copy.add(ggml_time_us() - t_nextn0);
+                }
 
                 for (int32_t i = 0; i < n_chunk; ++i) {
                     batch_inject.pos[i]       = batch_in.pos[i_batch_beg[seq_id] + offset + i];
@@ -1148,7 +1301,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     batch_inject.seq_id[i][0] = seq_id;
                     batch_inject.logits[i]    = false;
                 }
+
+                const int64_t t_dec0 = prof ? ggml_time_us() : 0;
                 rc = llama_decode(ctx_dft, batch_inject);
+                if (prof) {
+                    g_spec_prof.decode_inject.add(ggml_time_us() - t_dec0);
+                }
                 if (rc != 0) {
                     LOG_ERR("%s: llama_decode(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
                             __func__, rc, (int) n_chunk, (int) offset);
@@ -1194,13 +1352,32 @@ const int32_t n_block_tokens = n_draft + (is_dspark && sample_from_anchor ? 0 : 
             return;
         }
 
+        const bool prof = spec_prof_enabled();
+
         // decode all sequence's noise block in a single batch
+        const int64_t t_dec0 = prof ? ggml_time_us() : 0;
         int ret = llama_decode(ctx_dft, batch);
+        if (prof) {
+            g_spec_prof.decode_noise.add(ggml_time_us() - t_dec0);
+        }
         if (ret != 0) {
             LOG_WRN("%s: llama_decode returned %d\n", __func__, ret);
             return;
         }
 
+        // Fast path for plain greedy decoding: skips the sampler chain (top_k + dist)
+        // in the non-dspark branch below when it would reduce to a full-vocab argmax
+        // anyway (see the comment at that branch for why this is exact).
+        // Requires host-side logits. With backend sampling the draft logits are not
+        // available to llama_get_logits_ith() in a form this argmax can use - the
+        // backend chain emits top_k candidates, not full-vocab logits - and every
+        // drafted token comes out wrong: measured acceptance exactly 0 and a ~2.5x
+        // decode slowdown, with no diagnostic. Fall through to the sampler chain,
+        // which consumes the backend-sampled token per index via
+        // llama_get_sampled_token_ith().
+        const bool greedy_fast_path = !is_dspark && params.p_min <= 0.0f && !params.backend_sampling;
+
+        const int64_t t_sample0 = prof ? ggml_time_us() : 0;
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             if (i_block_beg[seq_id] < 0) {
                 continue;
@@ -1242,6 +1419,25 @@ const int32_t n_block_tokens = n_draft + (is_dspark && sample_from_anchor ? 0 : 
 
                     result.push_back(id);
                 }
+            } else if (greedy_fast_path) {
+                // Fast path: the chain here is just top_k(10) + the default trailing
+                // dist() sampler, but the loop below only ever reads cur_p->data[0]
+                // (the top logit after top_k's partial sort) and ignores dist's
+                // stochastic pick entirely. With p_min <= 0 the confidence break below
+                // never fires either, so this reduces to a pure full-vocab argmax -
+                // skip the sampler chain (202k-entry candidate array + partial sort)
+                // and read the raw logits directly.
+                for (int32_t i = 1; i < n_block_tokens; ++i) {
+                    const float * logits = llama_get_logits_ith(ctx_dft, beg + i);
+                    const llama_token id = spec_argmax(logits, n_vocab_dft);
+
+                    // no candidate array here, so unlike the slow path we can only log the
+                    // winner, not the top-3 or its probability.
+                    LOG_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d '%s'\n",
+                            seq_id, 0, i - 1, id, common_token_to_piece(ctx_dft, id).c_str());
+
+                    result.push_back(id);
+                }
             } else {
                 // greedily read the predicted block at this sequence's noise positions 1..n_block_tokens-1
                 for (int32_t i = 1; i < n_block_tokens; ++i) {
@@ -1270,6 +1466,9 @@ const int32_t n_block_tokens = n_draft + (is_dspark && sample_from_anchor ? 0 : 
             if (result.size() < (size_t) params.n_min) {
                 result.clear();
             }
+        }
+        if (prof) {
+            g_spec_prof.sample_loop.add(ggml_time_us() - t_sample0);
         }
     }
 
