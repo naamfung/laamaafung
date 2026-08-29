@@ -669,7 +669,7 @@ struct server_slot {
             }
 
             SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d, stop = %s, n_sent_text = %zu, n_decoded = %d\n",
-                    prompt.n_tokens(), truncated, stop_reason_str, n_sent_text, n_decoded);
+                    prompt.n_tokens(), truncated, stop_reason_str, n_sent_text, (int) stats.n_gen);
 
             t_last_used = ggml_time_us();
 
@@ -3256,7 +3256,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     // checkpoint spanning the restored span so the restored
                     // KV is actually reused.
                     if (params_base.n_ctx_checkpoints > 0) {
-                        create_checkpoint(*slot, (int64_t) 0, 0, (llama_pos) (token_count > 0 ? token_count - 1 : 0));
+                        create_checkpoint(*slot, (int64_t) 0, 0, (llama_pos) (slot->prompt.n_tokens() > 0 ? slot->prompt.n_tokens() - 1 : 0));
                     }
 
                     const int64_t t_end = ggml_time_us();
@@ -4966,6 +4966,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params = server_schema::eval_llama_cmpl_schema(
                     ctx_server.vocab,
                     params,
+                    meta->slot_n_ctx,
                     meta->logit_bias_eog,
                     data);
 

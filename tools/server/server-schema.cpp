@@ -634,6 +634,7 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
 task_params eval_llama_cmpl_schema(
                 const llama_vocab * vocab,
                 const common_params & params_base,
+                const int n_ctx_slot,
                 const std::vector<llama_logit_bias> & logit_bias_eog,
                 const json & data) {
     task_params params;
@@ -677,8 +678,7 @@ task_params eval_llama_cmpl_schema(
         }
 
         auto enable_reasoning_override = [&](const char * name, uint64_t flag) {
-            auto it = data.find(name);
-            if (it != data.end() && !it->is_null()) {
+            if (data.contains(name) && !data.at(name).is_null()) {
                 params.sampling.reasoning_sampling |= flag;
             }
         };
