@@ -17,12 +17,6 @@
   git clone -b v7 https://github.com/naamfung/laamaafung.git
   ```
 
-- **回退版本（v6）**：
-  如須使用舊版穩定分支 `v6`，可執行：
-  ```sh
-  git clone -b v6 https://github.com/naamfung/laamaafung.git
-  ```
-
 - **克隆開發分支**：
   ```sh
   git clone -b master https://github.com/naamfung/laamaafung.git
