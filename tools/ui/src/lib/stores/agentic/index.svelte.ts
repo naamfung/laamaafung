@@ -38,6 +38,7 @@ import { conversationsStore } from '$lib/stores/conversations/index.svelte';
 import { mcpStore } from '$lib/stores/mcp/index.svelte';
 import { modelsStore } from '$lib/stores/models/index.svelte';
 import { settingsStore } from '$lib/stores/settings/index.svelte';
+import { serverStore } from '$lib/stores/server.svelte';
 import { toolsStore } from '$lib/stores/tools.svelte';
 import type {
 	AgenticConfig,
@@ -316,9 +317,11 @@ class AgenticStore {
 		// Clear any pending permissions/continue requests for this conversation when starting a new flow
 		this.gates.clear(conversationId);
 
-		// Ensure server tools are fetched before checking if agentic is enabled
+		// Ensure server tools are fetched before checking if agentic is enabled.
+		// Pass the /props hint so we skip the /tools request (and avoid 403)
+		// when the server was started without --tools.
 		if (toolsStore.serverTools.length === 0 && !toolsStore.loading) {
-			await toolsStore.fetchServerTools();
+			await toolsStore.fetchServerTools(serverStore.props?.builtin_tools_enabled);
 		}
 
 		const agenticConfig = this.getConfig(settingsStore.config, perChatOverrides);

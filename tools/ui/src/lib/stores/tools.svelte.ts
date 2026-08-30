@@ -239,8 +239,35 @@ class ToolsStore {
 		this.persistDisabledTools();
 	}
 
-	async fetchServerTools(): Promise<void> {
+	/**
+	 * Fetch the server tools listing.
+	 *
+	 * @param enabled - Optional hint from /props (builtin_tools_enabled).
+	 *   - `false`: mark the endpoint as disabled and skip the request so the
+	 *     server does not return 403.
+	 *   - `true`: force a fresh request even if a prior call learned the
+	 *     endpoint was disabled (handles server config changes between /props
+	 *     polls).
+	 *   - `undefined`: proceed unless a prior call already learned the endpoint
+	 *     is disabled, in which case short-circuit to avoid re-fetching.
+	 */
+	async fetchServerTools(enabled?: boolean): Promise<void> {
 		if (this._loading) return;
+
+		if (enabled === false) {
+			this._toolsEndpointUnreachable = true;
+			this._serverTools = [];
+			return;
+		}
+
+		// Already known to be disabled (e.g. /props reported
+		// builtin_tools_enabled=false). Skip the request so callers that don't
+		// pass the flag (e.g. agentic flow, tools panel) don't trigger a 403 on
+		// every invocation. An explicit `enabled === true` overrides this to
+		// support server config changes between /props polls.
+		if (enabled !== true && this._toolsEndpointUnreachable) {
+			return;
+		}
 
 		this._loading = true;
 		this._error = null;
@@ -334,8 +361,10 @@ class ToolsStore {
 	}
 
 	/**
-	 * Load persisted disabled tools and fetch the builtin tool list.
-	 * Called by initStores() after migrations have run.
+	 * Load persisted disabled tools. The server tools listing is fetched
+	 * lazily once /props resolves (builtin_tools_enabled), so we can skip the
+	 * /tools request when the server was started without --tools, avoiding a
+	 * 403 in the console.
 	 */
 	initialize(): void {
 		// browser-only init: skip on SSR to avoid localStorage/fetch side effects
@@ -356,8 +385,6 @@ class ToolsStore {
 		} catch (err) {
 			console.error('[ToolsStore] Failed to load disabled tools from localStorage:', err);
 		}
-
-		this.fetchServerTools();
 	}
 
 	isGroupFullyEnabled(group: ToolGroup): boolean {
@@ -376,6 +403,13 @@ class ToolsStore {
 	 */
 	async resolveServerHome(): Promise<string | null> {
 		if (this._serverHome !== undefined) return this._serverHome;
+
+		// Server started without --tools: the file_glob_search call would 403.
+		// Resolve to null instead of hitting the disabled endpoint.
+		if (this._toolsEndpointUnreachable) {
+			this._serverHome = null;
+			return null;
+		}
 
 		try {
 			const res = await ToolsService.executeToolRaw(BuiltInTool.SERVER_FILE_GLOB_SEARCH, {
