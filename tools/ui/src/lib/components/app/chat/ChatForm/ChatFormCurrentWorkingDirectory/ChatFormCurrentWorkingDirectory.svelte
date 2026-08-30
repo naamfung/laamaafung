@@ -10,7 +10,7 @@
 	import { usePickerNavigation } from '$lib/hooks/use-picker-navigation.svelte';
 	import { useScrollActiveRow } from '$lib/hooks/use-scroll-active-row.svelte';
 	import { ToolsService } from '$lib/services/tools.service';
-	import { toolsStore } from '$lib/stores';
+	import { serverStore, toolsStore } from '$lib/stores';
 	import type { GlobEntry } from '$lib/types';
 	import {
 		abbreviateHome,
@@ -88,8 +88,12 @@
 	let homeBase = $derived(toolsStore.serverHome);
 
 	// Resolve home eagerly so the chip can abbreviate before the picker opens.
+	// Wait for /props first: when the server runs without --tools the
+	// resolution call would 403, and there are no cwd-aware server tools anyway.
 	$effect(() => {
 		if (typeof window === 'undefined') return;
+
+		if (!serverStore.props || !serverStore.props.builtin_tools_enabled) return;
 
 		void toolsStore.resolveServerHome();
 	});

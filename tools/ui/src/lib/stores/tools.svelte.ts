@@ -404,6 +404,13 @@ class ToolsStore {
 	async resolveServerHome(): Promise<string | null> {
 		if (this._serverHome !== undefined) return this._serverHome;
 
+		// Server started without --tools: the file_glob_search call would 403.
+		// Resolve to null instead of hitting the disabled endpoint.
+		if (this._toolsEndpointUnreachable) {
+			this._serverHome = null;
+			return null;
+		}
+
 		try {
 			const res = await ToolsService.executeToolRaw(BuiltInTool.SERVER_FILE_GLOB_SEARCH, {
 				limit: 1,
