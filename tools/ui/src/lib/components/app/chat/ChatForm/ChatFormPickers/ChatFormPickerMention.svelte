@@ -8,7 +8,7 @@
 	import { BuiltInTool, FileMentionEntryType, GlobSearchType, KeyboardKey } from '$lib/enums';
 	import { useDebouncedSearch } from '$lib/hooks/use-debounced-search.svelte';
 	import { usePickerNavigation } from '$lib/hooks/use-picker-navigation.svelte';
-	import { deviceStore, settingsStore, toolsStore } from '$lib/stores';
+	import { deviceStore, serverStore, settingsStore, toolsStore } from '$lib/stores';
 	import type { FileMentionEntry, GlobEntryResult } from '$lib/types';
 	import { abbreviateHome, runGlobSearchWithChildren } from '$lib/utils';
 
@@ -134,6 +134,9 @@
 
 	$effect(() => {
 		if (typeof window === 'undefined') return;
+
+		// Server started without --tools: the resolution call would 403.
+		if (!serverStore.props || !serverStore.props.builtin_tools_enabled) return;
 
 		void toolsStore.resolveServerHome();
 	});
