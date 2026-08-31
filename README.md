@@ -68,6 +68,46 @@ TURBO4 + TURBO3：
 D:/Programs/llama-cpp-repos/laamaafung-build-v12/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit on -ngl all -ngld all --n-cpu-moe 33 --threads 10 --threads-http 2 --parallel 1 --kv-unified --cache-type-k turbo4 --cache-type-v turbo3 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
+文本 + 视觉：
+
+```sh
+llamaServer="D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe"
+############################################################
+model="C:/WorkModels/Qwen3.5-9B/Ornith-1.5-9B-IQ4_XS.gguf"
+mmpj="C:/WorkModels/Qwen3.5-9B/mmproj-Ornith-1.5-9B-BF16.gguf"
+############################################################
+template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
+############################################################
+GGML_SCHED_PREFETCH_EXPERTS=1
+GGML_CUDA_REGISTER_HOST=1
+############################################################
+$llamaServer -m $model \
+--chat-template-file $template \
+--reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-top-k 64 --reasoning-presence-penalty 1.2 \
+--n-cpu-moe 0 -ngl all --alias "Agentic-Turbo-Coder" --ctx-size $((128*1024))  --threads 10 -lv 4 \
+--parallel 1 -fa on -dev cuda0 --no-warmup --kv-unified --ctx-checkpoints 32 --cache-prompt  \
+--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 \
+--batch-size 4096 -ub 256 \
+--host 192.168.124.197 --port 8008 --threads-http 2 \
+--reasoning on \
+--reasoning-preserve \
+--reasoning-format deepseek \
+--reasoning-budget $((8*1024)) \
+--reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" \
+--load-mode mlock-ram \
+--cont-batching \
+--repeat_penalty 1.0 \
+--repeat-last-n 64 \
+--presence_penalty 0.0 \
+--frequency_penalty 0.0 \
+--jinja \
+--cache-type-k q8_0 --cache-type-v turbo4 \
+--cache-reuse 256 \
+--cache-ram 8192 \
+--cache-idle-slots \
+--checkpoint-min-step 8192 \
+--mmproj $mmpj --no-mmproj-offload --image-min-tokens 1024
+```
 ---
 
 #### 啟動參數與工作原理說明
