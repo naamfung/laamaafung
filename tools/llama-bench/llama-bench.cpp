@@ -783,6 +783,8 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                         mode = LLAMA_LOAD_MODE_MLOCK;
                     } else if (m == "mmap+mlock") {
                         mode = LLAMA_LOAD_MODE_MMAP_MLOCK;
+                    } else if (m == "mlock-ram") {
+                        mode = LLAMA_LOAD_MODE_MLOCK_RAM;
                     } else if (m == "dio") {
                         mode = LLAMA_LOAD_MODE_DIRECT_IO;
                     } else {
