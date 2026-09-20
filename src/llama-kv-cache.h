@@ -112,7 +112,9 @@ public:
                llama_memory_t   mem_other,
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
-        const  layer_share_cb & share);
+        const  layer_share_cb & share,
+        // a model can hold more than one cache, so the tensor names have to stay unique
+                 const char *   name_tag = "");
 
     ~llama_kv_cache() = default;
 
@@ -163,6 +165,10 @@ public:
 
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
+    ggml_tensor * get_v_storage(int32_t il) const;
+
+    const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
+    bool seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 
     //
     // graph_build API

@@ -14,6 +14,7 @@ struct llama_kv_cell_ext {
     // 2D spatial positions, typically used for M-RoPE
     llama_pos x = 0;
     llama_pos y = 0;
+    llama_pos logical_pos = -1;
 
     // return true if the current 2D spatial position is greater than other
     bool is_2d_gt(llama_pos ox, llama_pos oy) const {

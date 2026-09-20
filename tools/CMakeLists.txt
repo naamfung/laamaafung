@@ -40,4 +40,18 @@ else()
     endif()
     add_subdirectory(fit-params)
     add_subdirectory(results)
+
+    if (LLAMA_KVMEM)
+        add_executable(llama-kvmem-cli
+            llama-kvmem-cli.cpp
+            kvmem-spec.cpp
+        )
+        target_include_directories(llama-kvmem-cli PRIVATE
+            ${LLAMA_KVMEM_ROOT}/src/adapter
+            ${LLAMA_KVMEM_ROOT}/tools
+            ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        )
+        target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common)
+        target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
+    endif()
 endif()

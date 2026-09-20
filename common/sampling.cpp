@@ -144,7 +144,7 @@ struct common_sampler {
         if (rbudget) {
             llama_sampler_reset(rbudget);
             for (const auto & token : prefill_tokens) {
-                llama_sampler_accept(rbudget, token);
+                common_reasoning_budget_accept_prefill(rbudget, token);
             }
         }
     }

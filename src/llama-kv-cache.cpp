@@ -100,7 +100,8 @@ llama_kv_cache::llama_kv_cache(
            llama_memory_t   mem_other,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse,
-    const  layer_share_cb & share) :
+    const  layer_share_cb & share,
+    const char *            name_tag) :
     model(model), hparams(hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type),
     other(static_cast<llama_kv_cache *>(mem_other)),
@@ -377,8 +378,8 @@ llama_kv_cache::llama_kv_cache(
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, kv_size, n_stream) : nullptr;
 
-        has_k && ggml_format_name(k, "cache_k_l%d", il);
-        has_v && ggml_format_name(v, "cache_v_l%d", il);
+        has_k && ggml_format_name(k, "cache_%sk_l%d", name_tag, il);
+        has_v && ggml_format_name(v, "cache_%sv_l%d", name_tag, il);
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
@@ -608,6 +609,31 @@ void llama_kv_cache::clear(bool data) {
             }
         }
     }
+}
+
+bool llama_kv_cache::seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    p0 = std::max<llama_pos>(p0, 0);
+    p1 = p1 < 0 ? std::numeric_limits<llama_pos>::max() : p1;
+    for (uint32_t s = 0; s < n_stream; ++s) {
+        auto & cells = v_cells[s];
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            if (cells.is_empty(i)) {
+                continue;
+            }
+            const auto logical = cells.ext_get(i).logical_pos;
+            const auto p = logical >= 0 ? logical : cells.pos_get(i);
+            if (p < p0 || p >= p1 || (seq_id >= 0 && !cells.seq_has(i, seq_id))) {
+                continue;
+            }
+            if (seq_id < 0) {
+                cells.rm(i);
+            } else {
+                cells.seq_rm(i, seq_id);
+            }
+            v_heads[s] = std::min(v_heads[s], i);
+        }
+    }
+    return true;
 }
 
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -1439,11 +1465,15 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 
             cells.pos_set(idx, ubatch.pos[i]);
 
-            if (ubatch.is_pos_2d()) {
-                llama_kv_cell_ext ext {
-                    /*.x =*/ ubatch.pos[i + ubatch.n_tokens*2],
-                    /*.y =*/ ubatch.pos[i + ubatch.n_tokens],
-                };
+            if (ubatch.is_pos_2d() || ubatch.token || ubatch.logical_pos) {
+                llama_kv_cell_ext ext;
+                ext.logical_pos = ubatch.logical_pos ? ubatch.logical_pos[i] : ubatch.pos[i];
+
+                if (ubatch.is_pos_2d()) {
+                    ext.x = ubatch.pos[i + ubatch.n_tokens*2];
+                    ext.y = ubatch.pos[i + ubatch.n_tokens];
+                }
+
                 cells.ext_set(idx, ext);
             }
 
@@ -1456,21 +1486,31 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
     // note: we want to preserve the invariant that all positions between [pos_min, pos_max] for each sequence
     //       will be present in the cache. so we have to purge any position which is less than those we would overwrite
     //       ref: https://github.com/ggml-org/llama.cpp/pull/13746#issuecomment-2916057092
-    for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
-        if (seq_pos_max_rm[s] == -1) {
-            continue;
-        }
+    // SWA reuses cells by sliding the window; overwriting a cell means every
+    // position below the overwritten one is gone, so purge the gap. Non-SWA
+    // (including KVMem's bounded slot-pool) may hold holes: resurrected blocks
+    // sit at their original pos while the tail stays at high pos. Purging
+    // [pos_min, overwritten] would delete those holes. The comment below notes
+    // seq_pos_max_rm is empty for non-SWA when cells are not reused; if it is
+    // not empty, still do not invent a contiguous-cache invariant.
+    // ref: https://github.com/ggml-org/llama.cpp/pull/13746#issuecomment-2916057092
+    if (swa_type != LLAMA_SWA_TYPE_NONE) {
+        for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            if (seq_pos_max_rm[s] == -1) {
+                continue;
+            }
 
-        GGML_ASSERT(s < seq_to_stream.size());
+            GGML_ASSERT(s < seq_to_stream.size());
 
-        auto & cells = v_cells[seq_to_stream[s]];
+            auto & cells = v_cells[seq_to_stream[s]];
 
-        if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
-            LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
-                    __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
+            if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
+                LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
+                        __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
 
-            // under MSA strict slots this path should be unreachable, since strict MSA placement never selects occupied cells
-            GGML_ASSERT(seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1));
+                // under MSA strict slots this path should be unreachable, since strict MSA placement never selects occupied cells
+                GGML_ASSERT(seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1));
+            }
         }
     }
 
@@ -1542,6 +1582,18 @@ ggml_tensor * llama_kv_cache::get_k_storage(int32_t il) const {
     const int32_t ikv = map_layer_ids.at(il);
 
     return layers[ikv].k;
+}
+
+ggml_tensor * llama_kv_cache::get_v_storage(int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+
+    return layers[ikv].v;
+}
+
+const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
+    GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+
+    return v_cells[seq_to_stream[seq_id]];
 }
 
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
@@ -2007,7 +2059,16 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
 
             auto & idxs = seq_idxs[seq_id];
 
-            if (!alibi) {
+            // The copy-and-patch shortcut only records cells near seq_pos_min.
+            // KVMem resurrects mid-document holes far below that window; they
+            // would keep a stale mask (or never be patched). Skip the shortcut
+            // when [pos_min, pos_max] is not fully populated.
+            const llama_pos sp_min = cells.seq_pos_min(seq_id);
+            const llama_pos sp_max = cells.seq_pos_max(seq_id);
+            const bool holes = sp_min >= 0 && sp_max >= sp_min &&
+                cells.get_used() < (uint32_t) (sp_max - sp_min + 1);
+
+            if (!alibi && !holes) {
                 if (seq_srct.find(seq_id) != seq_srct.end()) {
                     const uint32_t srct = seq_srct[seq_id];
 
@@ -2092,6 +2153,26 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
                 continue;
 skip:
                 data[idst + j] = mask_drop;
+            }
+            if (getenv("KVMEM_TRACE") && i + 1 == ubatch->n_tokens && ubatch->n_tokens > 1) {
+                int keep = 0;
+                llama_pos nmin = INT32_MAX;
+                llama_pos nmax = -1;
+                for (uint32_t j = 0; j < (uint32_t) n_kv; ++j) {
+                    if (data[idst + j] != mask_keep) {
+                        continue;
+                    }
+                    keep++;
+                    if (j < cells.size() && !cells.is_empty(j)) {
+                        const llama_pos p = cells.pos_get(j);
+                        nmin = std::min(nmin, p);
+                        nmax = std::max(nmax, p);
+                    }
+                }
+                fprintf(stderr,
+                        "KVMEM_TRACE mask last_pos=%d n_kv=%d keep=%d holes=%d keep_pos=[%d,%d]\n",
+                        (int) p1, (int) n_kv, keep, (int) holes,
+                        nmin == INT32_MAX ? -1 : (int) nmin, (int) nmax);
             }
         }
     }

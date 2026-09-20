@@ -11,6 +11,9 @@
 #include "llama-model.h"
 #include "llama-ext.h"
 #include "llama.h"
+#if defined(LLAMA_KVMEM)
+#include "llama-kvmem-hooks.h"
+#endif
 
 #include <cinttypes>
 #include <cmath>
@@ -130,6 +133,12 @@ llama_context::llama_context(
     cparams.cb_eval_user_data = params.cb_eval_user_data;
 
     cparams.ctx_other = nullptr;
+
+    // MTP draft context needs the target so KVMem can size the follower
+    // slot-pool from the target pool instead of n_ctx.
+    if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+        cparams.ctx_other = params.ctx_other;
+    }
 
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
@@ -1540,7 +1549,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    if (!graph_reuse_disable && res->can_reuse(gparams)
+#if defined(LLAMA_KVMEM)
+        && llama_kvmem_capture_can_reuse(ubatch.n_tokens, 1, ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos,
+                                         gtype == LLM_GRAPH_TYPE_DECODER_MTP)
+#endif
+            ) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1559,6 +1573,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         //const auto t_start_us = ggml_time_us();
 
+#if defined(LLAMA_KVMEM)
+        llama_kvmem_capture_on_new_graph(gtype == LLM_GRAPH_TYPE_DECODER_MTP);
+#endif
         gf = model.build_graph(gparams);
 
         //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
@@ -1592,6 +1609,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ret = status;
         return nullptr;
     }
+
+#if defined(LLAMA_KVMEM)
+    llama_kvmem_harvest_ubatch(sched.get(), gtype == LLM_GRAPH_TYPE_DECODER_MTP);
+#endif
 
     ret = GGML_STATUS_SUCCESS;
 
