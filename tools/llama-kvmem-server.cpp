@@ -122,9 +122,9 @@ static void print_usage(const char * argv0) {
             "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
             "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
-            "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
+            "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 | turbo2 | turbo3 | turbo4 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
-            "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0)\n"
+            "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0 | turbo2 | turbo3 | turbo4)\n"
             "  --spec-type TYPE           none | draft-mtp (default none)\n"
             "  --spec-kv-dtype TYPE       MTP K/V type (default f16)\n"
             "  --spec-draft-n-max N       MTP draft tokens (default 3)\n"
@@ -1702,7 +1702,7 @@ int main(int argc, char ** argv) {
             bool ok = false;
             const ggml_type t = kvmem_parse_cache_type(need(arg), &ok);
             if (!ok) {
-                fprintf(stderr, "unsupported cache type (want f16|f32|q8_0|q5_0|q4_0)\n");
+                fprintf(stderr, "unsupported cache type (want f16|f32|q8_0|q5_0|q4_0|turbo2|turbo3|turbo4)\n");
                 return 1;
             }
             if (eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
