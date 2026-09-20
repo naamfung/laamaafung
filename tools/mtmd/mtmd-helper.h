@@ -54,6 +54,12 @@ MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtm
 // this function is thread-safe
 MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder);
 
+// same as mtmd_helper_bitmap_init_from_buf(), but with explicit init options
+// (currently only the video parameters are honored)
+MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf_opt(
+        mtmd_context * ctx, const unsigned char * buf, size_t len,
+        bool placeholder, struct mtmd_helper_init_opt opt);
+
 // helper to count the total number of tokens from a list of chunks, useful to keep track of KV cache
 MTMD_API size_t mtmd_helper_get_n_tokens(const mtmd_input_chunks * chunks);
 
@@ -139,6 +145,14 @@ struct mtmd_helper_video_init_params {
 };
 
 MTMD_API struct mtmd_helper_video_init_params mtmd_helper_video_init_params_default(void);
+
+// opt for mtmd_helper_bitmap_init_from_*()
+struct mtmd_helper_init_opt {
+    struct mtmd_helper_video_init_params video_params;
+};
+typedef struct mtmd_helper_init_opt mtmd_helper_init_opt;
+
+MTMD_API struct mtmd_helper_init_opt mtmd_helper_init_opt_default(void);
 
 // returns NULL on failure (ffprobe not found, file unreadable, etc.)
 MTMD_API mtmd_helper_video * mtmd_helper_video_init(

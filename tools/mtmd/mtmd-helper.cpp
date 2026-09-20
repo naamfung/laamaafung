@@ -601,6 +601,83 @@ mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, 
     return {nullptr, nullptr};
 }
 
+mtmd_helper_init_opt mtmd_helper_init_opt_default() {
+    return {
+        /* video_params */ mtmd_helper_video_init_params_default(),
+    };
+}
+
+mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf_opt(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder, mtmd_helper_init_opt opt) {
+    // calculate the hash if needed
+    std::string id;
+    mtmd_bitmap * result = nullptr;
+
+    GGML_UNUSED(opt); // only used by the video code path
+
+    if (!placeholder) {
+        id = fnv_hash(buf, len);
+    }
+
+    if (audio_helpers::is_audio_file((const char *)buf, len)) {
+        std::vector<float> pcmf32;
+        const int sample_rate = mtmd_get_audio_sample_rate(ctx);
+        if (sample_rate < 0) {
+            LOG_ERR("This model does not support audio input\n");
+            return {nullptr, nullptr};
+        }
+        if (!audio_helpers::decode_audio_from_buf(buf, len, sample_rate, pcmf32)) {
+            LOG_ERR("Unable to read WAV audio file from buffer\n");
+            return {nullptr, nullptr};
+        }
+        result = mtmd_bitmap_init_from_audio(pcmf32.size(), placeholder ? nullptr : pcmf32.data());
+        mtmd_bitmap_set_id(result, id.empty() ? nullptr : id.c_str());
+        return {result, nullptr};
+    }
+
+    // otherwise, we assume it's an image
+    if (!result) {
+        int nx, ny, nc;
+        auto * data = stbi_load_from_memory(buf, len, &nx, &ny, &nc, 3);
+        if (data) {
+            result = mtmd_bitmap_init(nx, ny, placeholder ? nullptr : data);
+            mtmd_bitmap_set_id(result, id.empty() ? nullptr : id.c_str());
+            stbi_image_free(data);
+            return {result, nullptr};
+        }
+        // otherwise, fallthrough to video decoding (if supported)
+    }
+
+    // last try: load as video
+#ifdef MTMD_VIDEO
+    if (!result) {
+        auto video_ctx = mtmd_helper_video_init_from_buf(ctx, buf, len, opt.video_params);
+        if (!video_ctx) {
+            LOG_ERR("%s: failed to decode buffer as either image/audio/video\n", __func__);
+            return {nullptr, nullptr};
+        }
+        result = mtmd_bitmap_init_lazy(ctx,
+            id.empty() ? nullptr : id.c_str(),
+            video_ctx,
+            [](size_t, void * user_data, mtmd_bitmap ** out_bitmap, char ** out_text) -> int {
+                auto * vctx = static_cast<mtmd_helper_video *>(user_data);
+                char * text = nullptr;
+                int ret = mtmd_helper_video_read_next(vctx, out_bitmap, &text);
+                *out_text = text; // heap-allocated by read_next; freed automatically by mtmd
+                return ret;
+            });
+         return {result, video_ctx};
+    }
+#else
+    if (!result) {
+        LOG_ERR("%s: failed to decode buffer as either image or audio (video support not compiled in)\n", __func__);
+        return {nullptr, nullptr};
+    }
+#endif
+
+    // should not reach here
+    return {nullptr, nullptr};
+}
+
 mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder) {
 #ifdef _WIN32
     int wlen = MultiByteToWideChar(CP_UTF8, 0, fname, -1, NULL, 0);

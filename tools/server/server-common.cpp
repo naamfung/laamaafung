@@ -691,12 +691,12 @@ size_t validate_utf8(const std::string& text) {
     return len;
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, bool is_placeholder) {
+server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, const mtmd_helper_init_opt & init_opt, bool is_placeholder) {
     // these will be freed upon going out of scope
     mtmd::bitmaps bitmaps;
     std::vector<mtmd_helper::video_ptr> videos;
     for (auto & file : files) {
-        auto out = mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size(), is_placeholder);
+        auto out = mtmd_helper_bitmap_init_from_buf_opt(mctx, file.data(), file.size(), is_placeholder, init_opt);
         if (!out.bitmap) {
             throw std::runtime_error("Failed to load image or audio file");
         }
@@ -760,7 +760,7 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
             for (const auto & entry : json_prompt.at(JSON_MTMD_DATA_KEY)) {
                 files.push_back(base64_decode(entry));
             }
-            return process_mtmd_prompt(mctx, json_prompt.at(JSON_STRING_PROMPT_KEY), files);
+            return process_mtmd_prompt(mctx, json_prompt.at(JSON_STRING_PROMPT_KEY), files, mtmd_helper_init_opt_default());
         } else {
             // Not multimodal, but contains a subobject.
             llama_tokens tmp = tokenize_mixed(vocab, json_prompt.at(JSON_STRING_PROMPT_KEY), add_special, parse_special);
@@ -1043,6 +1043,8 @@ json oaicompat_chat_params_parse(
     // get input files
     oaicompat_chat_process_media(body, opt, out_files);
     json & messages = body.at("messages");
+
+    auto caps = common_chat_templates_get_caps(opt.tmpls.get());
 
     common_chat_templates_inputs inputs;
     inputs.messages               = common_chat_msgs_parse_oaicompat(messages);

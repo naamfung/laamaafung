@@ -2933,7 +2933,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         try {
             auto & prompt = task.cli_prompt;
             if (mctx != nullptr) {
-                task.tokens = process_mtmd_prompt(mctx, prompt, task.cli_files);
+                task.tokens = process_mtmd_prompt(mctx, prompt, task.cli_files, mtmd_helper_init_opt_default());
             } else {
                 task.tokens = std::move(tokenize_input_prompts(vocab, mctx, prompt, true, true)[0]);
             }
@@ -4883,7 +4883,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         std::vector<server_tokens> inputs;
 
         if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
-            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files));
+            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files, mtmd_helper_init_opt_default()));
         } else {
             inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
         }
@@ -6165,7 +6165,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const l
         if (!prompt.is_string()) {
             throw std::runtime_error("for mtmd, input prompt must be a string.");
         }
-        n_tokens = process_mtmd_prompt(mctx, prompt.get<std::string>(), files, true).size();
+        n_tokens = process_mtmd_prompt(mctx, prompt.get<std::string>(), files, mtmd_helper_init_opt_default(), true).size();
     } else {
         n_tokens = tokenize_mixed(vocab, prompt, true, true).size();
     }

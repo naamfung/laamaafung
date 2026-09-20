@@ -53,5 +53,23 @@ else()
         )
         target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common)
         target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
+
+        add_executable(llama-kvmem-server
+            llama-kvmem-server.cpp
+            kvmem-spec.cpp
+            kvmem-vision.cpp
+            server/server-common.cpp
+        )
+        target_include_directories(llama-kvmem-server PRIVATE
+            ${LLAMA_KVMEM_ROOT}/src/adapter
+            ${LLAMA_KVMEM_ROOT}/tools
+            ${CMAKE_CURRENT_SOURCE_DIR}/../src
+            ${CMAKE_CURRENT_SOURCE_DIR}/server
+            ${CMAKE_CURRENT_SOURCE_DIR}/mtmd
+            ${CMAKE_CURRENT_SOURCE_DIR}/../common
+            ${CMAKE_SOURCE_DIR}/vendor/cpp-httplib
+        )
+        target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd)
+        target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
     endif()
 endif()
