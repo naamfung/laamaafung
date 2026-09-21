@@ -148,6 +148,23 @@ int llama_server(common_params & params, int argc, char ** argv) {
             params.n_batch = params.n_ubatch;
         }
 
+#if defined(LLAMA_KVMEM)
+        // KVMem keeps a single tiered/sparse store: it has no per-sequence slot
+        // mapping and llama_memory_kvmem_maybe_create() refuses to activate for
+        // n_seq_max > 1 (it silently falls back to the standard KV cache). The
+        // "auto" default (-1) resolves to 4 slots, so force a single sequence
+        // here - before the slots are created and before the context is built.
+        if (params.kvmem && params.n_parallel != 1) {
+            if (params.n_parallel < 0) {
+                SRV_INF("%s", "KVMem requires a single sequence, using n_parallel = 1\n");
+            } else {
+                SRV_WRN("KVMem requires n_parallel = 1, but %d was requested - forcing n_parallel = 1\n",
+                        params.n_parallel);
+            }
+            params.n_parallel = 1;
+        }
+#endif
+
         if (params.n_parallel < 0) {
             SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n");
 

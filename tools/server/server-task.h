@@ -95,6 +95,11 @@ struct task_params {
     // message spans for checkpointing
     common_chat_msg_spans message_spans;
 
+    // delimiters the spans above were produced with. Needed to locate the start
+    // of the message content (the span begins at the role marker) - used by the
+    // KVMem retrieval query span.
+    common_chat_msg_delimiters message_delimiters;
+
     // original chat messages (JSON, after media_marker rewrite) + jinja flag,
     // used by the slot to construct a hidden self-check turn when early-stop
     // monitoring is triggered. Empty for non-chat endpoints.

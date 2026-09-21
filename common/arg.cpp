@@ -3009,11 +3009,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_KVMEM_BLOCK_TOKENS"));
     add_opt(common_arg(
         {"--kvmem-query-last"}, "N",
-        "retrieval query = last N prompt tokens (default 64)",
+        "retrieval query = last N prompt tokens; used when the prompt has no chat message "
+        "spans (raw /completion), otherwise it is only the fallback (default 64)",
         [](common_params & params, int value) {
             params.kvmem_query_last = value;
         }
     ).set_env("LLAMA_ARG_KVMEM_QUERY_LAST"));
+    add_opt(common_arg(
+        {"--kvmem-query-max"}, "N",
+        "cap the KVMem retrieval query at N tokens, keeping the tail (default 512, 0 = no cap)",
+        [](common_params & params, int value) {
+            params.kvmem_query_max = value;
+        }
+    ).set_env("LLAMA_ARG_KVMEM_QUERY_MAX"));
     add_opt(common_arg(
         {"--kvmem-gpu-ratio"}, "R",
         "cap the KVMem GPU pool at this fraction of VRAM (default 0.50)",

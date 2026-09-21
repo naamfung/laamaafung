@@ -523,7 +523,8 @@ struct common_params {
     int32_t kvmem_budget         =     0; // KVMem GPU working-set tokens; 0 = n_ctx
     int32_t kvmem_gen_reserve    =   256; // KVMem decode slack for the working set
     int32_t kvmem_block_tokens   =   128; // KVMem block size in tokens
-    int32_t kvmem_query_last     =    64; // retrieval query = last N prompt tokens
+    int32_t kvmem_query_last     =    64; // retrieval query = last N prompt tokens (fallback)
+    int32_t kvmem_query_max      =   512; // cap on the retrieval query length (0 = no cap)
     float   kvmem_gpu_ratio      =  0.50f;// cap the KVMem GPU pool at this fraction of VRAM
     bool    kvmem_retrieval      =  true; // true = retrieval, false = recency
     bool    kvmem_harvest_v      = false; // prefill D2H V together with raw-K

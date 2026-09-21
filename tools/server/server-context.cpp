@@ -673,6 +673,16 @@ struct server_slot {
         if (is_processing()) {
             GGML_ASSERT(task);
 
+#if defined(LLAMA_KVMEM)
+            // KVMem: persist the mean-K of this turn's generated rows before the slot
+            // is reused. The next request's begin_cached_turn() would flush it too, but
+            // the last turn of a session would otherwise never reach the raw store.
+            // Child slots share the parent sequence - only the parent may flush.
+            if (!task->is_child()) {
+                llama_kvmem_decode_mean_flush();
+            }
+#endif
+
             const char * stop_reason_str = "none";
             switch (stop) {
                 case STOP_TYPE_NONE:  stop_reason_str = "none";  break;
@@ -994,6 +1004,81 @@ struct server_slot {
         return try_decode();
     }
 };
+
+#if defined(LLAMA_KVMEM)
+// KVMem: the retrieval query is the *last user turn* of the prompt. The server
+// already splits every prompt into chat-message spans (from the template's
+// message delimiters, media chunks skipped - see server_tokens::find_message_spans),
+// so the query span can be taken exactly rather than guessing "the last N tokens".
+//
+// Returns [begin, end) in prompt-token coordinates, or {0, 0} when it cannot be
+// determined (raw /completion prompts carry no delimiters) so the caller can fall
+// back to the last-N heuristic.
+static std::pair<int32_t, int32_t> kvmem_last_user_span(
+        const task_params   & tparams,
+        const server_tokens & toks,
+        int32_t               max_tokens) {
+    const auto & spans = tparams.message_spans.spans;
+
+    int32_t begin = -1;
+    int32_t end   = -1;
+    for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
+        if (it->role == COMMON_CHAT_ROLE_USER && it->len > 0) {
+            begin = (int32_t) it->pos;
+            end   = (int32_t) (it->pos + it->len);
+            break;
+        }
+    }
+    if (begin < 0) {
+        return { 0, 0 };
+    }
+
+    // a span starts at the role marker (e.g. "<|im_start|>user\n"); the content
+    // starts after it
+    const auto & tok_all = toks.get_tokens();
+    for (const auto & d : tparams.message_delimiters.delimiters) {
+        if (d.role != COMMON_CHAT_ROLE_USER || d.tokens.empty()) {
+            continue;
+        }
+        if ((size_t) begin + d.tokens.size() > tok_all.size()) {
+            continue;
+        }
+        if (std::equal(d.tokens.begin(), d.tokens.end(), tok_all.begin() + begin)) {
+            begin += (int32_t) d.tokens.size();
+            break;
+        }
+    }
+
+    // the text question follows the media chunks of this turn: never score image
+    // tokens as part of the query
+    if (toks.has_media()) {
+        size_t idx = (size_t) begin;
+        while (true) {
+            auto [chunk, at] = toks.find_next_media_chunk(idx);
+            if (chunk == nullptr || (int32_t) at >= end) {
+                break;
+            }
+            const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
+            if ((int32_t) (at + n) > begin) {
+                begin = (int32_t) std::min<size_t>(at + n, (size_t) end);
+            }
+            idx = at + n;
+        }
+    }
+
+    if (end > (int32_t) toks.size()) {
+        end = (int32_t) toks.size();
+    }
+    if (begin >= end) {
+        return { 0, 0 };
+    }
+    // cap the query, keeping the tail (the actual question)
+    if (max_tokens > 0 && end - begin > max_tokens) {
+        begin = end - max_tokens;
+    }
+    return { begin, end };
+}
+#endif
 
 
 
@@ -3688,6 +3773,18 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
+#if defined(LLAMA_KVMEM)
+                if (params_base.kvmem) {
+                    // A context shift remaps every position, but KVMem's tiered index
+                    // (block orig positions + per-row metadata) is built from the old
+                    // numbering and cannot follow it. KVMem manages its own capacity, so
+                    // a shift is never required for it - raise --ctx-size instead.
+                    SLT_WRN(slot, "%s", "KVMem does not support context shift: positions are "
+                                        "remapped while the tiered index is not, retrieval may be "
+                                        "wrong for the rest of this session\n");
+                }
+#endif
+
                 slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
 
@@ -3886,12 +3983,26 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
 #if defined(LLAMA_KVMEM)
                         if (params_base.kvmem) {
-                            // Minimal KVMem policy: the retrieval query is the last N tokens of
-                            // this prompt. TODO: derive the real "last user turn" span from the
-                            // chat parse (the standalone kvmem server does that).
-                            const int32_t q_end   = (int32_t) input_tokens.size();
-                            const int32_t q_begin = std::max(0, q_end - std::max(1, params_base.kvmem_query_last));
-                            llama_kvmem_set_request_span(q_begin, q_end, -1);
+                            // New request on this slot. Persist the previous turn's decode
+                            // mean, unpin its retrieval working set and reset the query
+                            // accumulator - otherwise retrieval_pinned_ would still be set
+                            // and the Q capture (and with it the whole retrieval) would be
+                            // suppressed for every turn after the first.
+                            llama_kvmem_begin_cached_turn();
+
+                            const int32_t n_prompt = (int32_t) input_tokens.size();
+                            auto [q0, q1] = kvmem_last_user_span(slot.task->params, input_tokens,
+                                    params_base.kvmem_query_max);
+                            const bool exact = q1 > q0;
+                            if (!exact) {
+                                // no chat spans (raw /completion): last-N heuristic
+                                q1 = n_prompt;
+                                q0 = std::max(0, q1 - std::max(1, params_base.kvmem_query_last));
+                            }
+                            llama_kvmem_set_request_span(q0, q1, -1);
+                            SLT_INF(slot, "KVMem query span = [%d, %d) of %d prompt tokens (%s)\n",
+                                    q0, q1, n_prompt,
+                                    exact ? "last user turn" : "fallback: last tokens");
                         }
 #endif
 
@@ -4215,6 +4326,17 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
                     slot.mem.seq_rm(slot.id, p0, -1);
+#if defined(LLAMA_KVMEM)
+                    if (params_base.kvmem) {
+                        // KVMem keeps a tiered store (and its per-row position metadata)
+                        // next to the KV cache. Everything past the reused prefix just left
+                        // the cache - drop it from the store as well, otherwise a later
+                        // stage-in would reference rows whose metadata is already gone
+                        // ("missing cache row position metadata"). This mirrors the
+                        // standalone kvmem server, which truncates right after seq_rm().
+                        llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) p0));
+                    }
+#endif
 
                     // If using an alora, there may be uncached tokens that come
                     // before the invocation sequence. When this happens, the
@@ -4587,8 +4709,10 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 if (params_base.kvmem) {
                     // Prefill finished: apply the retrieval selection, then stop harvesting
                     // prefill K/V. apply_retrieval() recomputes the selection, so it cannot
-                    // trip the adapter's "stale selection" guard.
+                    // trip the adapter's "stale selection" guard. pin_working_set() keeps the
+                    // retrieved window from being evicted while generating.
                     llama_kvmem_apply_retrieval(ctx_tgt);
+                    llama_kvmem_pin_working_set();
                     llama_kvmem_end_prefill_capture();
                 }
 #endif
@@ -4949,7 +5073,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     meta->logit_bias_eog,
                     data);
 
-            task.params.message_spans = task.tokens.find_message_spans(delimiters);
+            task.params.message_spans      = task.tokens.find_message_spans(delimiters);
+            task.params.message_delimiters = delimiters;
 
             task.id_slot = json_value(data, "id_slot", -1);
             sse_ping_interval = task.params.sse_ping_interval;
