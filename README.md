@@ -30,6 +30,12 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
+- **克隆 KVMem 分支（v21，非穩定）**：
+  KVMem（分層/稀疏 KV 記憶，見下文「KVMem」一節）目前只在 `v21` 分支上，適合需要在**有限顯存**下驅動超長上下文的場景：
+  ```sh
+  git clone -b v21 https://github.com/naamfung/laamaafung.git
+  ```
+
 ---
 
 ### 推荐模型
@@ -67,6 +73,16 @@ TURBO4 + TURBO3：
 ```sh
 GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit on -ngl all -ngld all --n-cpu-moe 33 --threads 10 --threads-http 2 --parallel 1 --kv-unified --cache-type-k turbo4 --cache-type-v turbo3 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
+
+KVMem（分層/稀疏 KV 記憶，`llama-server` 本體直接驅動，須 v21 分支）：
+
+```sh
+GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_PREFETCH_EXPERTS=1 D:/Programs/llama-cpp-repos/laamaafung-v21/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-top-k 64 --reasoning-presence-penalty 1.2 --fit on -ngl all -ngld all --n-cpu-moe 36 --threads 10 --threads-http 2 --parallel 1 --kv-unified --kvmem --kvmem-budget 32768 --kvmem-gpu-ratio 0.45 --kvmem-block-tokens 128 --kvmem-gen-reserve 256 --kvmem-query-max 512 --cache-type-k q8_0 --cache-type-v turbo4 --host 0.0.0.0 --port 8008 --batch-size 16384 --ubatch-size 256 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --ctx-checkpoints 32 --checkpoint-min-step 8192 --cache-idle-slots --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --frequency_penalty 0.0 --jinja --spec-type draft-mtp,ngram-mod,ngram-map-k4v --spec-draft-n-max 2 --spec-draft-n-min 0 --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 24 --spec-ngram-mod-n-max 86 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+```
+
+> 上例是「生產參數 + KVMem」的組合（`-c 131072` 配 `--kvmem-budget 32768`、`--kvmem-gpu-ratio 0.45`）。
+> 注意 KVMem 下**不要**加 `--context-shift` / `--prompt-truncate` / `--cache-reuse`：前兩者會被拒絕或自動禁用，後者依賴 K-shift 亦會自動禁用（見下文「KVMem」一節）。
+> 純 CPU 或小顯存試跑可把 `-ngl all --n-cpu-moe 36` 換成 `-ngl 0`，並把 `--kvmem-budget`/`--ctx-size` 按比例調小。
 
 文本 + 视觉：
 
@@ -116,12 +132,57 @@ $llamaServer -m $model \
 | 參數組 | 說明 | 適用場景 |
 | --- | --- | --- |
 | `--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64` | 啟用提示緩存（KV 緩存重用）機制。當多個請求有相同或相似的 prompt 前綴時，系統會重用之前計算的 KV 狀態，避免重複計算。`--cache-ram 8192` 設定緩存大小為 8GB，`--checkpoint-min-step 512` 設定創建 checkpoint 的最小步長，`--ctx-checkpoints 64` 設定保留的 checkpoint 數量。 | 適合有大量重複前綴請求、長對話歷史或需要加速響應的場景。 |
-| `--cache-reuse N` | 啟用中間 chunk 位移重用。與 `--cache-prompt` 的前綴匹配不同，此功能透過 K-shift 將已緩存的 KV chunk 旋轉到新位置實現重用（非傳統意義的緩存重用）。**依賴 `llama_memory_can_shift()`**，當模型不支援 K-shift 時會自動禁用並警告 `cache_reuse is not supported by this context`。不支援的模型包括：使用 M-RoPE/IM-RoPE 位置編碼的模型（`n_pos_per_embd > 1`，如 Qwen3.5/3.6 系列、Qwen3VL 等多模態模型）、以及未啟用 `--swa-full` 的 SWA 模型。Qwen3.5/3.6 系列同時採用混合注意力架構（門控 DeltaNet 線性注意力 + 門控注意力），IM-RoPE 與混合注意力任一已足以令 K-shift 失效。 | 僅對支援 K-shift 的標準 RoPE 模型（如 Qwen2.5、Llama 等）有效。不支援的模型移除此參數即可消除警告，`--cache-prompt` 已提供前綴緩存重用。 |
-| `--context-shift` | 啟用生成階段的運行時 K-shift（KV cache 動態位移）。要求 `llama_memory_can_shift()` 回傳 true，否則會在 context 用盡時優雅停止（`STOP_TYPE_LIMIT`）。K-shift 不可用時自動禁用並警告，初始 prompt 截斷不受影響。隱含啟用 `--prompt-truncate`。 | 適合需要生成階段動態遷移 KV cache 的長程代理任務。 |
-| `--prompt-truncate` | 啟用初始 prompt 截斷（當請求 tokens 超過 `--ctx-size` 時自動截斷中間部分並保留頭尾）。對所有模型架構均生效，無需 KV cache 位移支援。由 `--context-shift` 隱含啟用，亦可單獨使用。 | 適合處理超長 prompt 提交、對話歷史較長的場景，避免 HTTP 400 錯誤。 |
+| `--cache-reuse N` | 啟用中間 chunk 位移重用。與 `--cache-prompt` 的前綴匹配不同，此功能透過 K-shift 將已緩存的 KV chunk 旋轉到新位置實現重用（非傳統意義的緩存重用）。**依賴 `llama_memory_can_shift()`**，當模型不支援 K-shift 時會自動禁用並警告 `cache_reuse is not supported by this context`。不支援的模型包括：使用 M-RoPE/IM-RoPE 位置編碼的模型（`n_pos_per_embd > 1`，如 Qwen3.5/3.6 系列、Qwen3VL 等多模態模型）、以及未啟用 `--swa-full` 的 SWA 模型。Qwen3.5/3.6 系列同時採用混合注意力架構（門控 DeltaNet 線性注意力 + 門控注意力），IM-RoPE 與混合注意力任一已足以令 K-shift 失效。**啟用 `--kvmem` 時一律自動禁用**（同因：KVMem 的索引無法跟隨位置重映射）。 | 僅對支援 K-shift 的標準 RoPE 模型（如 Qwen2.5、Llama 等）有效。不支援的模型移除此參數即可消除警告，`--cache-prompt` 已提供前綴緩存重用。 |
+| `--context-shift` | 啟用生成階段的運行時 K-shift（KV cache 動態位移）。要求 `llama_memory_can_shift()` 回傳 true，否則會在 context 用盡時優雅停止（`STOP_TYPE_LIMIT`）。K-shift 不可用時自動禁用並警告，初始 prompt 截斷不受影響。隱含啟用 `--prompt-truncate`。**啟用 `--kvmem` 時一律拒絕**（KVMem 的分層索引按舊位置編號建立，無法跟隨重映射），需要更長上下文請加大 `--ctx-size`；此時「隱含啟用截斷」亦一併失效。 | 適合需要生成階段動態遷移 KV cache 的長程代理任務。使用 `--kvmem` 時請直接移除此參數。 |
+| `--prompt-truncate` | 啟用初始 prompt 截斷（當請求 tokens 超過 `--ctx-size` 時自動截斷中間部分並保留頭尾）。對所有模型架構均生效，無需 KV cache 位移支援；但**啟用 `--kvmem` 時會被自動禁用並警告**（截斷會挖掉 prompt 中段並重寫 token 數組，令檢索查詢區間與 `--ctx-checkpoints` 的訊息分界全部錯位），超長提示改為返回明確的 400 `exceed_context_size`。由 `--context-shift` 隱含啟用，亦可單獨使用。 | 適合處理超長 prompt 提交、對話歷史較長的場景，避免 HTTP 400 錯誤。使用 `--kvmem` 時請改為加大 `--ctx-size` 或在客戶端裁剪提示。 |
+| `--kvmem` 及其子參數 | 啟用 KVMem 分層/稀疏 KV 記憶，讓 `llama-server` 本體在有限顯存下驅動超長上下文（須 v21 分支的 `LLAMA_KVMEM` 構建）。**強制 `--parallel 1`**；純線性注意力（recurrent）與 SWA 模型不支援，不滿足時靜默回退標準 KV。子參數：`--kvmem-budget`、`--kvmem-gpu-ratio`、`--kvmem-block-tokens`、`--kvmem-gen-reserve`、`--kvmem-query-last`、`--kvmem-query-max`、`--kvmem-method`、`--kvmem-harvest-v`。 | 顯存不足以容納目標上下文的 KV cache 時（例如 8GB 顯存跑 128K 上下文）。詳見下文「KVMem（分層/稀疏 KV 記憶）」一節。 |
 | `--swa-full` | 使用與 base cache 等大的全尺寸 SWA cache。僅對 GGUF 模型頭中明確聲明滑動窗口注意力（SWA）且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。預設關閉時 SWA cache 僅為 `min(size_base, n_swa + n_ubatch)`，會導致 `llama_kv_cache_iswa::get_can_shift()` 回傳 false，使 `--context-shift` 的運行時 K-shift 失效（初始截斷不受影響）。啟用後 SWA 與 base 等大，K-shift 完全可用。 | 真正採用 SWA 架構的模型需要 `--context-shift` 完整功能（含生成階段運行時 K-shift）時必須配合使用。 |
 | `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閱導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
 | `LLAMA_THREADS_RATIO` (環境變數) | 當 `--threads` 為 auto 模式（N <= 0）時，按此比例縮放線程數（範圍 0.1 - 1.0，默認 1.0 即不縮放）。**適用於 GPU + CPU 混合推理場景**（如 MoE 專家層透過 `-ncmoe` 卸載到 CPU），留出部分 CPU 核心給 CUDA driver/sync 工作，可顯著提升 decode 吞吐量。見下方案例。 | GPU + CPU 混合推理（`-ncmoe > 0` 且 `-ngl > 0`）場景。純 CPU 推理或純 GPU 推理無需設置。 |
+
+#### KVMem（分層/稀疏 KV 記憶）
+
+KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只把當前工作集常駐顯存，其餘分層存放主機內存並按需換回；檢索模式下以「本回合最後一條 user 訊息」的 token 區間作查詢，從歷史塊中挑回相關內容。目的：在**有限顯存**下驅動遠超顯存容量的上下文（例如 8GB 顯存 × 128K 上下文）。
+
+與獨立進程 `llama-kvmem-server` 不同，本分支把 KVMem 接進了 **`llama-server` 本體**，因此 v21 的其餘特性（`--reasoning-*`、`--spec-*`、`--ctx-checkpoints`、`--cache-*`、turbo 系列 V 量化）全部保留。可直接套用的啟動命令見上文「啟動示例」的 KVMem 一節。
+
+**啟用條件**（不滿足時靜默回退標準 KV，並在日誌給出原因）
+
+- 需要 `LLAMA_KVMEM` 構建（v21 分支的構建已默認開啟）；
+- `--parallel` 會**強制為 1**（KVMem 要求 `n_seq_max == 1`）：顯式非 1 會打警告 `KVMem requires n_parallel = 1, but N was requested - forcing n_parallel = 1`，`auto` 則打提示；
+- 純線性注意力（recurrent）架構與 SWA 模型不支援（日誌分別為 `KVMem skips purely recurrent arch ...` 與 `KVMem skips SWA models`）；混合注意力模型（如 Qwen3.5/3.6 的門控 DeltaNet + 門控注意力）可用；
+- 多模態（mmproj）尚未逐項驗證，示例保持 `--no-mmproj`。
+
+**與其他功能的交互**
+
+| 功能 | KVMem 下的行為 |
+| --- | --- |
+| `--context-shift` | **一律拒絕**並對該請求返回錯誤：KVMem 的分層索引（塊原始位置 + 逐行元數據）按舊位置編號建立，無法跟隨位置重映射。context 用盡時以 `STOP_TYPE_LIMIT` 優雅停止，要更長上下文請加大 `--ctx-size`。 |
+| `--prompt-truncate` | **自動禁用並警告**：截斷會挖掉 prompt 中段並重寫 token 數組，令檢索查詢區間與 `--ctx-checkpoints` 的訊息分界全部錯位。超長提示改為返回明確的 400 `exceed_context_size`。 |
+| `--cache-reuse` | 自動禁用並警告（依賴 K-shift）。 |
+| `-ctk` / `-ctv`（含 `turbo2/3/4`） | 直接生效（KVMem 從 `llama_memory_params.type_k/type_v` 取 KV 類型）。 |
+| `--cache-prompt` / `--cache-ram` / `--ctx-checkpoints` | 可用：走 KVMem 已實現的 `seq_rm` 與 `state_write/state_read` 路徑（實測多輪對話與 checkpoint 回滾恢復正常）。`--cache-idle-slots` 等同類開關共用這條路徑，未單獨驗證。 |
+| `--spec-*`（含 `draft-mtp`） | 可用；投機批期間的 decode mean 不落盤（上游限制），僅影響投機期間生成行的檢索打分。 |
+
+**參數表**
+
+| 參數 | 預設 | 說明 |
+| --- | --- | --- |
+| `--kvmem` | 關閉 | 總開關（環境變數 `LLAMA_ARG_KVMEM`） |
+| `--kvmem-budget N` | `0` = `--ctx-size` | 顯存工作集 token 數，**最關鍵的容量參數**，見下方配置建議 |
+| `--kvmem-gpu-ratio R` | `0.50` | KVMem 顯存池上限佔 VRAM 的比例（與權重、計算緩衝共享顯存；8GB 卡建議 0.40–0.45） |
+| `--kvmem-block-tokens N` | `128` | 塊大小。越大檢索粒度越粗、元數據越省 |
+| `--kvmem-gen-reserve N` | `256` | 生成階段保留在工作集中的 slack token 數 |
+| `--kvmem-query-last N` | `64` | prompt 無 chat 訊息分界（raw `/completion`）時的查詢長度 = 最後 N tokens；有分界時僅作兜底 |
+| `--kvmem-query-max N` | `512` | 檢索查詢長度上限，超出時保留尾部（`0` = 不限制） |
+| `--kvmem-method M` | `retrieval` | `retrieval`（按查詢檢索歷史塊）或 `recency`（只保留最近內容，等於純壓縮） |
+| `--kvmem-harvest-v` | 關閉 | 前填時同時把 V 搬到主機（增加前填開銷，換取更完整的檢索載入） |
+
+**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gpu-ratio 0.45` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）。
+
+**日誌排查（`KVMEM_TRACE=1`）**：`KVMEM_KV_BYTES cells=.. budget=.. pool=..`（是否啟用與池大小）、`KVMem query span = [a, b) of N prompt tokens (last user turn|fallback: last tokens)`（本回合查詢區間及來源）、`KVMEM_CAPTURE tag=q/k`（捕獲是否生效）、`KVMEM_TRACE harvest n=.. q=.. k=..`、`KVMEM_TRACE retrieval stage_in=.. skip=.. window=..`、`KVMEM_DECODE_MEAN flush block=.. n=..`。若這些行全部缺失或計數為 0，代表 KVMem 並未真正參與，請先檢查是否被 `--parallel`、SWA 或 recurrent 條件擋下。
+
+---
 
 #### GPU + CPU 混合推理線程調優案例
 
@@ -237,13 +298,13 @@ MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`�
 
 #### 啟用上下文容量管理的啟動示例
 
-如果須要處理可能超過上下文限制的請求，可以加入 `--prompt-truncate`（初始截斷）或 `--context-shift`（運行時 K-shift，隱含啟用初始截斷）。對於真正採用 SWA 架構的模型，若需要生成階段的運行時 K-shift 完整可用，須同時加入 `--swa-full`：
+如果須要處理可能超過上下文限制的請求，可以加入 `--prompt-truncate`（初始截斷）或 `--context-shift`（運行時 K-shift，隱含啟用初始截斷）。對於真正採用 SWA 架構的模型，若需要生成階段的運行時 K-shift 完整可用，須同時加入 `--swa-full`（**以上兩者在使用 `--kvmem` 時皆不適用**，見下文「KVMem」一節）：
 
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --load-mode mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --context-shift --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --verbosity 5 --chat-template-file /path/to/iStartModel/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
-> **注意：** Qwen3.5/3.6 系列模型（MoE 與稠密變體）採用混合注意力機制（門控 DeltaNet 線性注意力 + 門控注意力），並非標準的滑動窗口注意力架構，GGUF 模型頭中 `n_swa = 0`。因此 `--swa-full` 對這些模型無效，載入時會自動檢測並禁用同時彈出警告 `swa_full is not supported by this model, it will be disabled`，此為正確行為，llama.cpp 已自動安全降級。`--context-shift` 會因 K-shift 不可用而自動禁用並警告，但 `--prompt-truncate` 不受影響，初始 prompt 截斷仍然生效。生成階段到達 context 上限時會優雅停止（`STOP_TYPE_LIMIT`）。Qwen3.5/3.6 系列本身支援長上下文（如 256K/512K），無需依賴 SWA 即可高效處理長序列。若想消除日誌噪音，請直接移除 `--swa-full`。`--swa-full` 僅對 GGUF 文件頭中明確聲明滑動窗口注意力且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。
+> **注意：** Qwen3.5/3.6 系列模型（MoE 與稠密變體）採用混合注意力機制（門控 DeltaNet 線性注意力 + 門控注意力），並非標準的滑動窗口注意力架構，GGUF 模型頭中 `n_swa = 0`。因此 `--swa-full` 對這些模型無效，載入時會自動檢測並禁用同時彈出警告 `swa_full is not supported by this model, it will be disabled`，此為正確行為，llama.cpp 已自動安全降級。`--context-shift` 會因 K-shift 不可用而自動禁用並警告，但 `--prompt-truncate` 不受影響，初始 prompt 截斷仍然生效。生成階段到達 context 上限時會優雅停止（`STOP_TYPE_LIMIT`）。**惟啟用 `--kvmem` 時例外：`--context-shift` 一律拒絕，`--prompt-truncate` 亦會被自動禁用並警告，超長提示返回 400 `exceed_context_size`——請改為加大 `--ctx-size`，詳見下文「KVMem」一節。**Qwen3.5/3.6 系列本身支援長上下文（如 256K/512K），無需依賴 SWA 即可高效處理長序列。若想消除日誌噪音，請直接移除 `--swa-full`。`--swa-full` 僅對 GGUF 文件頭中明確聲明滑動窗口注意力且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。
 
 ---
 
