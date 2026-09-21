@@ -83,11 +83,9 @@ llamaServer="D:/Programs/llama-cpp-repos/laamaafung-v21/bin/Release/llama-server
 model="D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf"
 mmproj="D:/models/Mudler/mmproj-Qwen-AgentWorld-35B-A3B-BF16.gguf"
 template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
-############################################################
-GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_PREFETCH_EXPERTS=1
-############################################################
 $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 -c 262144 -n 32768 -ub 128 -b 512 -ngl 99 --parallel 1 \
+--cuda-register-host --sched-prefetch-experts 1 \
 --kvmem --kvmem-budget 32768 --kvmem-gen-reserve 8192 --kvmem-gpu-ratio 0.9 --kvmem-block-tokens 128 \
 -ctk q8_0 -ctv turbo4 \
 --reasoning on --reasoning-budget 2048 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我响应。" \
@@ -112,13 +110,11 @@ model="C:/WorkModels/Qwen3.5-9B/Ornith-1.5-9B-IQ4_XS.gguf"
 mmpj="C:/WorkModels/Qwen3.5-9B/mmproj-Ornith-1.5-9B-BF16.gguf"
 ############################################################
 template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
-############################################################
-GGML_CUDA_REGISTER_HOST=1
-############################################################
 $llamaServer -m $model \
 --chat-template-file $template \
 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-top-k 64 --reasoning-presence-penalty 1.2 \
 --n-cpu-moe 0 -ngl all --alias "Agentic-Turbo-Coder" --ctx-size $((128*1024))  --threads 10 -lv 4 \
+--cuda-register-host \
 --parallel 1 -fa on -dev cuda0 --no-warmup --kv-unified --ctx-checkpoints 32 --cache-prompt  \
 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 \
 --batch-size 4096 -ub 256 \
@@ -342,7 +338,8 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
    
    可通過環境變量 `GGML_CUDA_REGISTER_HOST=1`（針對 CUDA 後端）啟用此優化；若不便（或無權）設定環境變量，改用啟動參數 `--cuda-register-host`（MUSA/HIP 後端同樣適用）。
 
-上述兩個啟動參數與對應的環境變量完全等價（參數只是在解析時把變量寫進行程環境，ggml 仍按原方式讀取），二選一即可；環境變量已設定時，參數優先。`llama-server` 與 `llama-kvmem-server` **都支援**這兩個參數；`llama-kvmem-server` 啟動時會打一行 `KVMEM_STARTUP ggml_env cuda_register_host=… prefetch_experts=…`（兩者皆為 off 時不打），可用來核對實際生效值。這些優化可顯著提升 MoE 模型的性能，例如在 Qwen3.6-35B-A3B 模型上，預取優化可將吞吐量從 1383 提升到 1663 t/s（在 RTX 3060 上，-ncmoe 26, ub 2048），而 CPU 權重內存固定優化可將吞吐量從 1144 提升到 1385 t/s。
+上述兩個啟動參數與對應的環境變量完全等價（參數只是在解析時把變量寫進行程環境，ggml 仍按原方式讀取），二選一即可；環境變量已設定時，參數優先。
+注意兩點：`--sched-prefetch-experts 1` 是「用默認 3 個槽位」，等同 `GGML_SCHED_PREFETCH_EXPERTS=1`，**不是** 1 個槽位（要 1 個槽位請直接寫 `--sched-prefetch-experts 1` 之外的明確值）。另外若仍選擇用環境變量，**必須 `export`**（或寫成 `VAR=1 命令 …` 的前置形式）——單獨一行 `GGML_CUDA_REGISTER_HOST=1` 只會設成 shell 變數，子行程收不到。`llama-server` 與 `llama-kvmem-server` **都支援**這兩個參數；`llama-kvmem-server` 啟動時會打一行 `KVMEM_STARTUP ggml_env cuda_register_host=… prefetch_experts=…`（兩者皆為 off 時不打），可用來核對實際生效值。這些優化可顯著提升 MoE 模型的性能，例如在 Qwen3.6-35B-A3B 模型上，預取優化可將吞吐量從 1383 提升到 1663 t/s（在 RTX 3060 上，-ncmoe 26, ub 2048），而 CPU 權重內存固定優化可將吞吐量從 1144 提升到 1385 t/s。
 
 ---
 
