@@ -3,6 +3,7 @@
 #include "download.h"
 #include "llama.h"
 
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -260,6 +261,45 @@ static void test(void) {
         assert(res.second.size() > 0);
         std::string str(res.second.data(), res.second.size());
         assert(str.find("llama.cpp") != std::string::npos);
+    }
+
+    {
+        printf("test-arg-parser: test options that write ggml environment variables\n\n");
+
+        // --cuda-register-host and --sched-prefetch-experts exist so that ggml knobs which
+        // are readable only through the environment can be set on the command line. Check
+        // that they actually reach the environment, and that they do not leak into it.
+        auto env_get = [](const char * name) -> std::string {
+            const char * v = getenv(name);
+            return v ? v : "";
+        };
+        auto env_set = [](const char * name, const std::string & value) {
+#ifdef _WIN32
+            _putenv_s(name, value.c_str());
+#else
+            if (value.empty()) { unsetenv(name); } else { setenv(name, value.c_str(), 1); }
+#endif
+        };
+        const std::string saved_reg = env_get("GGML_CUDA_REGISTER_HOST");
+        const std::string saved_pre = env_get("GGML_SCHED_PREFETCH_EXPERTS");
+
+        argv = {"binary_name", "--cuda-register-host", "--sched-prefetch-experts", "4"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+        assert(env_get("GGML_CUDA_REGISTER_HOST") == "1");
+        assert(env_get("GGML_SCHED_PREFETCH_EXPERTS") == "4");
+
+        // N=0 removes the variable, so a preset environment can be switched off per run
+        argv = {"binary_name", "--sched-prefetch-experts", "0"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+        assert(getenv("GGML_SCHED_PREFETCH_EXPERTS") == nullptr);
+
+        // non-numeric must be rejected: ggml reads this with atoi(), which would silently
+        // turn it into 0 (i.e. off)
+        argv = {"binary_name", "--sched-prefetch-experts", "many"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+        env_set("GGML_CUDA_REGISTER_HOST", saved_reg);
+        env_set("GGML_SCHED_PREFETCH_EXPERTS", saved_pre);
     }
 
     {

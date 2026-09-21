@@ -28,6 +28,7 @@
 #include <cinttypes>
 #include <climits>
 #include <cstdarg>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <list>
@@ -69,6 +70,26 @@ static std::string read_file(const std::string & fname) {
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
     return content;
+}
+
+// Write / remove a process environment variable on behalf of an option. Used for the
+// ggml-level knobs that are otherwise readable only through the environment.
+static void arg_setenv(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+static void arg_unsetenv(const char * name) {
+#ifdef _WIN32
+    // An empty value removes the variable from the CRT's environment, which is what
+    // getenv() reads.
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
 }
 
 static const std::vector<common_arg> & get_common_arg_defs() {
@@ -1693,6 +1714,47 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                                    string_format("error: unknown value for --flash-attn: '%s'\n", value.c_str()));
                            }
                        }).set_env("LLAMA_ARG_FLASH_ATTN"));
+
+    // Some ggml-level knobs are readable only through the environment. Exposing them as
+    // options lets them be set on the command line where the environment cannot be set
+    // (restricted shells, service units, preset files). ggml reads these with getenv()
+    // while creating the backend / scheduler, i.e. after option parsing, so writing the
+    // variable here is early enough.
+    //
+    // These two deliberately have no .set_env(): they exist precisely so that an
+    // environment variable is not required, and a second environment alias next to the
+    // ggml one would only confuse.
+    add_opt(common_arg(
+        {"--cuda-register-host"},
+        "pin the GPU backend's host buffers (cudaHostRegister) so transfers can skip a "
+        "staging copy; the command-line form of GGML_CUDA_REGISTER_HOST, and it also "
+        "covers the MUSA/HIP backends. Registration is best-effort and is silently "
+        "skipped when it fails",
+        [](common_params &) {
+            arg_setenv("GGML_CUDA_REGISTER_HOST", "1");
+        }
+    ));
+    add_opt(common_arg(
+        {"--sched-prefetch-experts"}, "N",
+        "prefetch offloaded MoE expert weights ahead of compute; the command-line form of "
+        "GGML_SCHED_PREFETCH_EXPERTS. N=1 uses the default slot count (3, one MoE layer's "
+        "gate/up/down tensors), a larger N sets it directly, and N=0 turns it off. More "
+        "slots let uploads run further ahead of compute at the cost of one max-sized "
+        "expert tensor of device memory per slot",
+        [](common_params &, const std::string & value) {
+            // ggml reads this with atoi(), which would turn anything non-numeric into 0
+            // (silently off); reject it here instead.
+            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) {
+                throw std::runtime_error(string_format(
+                    "error: invalid --sched-prefetch-experts: '%s' (want >= 0)\n", value.c_str()));
+            }
+            if (value == "0") {
+                arg_unsetenv("GGML_SCHED_PREFETCH_EXPERTS");
+            } else {
+                arg_setenv("GGML_SCHED_PREFETCH_EXPERTS", value.c_str());
+            }
+        }
+    ));
     add_opt(common_arg(
         {"-p", "--prompt"}, "PROMPT",
         "prompt to start generation with; for system message, use -sys",
