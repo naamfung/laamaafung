@@ -525,7 +525,7 @@ struct common_params {
     int32_t kvmem_block_tokens   =   128; // KVMem block size in tokens
     int32_t kvmem_query_last     =    64; // retrieval query = last N prompt tokens (fallback)
     int32_t kvmem_query_max      =   512; // cap on the retrieval query length (0 = no cap)
-    float   kvmem_gpu_ratio      =  0.50f;// cap the KVMem GPU pool at this fraction of VRAM
+    float   kvmem_gpu_ratio      =  0.90f;// cap the KVMem GPU pool at this fraction of VRAM
     bool    kvmem_retrieval      =  true; // true = retrieval, false = recency
     bool    kvmem_harvest_v      = false; // prefill D2H V together with raw-K
     int32_t grp_attn_n            =     1; // group-attention factor

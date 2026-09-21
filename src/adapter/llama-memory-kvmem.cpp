@@ -299,7 +299,7 @@ static kvmem::KvMemRuntimeConfig make_runtime_cfg(
         : std::max(1u, sink_tokens / block_tokens);
     cfg.store.recent_blocks = recent_tokens / block_tokens;
     cfg.store.gen_budget = 0;
-    cfg.store.gpu_memory_ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.50);
+    cfg.store.gpu_memory_ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.90);
     cfg.store.gpu_high_watermark = kvmem_default_ratio(g_kvmem_params.gpu_high_watermark, 0.95);
     cfg.store.gpu_low_watermark = kvmem_default_ratio(g_kvmem_params.gpu_low_watermark, 0.85);
     cfg.store.estimated_block_bytes = block_bytes;
@@ -388,7 +388,7 @@ static kvmem_pool_plan kvmem_compute_pool(
     const uint64_t v_row = ggml_row_size(params.type_v, n_embd_v);
     p.block_bytes = static_cast<uint64_t>(n_attn) * (k_row + v_row) * p.block_tokens;
 
-    const double ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.50);
+    const double ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.90);
     p.gpu_total = kvmem_first_gpu_total_bytes();
     if (p.gpu_total > 0 && p.block_bytes > 0 && ratio > 0.0) {
         p.cap_blocks = static_cast<uint32_t>(

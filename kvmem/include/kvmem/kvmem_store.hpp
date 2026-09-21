@@ -307,7 +307,10 @@ struct KvMemStoreConfig {
     // GPU KV residency budget. The current implementation uses this to cap the
     // active working-set budget; CPU/NVMe tiering will use the same estimated
     // block capacity as the global GPU repository high-watermark.
-    double gpu_memory_ratio = 0.50;
+    // NOTE (laamaafung): 0.90 by default - the cap exists to protect against
+    // over-committing VRAM, not to throttle the working set, so it must stay
+    // above what --kvmem-budget asks for. Lower it only on real VRAM pressure.
+    double gpu_memory_ratio = 0.90;
     double gpu_high_watermark = 0.95;
     double gpu_low_watermark = 0.85;
     uint32_t estimated_gpu_block_capacity = 0;
