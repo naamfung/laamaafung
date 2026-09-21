@@ -93,13 +93,20 @@ public:
 
     void note_ubatch_pos(const std::vector<llama_pos> & pos);
     void reset_query_acc();
-    void register_capture(struct ggml_tensor * t, int il, char which);
+    // row0: index of the first ubatch row present in t (0 = the whole ubatch).
+    // Q prefill capture pins only the query rows (see q_capture_rows).
+    void register_capture(struct ggml_tensor * t, int il, char which, uint32_t row0 = 0);
     void capture_on_new_graph();
     bool capture_can_reuse(uint32_t n_tokens, uint32_t n_pos, const llama_pos * pos) const;
+    // Row range [row0, row1) of this ubatch that consists of query rows. True only
+    // for a proper, contiguous, non-empty subset — then the graph pins just those
+    // rows instead of the whole ubatch. False means "capture the whole ubatch".
+    bool q_capture_rows(uint32_t n_tokens, const llama_pos * pos,
+                        uint32_t & row0, uint32_t & row1) const;
     void harvest_pending(struct ggml_backend_sched * sched);
     void harvest_flush();
     void harvest_perf_print_sum();
-    void harvest_capture(struct ggml_tensor * t, int il, char which);
+    void harvest_capture(struct ggml_tensor * t, int il, char which, uint32_t row0 = 0);
     void apply_retrieval();
     void set_turn_spans(const llama_kvmem_turn_spans & spans);
     bool query_contains(llama_pos row) const;
@@ -259,7 +266,7 @@ private:
                                          std::vector<uint16_t> & out);
     void harvest_from_host(int il, char which, const uint8_t * host,
                            ggml_type type, int64_t d, int64_t h, int64_t n,
-                           size_t nb0, size_t nb1, size_t nb2);
+                           size_t nb0, size_t nb1, size_t nb2, uint32_t row0 = 0);
     bool d2h_init();
     void d2h_free();
     void d2h_commit(int slot);
@@ -383,6 +390,9 @@ private:
         ggml_tensor * t = nullptr;
         int il = 0;
         char which = 0;
+        // First ubatch row stored in t. 0 unless the Q capture pinned only the
+        // query-row slice, in which case row i of t is ubatch row row0 + i.
+        uint32_t row0 = 0;
     };
     std::vector<CaptureNode> pending_capture_;
     std::vector<CaptureNode> decode_mean_pending_k_;
@@ -408,6 +418,11 @@ private:
     bool graph_has_q_ = false;
     bool graph_has_k_ = false;
     bool graph_has_record_ = false;
+    // Pinned Q geometry of the graph currently held (0 / 0 when it has no Q
+    // capture): rows [graph_q_row0_, graph_q_row0_ + graph_q_rows_) of the ubatch.
+    // A reused graph must match it, see capture_can_reuse.
+    uint32_t graph_q_row0_ = 0;
+    uint32_t graph_q_rows_ = 0;
     struct CaptureD2hPipe;
     std::unique_ptr<CaptureD2hPipe> d2h_;
     struct HarvestWorker {

@@ -48,7 +48,10 @@ LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 LLAMA_API bool llama_kvmem_eval_callback(struct ggml_tensor * t, bool ask, void * user_data);
 
 // Graph-build / post-compute capture (LLAMA_KVMEM process_ubatch hook).
-LLAMA_API void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char which);
+// row0: index of the first ubatch row stored in t (0 = the whole ubatch). Only
+// the Q prefill capture can be non-zero, when it pins just the query rows.
+LLAMA_API void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char which,
+                                            uint32_t row0);
 // is_mtp: 1 when the llama_context building this graph is the MTP draft.
 // Trunk and MTP must not clear each other's capture pending.
 LLAMA_API void llama_kvmem_capture_on_new_graph(int is_mtp);
@@ -68,6 +71,12 @@ LLAMA_API bool llama_kvmem_want_prefill_capture(void);
 // including replay of a cached query (T5).
 LLAMA_API bool llama_kvmem_want_q_capture(uint32_t n_tokens, uint32_t n_pos,
                                           const llama_pos * pos);
+// Query-row slice of this ubatch, when pinning only those rows is both valid and
+// worthwhile: the query rows must form one contiguous range that does not cover
+// the whole ubatch. Rows of the pinned tensor are then ubatch rows [row0, row1).
+// False → pin the whole ubatch (the pre-slice behaviour).
+LLAMA_API bool llama_kvmem_q_capture_rows(uint32_t n_tokens, const llama_pos * pos,
+                                          uint32_t * row0, uint32_t * row1);
 LLAMA_API void llama_kvmem_reset_query(void);
 // True after retrieval pin: capture pre-RoPE K for decode mean-K (n=1 and MTP verify).
 LLAMA_API bool llama_kvmem_want_decode_mean(void);

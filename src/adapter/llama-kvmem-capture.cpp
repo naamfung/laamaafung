@@ -50,13 +50,14 @@ void kvmem_capture_reset_q() {
     }
 }
 
-void kvmem_capture_register(struct ggml_tensor * t, int il, char which) {
+void kvmem_capture_register(struct ggml_tensor * t, int il, char which, uint32_t row0) {
     if (g_mtp && g_mtp->is_mtp_layer(il)) {
+        // MTP capture registration is a no-op today; it never pins query slices.
         g_mtp->register_capture(t, il, which);
         return;
     }
     if (g_mem) {
-        g_mem->register_capture(t, il, which);
+        g_mem->register_capture(t, il, which, row0);
     }
 }
 
@@ -125,8 +126,8 @@ bool llama_kvmem_eval_callback(struct ggml_tensor * /*t*/, bool /*ask*/, void * 
     return false;
 }
 
-void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char which) {
-    kvmem_capture_register(t, il, which);
+void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char which, uint32_t row0) {
+    kvmem_capture_register(t, il, which, row0);
 }
 
 void llama_kvmem_capture_on_new_graph(int is_mtp) {

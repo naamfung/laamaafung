@@ -14,6 +14,7 @@
 #include "llama-memory-recurrent.h"
 #if defined(LLAMA_KVMEM)
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-diag.h"
 #endif
 
 #include <cassert>
@@ -1377,7 +1378,8 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     }
 }
 
-static void kvmem_capture_impl(ggml_context * ctx0, ggml_cgraph * gf, ggml_tensor * src, int il, const char * tag) {
+static void kvmem_capture_impl(ggml_context * ctx0, ggml_cgraph * gf, ggml_tensor * src, int il, const char * tag,
+                               uint32_t row0 = 0) {
 #if defined(LLAMA_KVMEM)
     const llama_kvmem_params * kp = llama_kvmem_get_params();
     if (!src || !kp->enabled) {
@@ -1390,19 +1392,41 @@ static void kvmem_capture_impl(ggml_context * ctx0, ggml_cgraph * gf, ggml_tenso
             return;
         }
     }
+    // Never pin a *view* as a graph output: ggml-alloc consults view_src for
+    // output tensors (ggml-alloc.c:645) and never frees an output (:692), so a
+    // pinned view both disables in-place reuse of its source and keeps the source
+    // alive. Pin a private contiguous copy in that case. Call sites affected
+    // today: qwen35's MTP V capture (Vcur = ggml_reshape_3d of the V projection).
+    // NOTE: this is not what fixed the v21 Q repetition — the tensor attention
+    // consumes there is a plain ggml_mul output (Q after Q-norm), not a view; that
+    // case is handled by the explicit copy in kvmem_capture_q.
+    const bool was_view = ggml_is_view(src) || src->view_src != nullptr;
+    if (was_view) {
+        src = ggml_dup(ctx0, src);
+    }
+    {
+        static bool seen[3] = { false, false, false };
+        const int slot = tag[0] == 'q' ? 0 : (tag[0] == 'k' ? 1 : 2);
+        if (!seen[slot]) {
+            seen[slot] = true;
+            kvmem_diag("KVMEM_CAPTURE tag=%s il=%d row0=%u view=%d op_after=%s ne=[%lld,%lld,%lld]\n",
+                    tag, il, row0, was_view ? 1 : 0, ggml_op_name(src->op),
+                    (long long) src->ne[0], (long long) src->ne[1], (long long) src->ne[2]);
+        }
+    }
     // Keep the pre-RoPE tensor itself (rope_ext is not in-place). Avoids a
     // per-layer GPU cpy; harvest reads this buffer after the full graph.
-    GGML_UNUSED(ctx0);
     ggml_format_name(src, "kvmem_%s-%d", tag, il);
     ggml_set_output(src);
     ggml_build_forward_expand(gf, src);
-    llama_kvmem_register_capture(src, il, tag[0]);
+    llama_kvmem_register_capture(src, il, tag[0], row0);
 #else
     GGML_UNUSED(ctx0);
     GGML_UNUSED(gf);
     GGML_UNUSED(src);
     GGML_UNUSED(il);
     GGML_UNUSED(tag);
+    GGML_UNUSED(row0);
 #endif
 }
 
@@ -1438,18 +1462,36 @@ void llm_graph_context::kvmem_capture_q(ggml_tensor * q, int il) const {
         return;
     }
 #if defined(LLAMA_KVMEM)
-    if (!llama_kvmem_want_q_capture(ubatch.n_tokens, 1, ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos)) {
+    const llama_pos * pos = ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos;
+    // Retrieval only scores the query rows, so pin just that contiguous slice of
+    // the ubatch instead of all of it: a smaller dup and a smaller D2H per layer.
+    // Falls back to the whole ubatch whenever the query rows are not one
+    // contiguous range (e.g. several disjoint turn spans) or cover everything.
+    uint32_t row0 = 0;
+    uint32_t row1 = 0;
+    const bool slice = llama_kvmem_q_capture_rows(ubatch.n_tokens, pos, &row0, &row1) &&
+            q->nb[0] == ggml_element_size(q) &&
+            q->ne[2] == static_cast<int64_t>(ubatch.n_tokens) &&
+            row0 < row1 && row1 <= static_cast<uint32_t>(ubatch.n_tokens);
+    if (slice) {
+        ggml_tensor * qs = ggml_view_3d(ctx0, q, q->ne[0], q->ne[1],
+                static_cast<int64_t>(row1 - row0), q->nb[1], q->nb[2],
+                static_cast<size_t>(row0) * q->nb[2]);
+        kvmem_capture_impl(ctx0, gf, ggml_dup(ctx0, qs), il, "q", row0);
         return;
     }
-    // v21: Qcur is a strided view of the (doubled) Q projection. Marking that
-    // tensor as a graph output disturbs the allocator/buffer lifetime and the Q
-    // fed to attention comes out corrupted whenever the prefill is split into
-    // more than one ubatch (garbled context -> verbatim repetition).
-    // Capture a private contiguous copy instead; the harvest reads this copy.
-    kvmem_capture_impl(ctx0, gf, ggml_dup(ctx0, q), il, "q");
+    if (!llama_kvmem_want_q_capture(ubatch.n_tokens, 1, pos)) {
+        return;
+    }
+    // v21 regression: what gets pinned here is the very tensor attention
+    // consumes (a ggml_mul output, i.e. Q after Q-norm). Marking it as a graph
+    // output corrupts the Q handed to attention as soon as the prefill spans
+    // more than one ubatch (garbled context -> verbatim repetition); pinning a
+    // private contiguous copy instead is verified to fix it. Keep the copy.
+    kvmem_capture_impl(ctx0, gf, ggml_dup(ctx0, q), il, "q", 0);
     return;
 #endif
-    kvmem_capture_impl(ctx0, gf, q, il, "q");
+    kvmem_capture_impl(ctx0, gf, q, il, "q", 0);
 }
 
 void llm_graph_context::kvmem_capture_v(ggml_tensor * v, int il) const {

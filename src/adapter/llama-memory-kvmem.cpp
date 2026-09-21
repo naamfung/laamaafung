@@ -165,6 +165,8 @@ struct llama_memory_kvmem::CaptureD2hPipe {
         size_t nb2 = 0;
         ggml_type type = GGML_TYPE_F16;
         bool from_gpu = false;
+        // First ubatch row stored in this item (see CaptureNode::row0).
+        uint32_t row0 = 0;
     };
     struct Slot {
         uint8_t * gpu = nullptr;
@@ -1501,13 +1503,17 @@ void llama_memory_kvmem::note_ubatch_pos(const std::vector<llama_pos> & pos) {
     pos_queue_.push_back(pos);
 }
 
-void llama_memory_kvmem::register_capture(ggml_tensor * t, int il, char which) {
+void llama_memory_kvmem::register_capture(ggml_tensor * t, int il, char which, uint32_t row0) {
     if (!t) {
         return;
     }
-    pending_capture_.push_back({t, il, which});
+    pending_capture_.push_back({t, il, which, row0});
     if (which == 'q') {
         graph_has_q_ = true;
+        // Remember the pinned geometry of the Q graph just built, so a reused
+        // graph is only accepted for a ubatch that would pin the same rows.
+        graph_q_row0_ = row0;
+        graph_q_rows_ = t->ne[2] > 0 ? static_cast<uint32_t>(t->ne[2]) : 0;
     }
     if (which == 'k') {
         graph_has_k_ = true;
@@ -1518,6 +1524,8 @@ void llama_memory_kvmem::capture_on_new_graph() {
     pending_capture_.clear();
     graph_has_q_ = false;
     graph_has_k_ = false;
+    graph_q_row0_ = 0;
+    graph_q_rows_ = 0;
     graph_has_record_ = recr_ && recr_->replay_recording;
 }
 
@@ -1534,7 +1542,25 @@ bool llama_memory_kvmem::capture_can_reuse(uint32_t n_tokens, uint32_t n_pos,
     // (want_q_capture, including replay) still requires a Q graph.
     const bool need_q = want_q_capture() &&
             llama_kvmem_ubatch_needs_q_capture(n_tokens, n_pos, pos);
-    return need_q == graph_has_q_;
+    if (need_q != graph_has_q_) {
+        return false;
+    }
+    if (need_q) {
+        // The Q graph pins only the query-row slice of the ubatch, so two ubatches
+        // of the same shape can still need different graphs (one pinning rows
+        // [row0, row0 + rows), the other the whole ubatch). Reusing across them
+        // would pair this ubatch's logical rows with rows pinned for another
+        // ubatch, so require the geometry to match exactly.
+        uint32_t r0 = 0;
+        uint32_t r1 = 0;
+        const bool slice = q_capture_rows(n_tokens, pos, r0, r1);
+        const uint32_t row0 = slice ? r0 : 0;
+        const uint32_t rows = slice ? (r1 - r0) : n_tokens;
+        if (row0 != graph_q_row0_ || rows != graph_q_rows_) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool llama_memory_kvmem::d2h_init() {
@@ -1698,13 +1724,13 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     for (const auto & it : s.items) {
         if (it.which == 'q') {
             harvest_from_host(it.il, it.which, s.pin + it.offset, it.type,
-                              it.d, it.h, it.n, it.nb0, it.nb1, it.nb2);
+                              it.d, it.h, it.n, it.nb0, it.nb1, it.nb2, it.row0);
         }
     }
     for (const auto & it : s.items) {
         if (it.which != 'q') {
             harvest_from_host(it.il, it.which, s.pin + it.offset, it.type,
-                              it.d, it.h, it.n, it.nb0, it.nb1, it.nb2);
+                              it.d, it.h, it.n, it.nb0, it.nb1, it.nb2, it.row0);
         }
     }
     const int64_t pack_wall_us = ggml_time_us() - tp;
@@ -1893,6 +1919,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         it.nb1 = n.t->nb[1];
         it.nb2 = n.t->nb[2];
         it.type = n.t->type;
+        it.row0 = n.row0;
         ggml_backend_buffer_t buf = n.t->view_src ? n.t->view_src->buffer : n.t->buffer;
         const uint8_t * src = static_cast<const uint8_t *>(n.t->data);
         if (buf && ggml_backend_buffer_is_host(buf)) {
@@ -2027,7 +2054,7 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         cur_pos_ = std::move(pos_queue_.front());
         pos_queue_.erase(pos_queue_.begin());
         for (const CaptureNode & n : pending_capture_) {
-            harvest_capture(n.t, n.il, n.which);
+            harvest_capture(n.t, n.il, n.which, n.row0);
         }
         if (sched) {
             ggml_backend_sched_synchronize(sched);
@@ -2132,15 +2159,26 @@ void llama_memory_kvmem::tensor_to_f32_token_major(const ggml_tensor * t, std::v
 
 void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * host,
                                            ggml_type type, int64_t d, int64_t h, int64_t ntok,
-                                           size_t nb0, size_t nb1, size_t nb2) {
+                                           size_t nb0, size_t nb1, size_t nb2, uint32_t row0) {
     if (which == 'v') {
         return;
     }
     if (!host || il < 0 || static_cast<uint32_t>(il) >= n_layer_ || cur_pos_.empty()) {
         return;
     }
-    const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
-    const uint32_t pos0 = static_cast<uint32_t>(cur_pos_[0]);
+    // cur_pos_ holds every row of this ubatch, while the buffer can start at row0
+    // (Q prefill capture pins only the query rows). Row i of the buffer is
+    // therefore ubatch row row0 + i.
+    const uint32_t n_pos = static_cast<uint32_t>(cur_pos_.size());
+    if (row0 >= n_pos) {
+        return;
+    }
+    const uint32_t avail = n_pos - row0;
+    const uint32_t n = std::min(ntok > 0 ? static_cast<uint32_t>(ntok) : avail, avail);
+    if (n == 0) {
+        return;
+    }
+    const uint32_t pos0 = static_cast<uint32_t>(cur_pos_[row0]);
     if (which == 'k') {
         std::vector<float> flat;
         if (type == GGML_TYPE_F16) {
@@ -2163,7 +2201,7 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
             return;
         }
         for (uint32_t i = 0; i < n; ++i) {
-            if (!query_contains(cur_pos_[i])) continue;
+            if (!query_contains(cur_pos_[row0 + i])) continue;
             float * dst = q_sum_[static_cast<uint32_t>(il)].data();
             const float * src = flat.data() + i * qdim;
             for (uint32_t d0 = 0; d0 < qdim; ++d0) {
@@ -2174,7 +2212,7 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
     }
 }
 
-void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
+void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which, uint32_t row0) {
     if (which == 'v') {
         return;
     }
@@ -2186,11 +2224,18 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
     }
     std::vector<float> flat;
     tensor_to_f32_token_major(t, flat);
-    const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
+    const uint32_t n_pos = static_cast<uint32_t>(cur_pos_.size());
+    if (row0 >= n_pos) {
+        return;
+    }
+    const uint32_t avail = n_pos - row0;
+    // Rows held by the tensor (the whole ubatch, or just the pinned query slice).
+    const uint32_t rows = t->ne[2] > 0 ? static_cast<uint32_t>(t->ne[2]) : avail;
+    const uint32_t n = std::min(rows, avail);
     if (n == 0) {
         return;
     }
-    const uint32_t pos0 = static_cast<uint32_t>(cur_pos_[0]);
+    const uint32_t pos0 = static_cast<uint32_t>(cur_pos_[row0]);
 
     if (which == 'k') {
         raw_->write_layer_mean_k(pos0, n, static_cast<uint32_t>(il), flat.data());
@@ -2210,7 +2255,7 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
             return;
         }
         for (uint32_t i = 0; i < n; ++i) {
-            if (!query_contains(cur_pos_[i])) continue;
+            if (!query_contains(cur_pos_[row0 + i])) continue;
             float * dst = q_sum_[static_cast<uint32_t>(il)].data();
             const float * src = flat.data() + i * qdim;
             for (uint32_t d = 0; d < qdim; ++d) {
@@ -2962,6 +3007,38 @@ bool llama_memory_kvmem::query_overlaps(uint32_t n, const llama_pos * rows) cons
     return false;
 }
 
+bool llama_memory_kvmem::q_capture_rows(uint32_t n, const llama_pos * pos,
+                                        uint32_t & row0, uint32_t & row1) const {
+    if (!want_q_capture() || !n || !pos) {
+        return false;
+    }
+    int64_t  first = -1;
+    int64_t  last  = -1;
+    uint32_t hits  = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!query_contains(pos[i])) {
+            continue;
+        }
+        if (first < 0) {
+            first = static_cast<int64_t>(i);
+        }
+        last = static_cast<int64_t>(i);
+        hits++;
+    }
+    if (hits == 0 || first < 0) {
+        return false;
+    }
+    // Slice only when the query rows are contiguous and cover a proper subset.
+    // A gap (multiple explicit turn spans) would need a gather, and a full cover
+    // saves nothing, so both fall back to pinning the whole ubatch.
+    if (static_cast<uint32_t>(last - first + 1) != hits || hits == n) {
+        return false;
+    }
+    row0 = static_cast<uint32_t>(first);
+    row1 = static_cast<uint32_t>(last) + 1;
+    return true;
+}
+
 bool llama_memory_kvmem::gpu_kv_complete(uint32_t id, const llama_kv_cache * cache) const {
     if (!cache || id >= store().block_count()) return false;
     const auto & b = store().blocks()[id];
@@ -3607,6 +3684,50 @@ bool llama_kvmem_want_q_capture(uint32_t n_tokens, uint32_t n_pos, const llama_p
         return false;
     }
     return llama_kvmem_ubatch_needs_q_capture(n_tokens, n_pos, pos);
+}
+
+bool llama_kvmem_q_capture_rows(uint32_t n_tokens, const llama_pos * pos,
+                                uint32_t * row0, uint32_t * row1) {
+    if (!row0 || !row1) {
+        return false;
+    }
+    if (llama_memory_kvmem * mem = kvmem_capture_active()) {
+        uint32_t r0 = 0, r1 = 0;
+        if (!mem->q_capture_rows(n_tokens, pos, r0, r1)) {
+            return false;
+        }
+        *row0 = r0;
+        *row1 = r1;
+        return true;
+    }
+    // Fallback for a graph built without a bound adapter: same rule, straight
+    // from the param range.
+    const llama_kvmem_params * kp = llama_kvmem_get_params();
+    if (!kp || !kp->enabled || kp->method != 1 || kp->query_begin < 0 || n_tokens == 0 || !pos) {
+        return false;
+    }
+    const int32_t qb = kp->query_begin;
+    const int32_t qe = kp->query_end > 0 ? kp->query_end : (1 << 30);
+    int64_t  first = -1;
+    int64_t  last  = -1;
+    uint32_t hits  = 0;
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        const llama_pos p = pos[i];
+        if (p < qb || p >= qe) {
+            continue;
+        }
+        if (first < 0) {
+            first = static_cast<int64_t>(i);
+        }
+        last = static_cast<int64_t>(i);
+        hits++;
+    }
+    if (hits == 0 || static_cast<uint32_t>(last - first + 1) != hits || hits == n_tokens) {
+        return false;
+    }
+    *row0 = static_cast<uint32_t>(first);
+    *row1 = static_cast<uint32_t>(last) + 1;
+    return true;
 }
 
 void llama_kvmem_reset_query(void) {
