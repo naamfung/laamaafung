@@ -175,7 +175,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `-ngl 99` | `-ngl 99` | 同名同義。 |
 | `--kvmem-budget` / `--kvmem-gen-reserve` / `--kvmem-gpu-ratio` / `--kvmem-block-tokens` | 同名 | KVMem 參數一一對應（預設值見下表）。 |
 | `--no-kvmem-image-autoscale` | 同名 | **兩邊都已支援**：行數超預算的圖像會在 token 化**之前**自動縮小（見「啟用條件」）。關掉後兩邊都回同一條訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）。 |
-| `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K 與 V 分開設，但 `-ctk` 與 `-ctv` **接受完全相同的取值清單** —— `f32 / f16 / bf16 / q8_0 / q4_0 / q4_1 / iq4_nl / q5_0 / q5_1 / turbo2 / turbo3 / turbo4`（同一份 `get_all_kv_cache_types()`、同一個 `kv_cache_type_from_str()` 解析器）。**turbo2/3/4 對 K 與 V 都可用，沒有「只能用於 V」的限制**；上例只是 K 取精度、V 取壓縮的常見搭配。KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，兩者各自生效。唯一要注意的是別處的加速條件：CUDA 的 fused turbo MMA 路徑要求 **K 與 V 同型**（見下文「TurboQuant」一節），所以 `-ctk turbo4 -ctv turbo3` 這類混搭不會走上融合路徑。 |
+| `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K 與 V 分開設，但 `-ctk` 與 `-ctv` **接受完全相同的取值清單** —— `f32 / f16 / bf16 / q8_0 / q4_0 / q4_1 / iq4_nl / q5_0 / q5_1 / turbo2 / turbo3 / turbo4`（同一份 `get_all_kv_cache_types()`、同一個 `kv_cache_type_from_str()` 解析器）。**turbo2/3/4 對 K 與 V 都可用，沒有「只能用於 V」的限制**；上例只是 K 取精度、V 取壓縮的常見搭配。KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，兩者各自生效。唯一要注意的是別處的加速條件：CUDA 的 fused turbo MMA 路徑要求 **K 與 V 同型**，所以 `-ctk turbo4 -ctv turbo3` 這類混搭不會走上融合路徑 —— 但**仍然在 GPU 上執行**，只是回退到一般注意力派發（依架構走 `MMA_F16` 或 `VEC`，詳見下文「TurboQuant」一節），並非沒有加速。 |
 | `--enable-thinking`、`--reasoning-effort`、`--reasoning-budget` | `--reasoning on`、`--reasoning-budget`（＋ `--reasoning-format/-preserve/-temp/-top-p/...`） | llama-server 用 `--reasoning [on\|off\|auto]` 開關；「思考強度」由 `--reasoning-budget` 與一整套 `--reasoning-*` 採樣覆蓋表達，沒有 `effort` 這個名字。 |
 | `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義；mmproj × KVMem 已支持（見下方「啟用條件」的 `--kvmem-budget` 要求）。 |
 | `--chat-template-file`、`--temp/--top-p/--top-k/--min-p/--*-penalty` | 同名 | 同名同義。 |
@@ -309,13 +309,20 @@ llama_context::from_params: n_ubatch set to auto, selected value: 4096 based on 
 
 #### TurboQuant 键值缓存 與 MMA 融合路徑
 
-透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；Volta 及更早架構會自動回退到 VEC 路徑。
+透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；條件不滿足時（Volta 及更早、或 K/V 不同型等）會自動回退到一般注意力派發，仍在 GPU 上執行（詳見本節末尾）。
 
 | 環境變數 | 預設值 | 描述 |
 | --- | --- | --- |
-| `GGML_TURBO_MMA_FUSED` | `1`（開啟） | 控制 CUDA fused turbo MMA 路徑。設為 `0` 可關閉，回退到 VEC 路徑（功能完整，僅失去 tensor core 加速）。 |
+| `GGML_TURBO_MMA_FUSED` | `1`（開啟） | 控制 CUDA fused turbo MMA 路徑。設為 `0` 可關閉融合，回退到一般注意力派發（依架構走 `MMA_F16` 或 `VEC`；功能完整，僅失去內聯反量化與 GQA 打包的額外收益）。 |
 
-MMA 融合路徑生效條件：K 與 V 同型且為 `turbo4`/`turbo3`/`turbo2`、`Q->ne[1] <= 4`（解碼場景）、`Q->ne[0]` 為 128 或 256。條件不滿足時自動回退到 VEC 路徑，無需手動干預。
+MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo2`（另需 Turing 及以上的 tensor core、`V->ne[0] == Q->ne[0]`，且 `Q->ne[0]` 為 128 或 256；`turbo2` + head_dim 256 刻意不融合，見 `ggml/src/ggml-cuda/fattn.cu` 的註解）。
+
+條件不滿足時**不是失去 GPU 加速**，而是回退到一般注意力派發（仍在 CUDA 上跑、KV 壓縮效果照舊），實際走哪一條視架構與 batch 而定：
+- **Volta 及更早**：無 tensor core → TILE / VEC。
+- **Turing / Ampere**：量化 KV → `MMA_F16`，**仍然是 tensor core**，但會先把 K/V 轉成 f16（多一份臨時顯存與頻寬開銷）。
+- **Ada Lovelace 及以上**：解碼（`Q->ne[1] <= 2`）→ `VEC`（核心內反量化、無臨時緩衝）；其餘 → `MMA_F16`。
+
+所以 `-ctk turbo4 -ctv turbo3` 這類 **K/V 不同型**的混搭只是拿不到「融合」那一檔優化（內聯反量化 + GQA 打包、省掉 f16 臨時緩衝），並非退回 CPU 或沒有加速；要吃滿融合路徑就把 K 與 V 設成同一個 turbo 類型。全過程自動，無需手動干預。
 
 ---
 
