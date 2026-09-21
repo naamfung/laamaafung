@@ -76,6 +76,10 @@ static void print_usage(const char * argv0) {
             "  -tb, --threads-batch N     CPU batch threads (defaults to --threads)\n"
             "  -ub, --ubatch-size N       physical batch size (defaults to --batch-size)\n"
             "  -fa, --flash-attn MODE     on | off | auto\n"
+            "  --cuda-register-host       pin the GPU backend host buffers; command-line form of\n"
+            "                             GGML_CUDA_REGISTER_HOST (best-effort, MUSA/HIP too)\n"
+            "  --sched-prefetch-experts N prefetch offloaded MoE expert weights; command-line form of\n"
+            "                             GGML_SCHED_PREFETCH_EXPERTS (N=1 default 3 slots, N=0 off)\n"
             "  -a, --alias NAME           model name exposed by the API\n"
             "  --api-key KEY[,KEY...]     allowed API keys\n"
             "  --api-key-file PATH        one key per line; blank/# lines ignored\n"
@@ -1625,6 +1629,20 @@ int main(int argc, char ** argv) {
             st.n_batch = kvmem_cli_int(arg, need(arg), 1);
         } else if (eq(arg, "-ngl") || eq(arg, "--n-gpu-layers") || eq(arg, "--gpu-layers")) {
             ngl = kvmem_cli_gpu_layers(arg, need(arg));
+        } else if (eq(arg, "--cuda-register-host")) {
+            // ggml reads this knob only from the environment; the option writes it there so
+            // it can be set where the environment cannot (restricted shell, service unit).
+            // Same option and same meaning as llama-server's.
+            kvmem_setenv("GGML_CUDA_REGISTER_HOST", "1");
+        } else if (eq(arg, "--sched-prefetch-experts")) {
+            // 0 removes the variable, so a preset environment can be switched off per run;
+            // 1 selects ggml's default slot count (3), larger values set it directly.
+            const int n = kvmem_cli_int(arg, need(arg), 0);
+            if (n == 0) {
+                kvmem_unsetenv("GGML_SCHED_PREFETCH_EXPERTS");
+            } else {
+                kvmem_setenv("GGML_SCHED_PREFETCH_EXPERTS", std::to_string(n).c_str());
+            }
         } else if (!kvmem_chat_sampling_cli_key(arg).empty()) {
             const auto key = kvmem_chat_sampling_cli_key(arg);
             const char * value = need(arg);
@@ -1907,6 +1925,17 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR --ui-dir/--path must contain a readable index.html\n");
         return 1;
     }
+    // These two ggml knobs have no other visible trace, so echo what is actually in
+    // effect: they may also come from the environment rather than from an option.
+    {
+        const char * reg = getenv("GGML_CUDA_REGISTER_HOST");
+        const char * pre = getenv("GGML_SCHED_PREFETCH_EXPERTS");
+        if (reg || pre) {
+            fprintf(stderr, "KVMEM_STARTUP ggml_env cuda_register_host=%s prefetch_experts=%s\n",
+                    reg ? reg : "off", pre ? pre : "off");
+        }
+    }
+
     json startup = {
         {"model", model_path}, {"alias", st.model_name},
         {"gpu", {{"device_requested", options.device_names.empty() ? "auto" : options.device_names},

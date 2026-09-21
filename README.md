@@ -283,8 +283,8 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | --- | --- |
 | `--batch-size auto` 或 `--batch-size -1` | 啟用邏輯 batch size (`n_batch`) 自動調優。程序會根據 `n_ctx` 和硬件特徵自動計算最佳值，最大上限為 8192。若系統為 NUMA 架構，則上限降低至 4096。確保最小值 `>= 32`（BLAS 要求）。 |
 | `--ubatch-size auto` 或 `--ubatch-size -1` | 啟用物理 batch size (`n_ubatch`) 自動調優。程序會根據 `n_ctx` 和硬件特徵自動計算最佳值，最大上限為 4096。若系統為 NUMA 架構，則上限降低至 2048。確保最小值 `>= 64`（以觸發 Tiled Flash Attention 優化，對應 `Q_TILE_SZ` 閾值）。 |
-| `--cuda-register-host` | 固定（pin）GPU 後端的主機緩衝（`cudaHostRegister`），讓傳輸可省下一次中轉拷貝；等同環境變量 `GGML_CUDA_REGISTER_HOST=1`（MUSA/HIP 後端亦適用）。在無法設定環境變數的環境（受限 shell、服務單元）用它代替。註冊屬 best-effort，失敗會靜默略過。 |
-| `--sched-prefetch-experts N` | MoE 專家權重預取：等同環境變量 `GGML_SCHED_PREFETCH_EXPERTS=N`。`N=1` 用默認 3 個槽位（一層 MoE 的 gate/up/down），更大的 `N` 直接指定槽數，`N=0` 關閉。槽位越多，上傳越能跑在計算之前，代價是每槽一份「最大專家張量」的裝置記憶體。非數字會被拒絕（ggml 用 `atoi()` 讀取，否則會被靜默當成 0）。 |
+| `--cuda-register-host` | **兩邊都已支援**。固定（pin）GPU 後端的主機緩衝（`cudaHostRegister`），讓傳輸可省下一次中轉拷貝；等同環境變量 `GGML_CUDA_REGISTER_HOST=1`（MUSA/HIP 後端亦適用），在無法設定環境變數的環境（受限 shell、服務單元）用它代替。註冊屬 best-effort，失敗會靜默略過。 |
+| `--sched-prefetch-experts N` | **兩邊都已支援**。MoE 專家權重預取：等同環境變量 `GGML_SCHED_PREFETCH_EXPERTS=N`。`N=1` 用默認 3 個槽位（一層 MoE 的 gate/up/down），更大的 `N` 直接指定槽數，`N=0` 關閉。槽位越多，上傳越能跑在計算之前，代價是每槽一份「最大專家張量」的裝置記憶體。非數字會被拒絕（ggml 用 `atoi()` 讀取，否則會被靜默當成 0）。 |
 
 **調優邏輯說明：**
 - **基於 Context Length 的動態縮放**：自動計算時，會根據 `n_ctx` 進行縮放，避免過大的 batch 導致 KV cache 溢出或 intermediate tensors 過大。
@@ -342,7 +342,7 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
    
    可通過環境變量 `GGML_CUDA_REGISTER_HOST=1`（針對 CUDA 後端）啟用此優化；若不便（或無權）設定環境變量，改用啟動參數 `--cuda-register-host`（MUSA/HIP 後端同樣適用）。
 
-上述兩個啟動參數與對應的環境變量完全等價（參數只是在解析時把變量寫進行程環境，ggml 仍按原方式讀取），二選一即可；環境變量已設定時，參數優先。這些優化可顯著提升 MoE 模型的性能，例如在 Qwen3.6-35B-A3B 模型上，預取優化可將吞吐量從 1383 提升到 1663 t/s（在 RTX 3060 上，-ncmoe 26, ub 2048），而 CPU 權重內存固定優化可將吞吐量從 1144 提升到 1385 t/s。
+上述兩個啟動參數與對應的環境變量完全等價（參數只是在解析時把變量寫進行程環境，ggml 仍按原方式讀取），二選一即可；環境變量已設定時，參數優先。`llama-server` 與 `llama-kvmem-server` **都支援**這兩個參數；`llama-kvmem-server` 啟動時會打一行 `KVMEM_STARTUP ggml_env cuda_register_host=… prefetch_experts=…`（兩者皆為 off 時不打），可用來核對實際生效值。這些優化可顯著提升 MoE 模型的性能，例如在 Qwen3.6-35B-A3B 模型上，預取優化可將吞吐量從 1383 提升到 1663 t/s（在 RTX 3060 上，-ncmoe 26, ub 2048），而 CPU 權重內存固定優化可將吞吐量從 1144 提升到 1385 t/s。
 
 ---
 

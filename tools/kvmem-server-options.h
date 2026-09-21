@@ -24,6 +24,28 @@ inline const char * kvmem_server_arg_alias(const char * arg) {
     return arg;
 }
 
+// Write / remove a process environment variable on behalf of an option. Some ggml
+// knobs (GGML_CUDA_REGISTER_HOST, GGML_SCHED_PREFETCH_EXPERTS) are readable only from
+// the environment, so an option stands in for it where the environment cannot be set.
+// ggml reads them while creating the backend / scheduler, i.e. after option parsing.
+inline void kvmem_setenv(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+inline void kvmem_unsetenv(const char * name) {
+#ifdef _WIN32
+    // an empty value removes the variable from the CRT environment, which is what
+    // getenv() reads
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
 inline int kvmem_cli_int(const char * option, const char * value, int minimum = 0,
                          int maximum = std::numeric_limits<int>::max()) {
     char * end = nullptr;
