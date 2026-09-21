@@ -326,7 +326,10 @@ static llama_sampler * common_sampler_reasoning_budget_init(
         params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
 
     for (const auto & token : prefill_tokens) {
-        llama_sampler_accept(rbudget, token);
+        // KVMem port gap: the reference fixes this path (accept_prefill keeps a
+        // pending forced end sequence intact). The kvmem server only calls
+        // common_sampler_init(), never reset(), so without this the fix was dead code.
+        common_reasoning_budget_accept_prefill(rbudget, token);
         LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
     }
 

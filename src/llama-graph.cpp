@@ -1408,6 +1408,10 @@ static void kvmem_capture_impl(ggml_context * ctx0, ggml_cgraph * gf, ggml_tenso
 
 void llm_graph_context::kvmem_capture_k(ggml_tensor * k_prerope, int il) const {
 #if defined(LLAMA_KVMEM)
+    // portable bisect switch: KVMEM_NO_KCAP=1 disables the pre-RoPE K capture
+    if (getenv("KVMEM_NO_KCAP") != nullptr) {
+        return;
+    }
     // Prefill: full ubatch mean-K. Decode / MTP verify after pin: running mean-K.
     if (ubatch.n_tokens <= 1) {
         if (!llama_kvmem_want_decode_mean()) {
@@ -1429,10 +1433,21 @@ void llm_graph_context::kvmem_capture_q(ggml_tensor * q, int il) const {
     if (ubatch.n_tokens <= 1) {
         return;
     }
+    // portable bisect switch: KVMEM_NO_QCAP=1 disables the prefill Q capture
+    if (getenv("KVMEM_NO_QCAP") != nullptr) {
+        return;
+    }
 #if defined(LLAMA_KVMEM)
     if (!llama_kvmem_want_q_capture(ubatch.n_tokens, 1, ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos)) {
         return;
     }
+    // v21: Qcur is a strided view of the (doubled) Q projection. Marking that
+    // tensor as a graph output disturbs the allocator/buffer lifetime and the Q
+    // fed to attention comes out corrupted whenever the prefill is split into
+    // more than one ubatch (garbled context -> verbatim repetition).
+    // Capture a private contiguous copy instead; the harvest reads this copy.
+    kvmem_capture_impl(ctx0, gf, ggml_dup(ctx0, q), il, "q");
+    return;
 #endif
     kvmem_capture_impl(ctx0, gf, q, il, "q");
 }
