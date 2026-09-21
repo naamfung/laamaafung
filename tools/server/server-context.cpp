@@ -1020,6 +1020,14 @@ static std::pair<int32_t, int32_t> kvmem_last_user_span(
         int32_t               max_tokens) {
     const auto & spans = tparams.message_spans.spans;
 
+    // The spans were computed on the task's original tokens. prompt_truncate can
+    // rewrite that array later (erasing a middle block), which would silently shift
+    // every offset - split() always closes its span list at the token count it saw,
+    // so compare that with the array we are about to index.
+    if (spans.empty() || spans.back().pos + spans.back().len != toks.size()) {
+        return { 0, 0 };
+    }
+
     int32_t begin = -1;
     int32_t end   = -1;
     for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
@@ -3733,6 +3741,17 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     return;
                 }
 
+                if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
+                    // The memory cannot remap positions (recurrent memory, or a tiered/sparse
+                    // backend such as KVMem whose block index is built from the old numbering).
+                    // common_init_from_params() already disables ctx_shift for such a context,
+                    // so this is a safety net: never shift a memory that cannot follow.
+                    SRV_WRN("%s\n", "context shift is not supported by this context, refusing to shift");
+                    send_error(slot, "context shift is not supported by this context", ERROR_TYPE_SERVER);
+                    slot.release();
+                    return;
+                }
+
                 if (mctx) {
                     // we should never reach this because params_base.ctx_shift is automatically disabled if mmproj is loaded
                     // we don't support ctx_shift because an image chunk may contains multiple tokens
@@ -3772,18 +3791,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 }
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
-
-#if defined(LLAMA_KVMEM)
-                if (params_base.kvmem) {
-                    // A context shift remaps every position, but KVMem's tiered index
-                    // (block orig positions + per-row metadata) is built from the old
-                    // numbering and cannot follow it. KVMem manages its own capacity, so
-                    // a shift is never required for it - raise --ctx-size instead.
-                    SLT_WRN(slot, "%s", "KVMem does not support context shift: positions are "
-                                        "remapped while the tiered index is not, retrieval may be "
-                                        "wrong for the rest of this session\n");
-                }
-#endif
 
                 slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
