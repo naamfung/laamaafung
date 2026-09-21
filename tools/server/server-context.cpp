@@ -4065,6 +4065,28 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             SLT_INF(slot, "KVMem query span = [%d, %d) of %d prompt tokens (%s)\n",
                                     q0, q1, n_prompt,
                                     exact ? "last user turn" : "fallback: last tokens");
+
+                            // Media chunks occupy consecutive cache rows but carry 2-D
+                            // (M-RoPE) model positions, and the selection must never split an
+                            // image's blocks - so tell KVMem where the media rows are. Row
+                            // coordinates, same space as the store's token rows.
+                            std::vector<uint32_t> mm_starts, mm_ends;
+                            if (input_tokens.has_media()) {
+                                size_t idx = 0;
+                                while (true) {
+                                    auto [chunk, at] = input_tokens.find_next_media_chunk(idx);
+                                    if (chunk == nullptr) {
+                                        break;
+                                    }
+                                    const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
+                                    mm_starts.push_back((uint32_t) at);
+                                    mm_ends  .push_back((uint32_t) (at + n));
+                                    idx = at + n;
+                                }
+                                SLT_INF(slot, "KVMem media rows: %zu chunk(s) in [0, %d)\n",
+                                        mm_starts.size(), n_prompt);
+                            }
+                            llama_kvmem_set_media_ranges(mm_starts.data(), mm_ends.data(), mm_starts.size());
                         }
 #endif
 

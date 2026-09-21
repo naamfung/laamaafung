@@ -92,14 +92,13 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 -ctk q8_0 -ctv turbo4 \
 --reasoning on --reasoning-budget 2048 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我响应。" \
 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --frequency-penalty 0.0 --repeat-penalty 1.0 \
+--mmproj $mmproj --no-mmproj-offload --image-min-tokens 1024 \
 --chat-template-file $template --alias Agentic-Turbo-Coder
-# 官版參數集還帶視覺：--mmproj $mmproj --no-mmproj-offload --image-min-tokens 1024
-# 但 KVMem × mmproj 在本分支 llama-server 側**尚未支持**（見下文「啟用條件」），純文本先不要加；
-# 需要視覺時請繼續用官版 llama-kvmem-server。
 ```
 
 > 上例的 `-c 262144` / `-n 32768` / `-ub 128` / `-b 512` / `--kvmem-*` 全部沿用官版 KVMem 伺服器的生產值，只把 `--kv-dtype q8_0` 拆成 `-ctk q8_0 -ctv turbo4`、`--enable-thinking` 換成 `--reasoning on`。
 > `--kvmem-budget`（工作集）與 `--kvmem-gen-reserve`（單輪生成頭寸）是唯二需要按自己機器／單輪生成長度調整的；其餘 KVMem 參數預設即生產值。
+> 帶圖像時**整張圖必須整體駐留**：`--kvmem-budget` 要 ≥ 單張圖的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢，否則會拋 `mandatory image group and query exceed KV selection budget`（`32768` 足以容納多張圖）。
 > 注意 KVMem 下**不要**加 `--context-shift` / `--prompt-truncate` / `--cache-reuse`：前兩者會被拒絕或自動禁用，後者依賴 K-shift 亦會自動禁用（見下文「KVMem」一節）。
 > 純 CPU 或小顯存試跑可把 `-ngl 99` 換成 `-ngl 0`，並把 `-c` / `--kvmem-budget` 按比例調小。
 
@@ -176,7 +175,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `--kvmem-budget` / `--kvmem-gen-reserve` / `--kvmem-gpu-ratio` / `--kvmem-block-tokens` | 同名 | KVMem 參數一一對應（預設值見下表）。 |
 | `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K/V 分開設，KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，因此 turbo2/3/4 也能用於 V。 |
 | `--enable-thinking`、`--reasoning-effort`、`--reasoning-budget` | `--reasoning on`、`--reasoning-budget`（＋ `--reasoning-format/-preserve/-temp/-top-p/...`） | llama-server 用 `--reasoning [on\|off\|auto]` 開關；「思考強度」由 `--reasoning-budget` 與一整套 `--reasoning-*` 採樣覆蓋表達，沒有 `effort` 這個名字。 |
-| `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義，但**mmproj × KVMem 在 llama-server 側尚未支持**（見下方「啟用條件」），純文本請勿啟用。 |
+| `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義；mmproj × KVMem 已支持（見下方「啟用條件」的 `--kvmem-budget` 要求）。 |
 | `--chat-template-file`、`--temp/--top-p/--top-k/--min-p/--*-penalty` | 同名 | 同名同義。 |
 
 **啟用條件**（不滿足時靜默回退標準 KV，並在日誌給出原因）
@@ -184,7 +183,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 - 需要 `LLAMA_KVMEM` 構建（v21 分支的構建已默認開啟）；
 - `--parallel` 會**強制為 1**（KVMem 要求 `n_seq_max == 1`）：顯式非 1 會打警告 `KVMem requires n_parallel = 1, but N was requested - forcing n_parallel = 1`，`auto` 則打提示；
 - 純線性注意力（recurrent）架構與 SWA 模型不支援（日誌分別為 `KVMem skips purely recurrent arch ...` 與 `KVMem skips SWA models`）；混合注意力模型（如 Qwen3.5/3.6 的門控 DeltaNet + 門控注意力）可用；
-- 多模態（mmproj）：官版 KVMem 參數集帶 `--mmproj`，但**本分支 `llama-server` 側的 KVMem × mmproj 尚未支持**——實測帶圖片請求會 500：批次位置的 `find_slot: non-consecutive token position ...` 之後是 `got exception: missing cache row position metadata`。原因是多模態（IM-RoPE / `pos_2d`）的 token 位置**不連續**，而 KVMem 的分層塊索引按一維連續位置建立（`row.spatial` 只是一行標記，尚不足以承載媒體佈局），要等專門的多模態對齊工作。**純文本請勿加 `--mmproj`；需要視覺請繼續用官版 `llama-kvmem-server`。**（純文本 + KVMem 在帶 mmproj 的構建下也不受影響，只要請求不含圖片。）
+- 多模態（mmproj）：**已支持**（官版參數集帶 `--mmproj`，示例照搬）。圖像塊佔用連續的 cache 行、但攜帶 2-D（M-RoPE）模型位置，因此 `llama-server` 會為嵌入批設置 `llama_batch::logical_pos`（相鄰行號）並把媒體行的範圍告知 KVMem（`set_media_ranges`），KVMem 才能按行尋址且**整張圖整體保留**。**注意 `--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢**，否則會拋 `mandatory image group and query exceed KV selection budget`（圖像組是強制的，不能拆塊）；生產 `--kvmem-budget 32768` 足以容納多張圖。
 
 **與其他功能的交互**
 

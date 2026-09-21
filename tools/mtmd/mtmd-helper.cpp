@@ -134,6 +134,7 @@ struct decode_embd_batch {
     int n_mmproj_embd;
     std::vector<llama_pos>      pos;
     std::vector<llama_pos>      pos_view; // used by mrope
+    std::vector<llama_pos>      logical_pos; // unique cache row IDs (see llama_batch::logical_pos)
     std::vector<int32_t>        n_seq_id;
     std::vector<llama_seq_id>   seq_id_0;
     std::vector<llama_seq_id *> seq_ids;
@@ -142,6 +143,7 @@ struct decode_embd_batch {
     decode_embd_batch(float * embd, int32_t n_tokens, int n_pos_per_embd, int n_mmproj_embd) : n_pos_per_embd(n_pos_per_embd), n_mmproj_embd(n_mmproj_embd) {
         GGML_ASSERT(n_tokens > 0 && n_pos_per_embd > 0 && n_mmproj_embd > 0);
         pos     .resize(n_tokens * n_pos_per_embd);
+        logical_pos.resize(n_tokens);
         n_seq_id.resize(n_tokens);
         seq_ids .resize(n_tokens + 1);
         logits  .resize(n_tokens);
@@ -155,11 +157,25 @@ struct decode_embd_batch {
             /*n_seq_id       =*/ n_seq_id.data(),
             /*seq_id         =*/ seq_ids.data(),
             /*logits         =*/ logits.data(),
+            /*logical_pos    =*/ logical_pos.data(),
+            /*embd_nextn     =*/ nullptr,
         };
+    }
+
+    // The cache row of every embedded token is the sequential row index, which is
+    // independent of the (possibly 2-D / M-RoPE) model positions in `pos`. Without
+    // this, a media batch would report its M-RoPE temporal coordinates as cache row
+    // IDs - KVMem (which addresses its tiers by row) then desynchronises from the
+    // KV cache and throws "missing cache row position metadata".
+    void set_logical_positions(llama_pos row0) {
+        for (int i = 0; i < batch.n_tokens; i++) {
+            logical_pos[i] = row0 + i;
+        }
     }
 
     void set_position_normal(llama_pos pos_0, llama_seq_id seq_id) {
         seq_id_0[0] = seq_id;
+        set_logical_positions(pos_0);
         for (int i = 0; i < batch.n_tokens; i++) {
             batch.pos     [i] = pos_0 + i;
             batch.n_seq_id[i] = 1;
@@ -169,10 +185,11 @@ struct decode_embd_batch {
     }
 
     // M-RoPE for image
-    void set_position_mrope_2d(const std::vector<mtmd_decoder_pos> & rel_pos, llama_seq_id seq_id) {
+    void set_position_mrope_2d(const std::vector<mtmd_decoder_pos> & rel_pos, llama_seq_id seq_id, llama_pos row0) {
         GGML_ASSERT(n_pos_per_embd == 4);
         GGML_ASSERT(!rel_pos.empty() && (int32_t)rel_pos.size() == batch.n_tokens);
         seq_id_0[0] = seq_id;
+        set_logical_positions(row0);
         for (int32_t i = 0; i < batch.n_tokens; i++) {
             pos[i                     ] = rel_pos[i].t;
             pos[i + batch.n_tokens    ] = rel_pos[i].y;
@@ -190,6 +207,7 @@ struct decode_embd_batch {
     void set_position_mrope_1d(llama_pos pos_0, llama_seq_id seq_id) {
         GGML_ASSERT(n_pos_per_embd == 4);
         seq_id_0[0] = seq_id;
+        set_logical_positions(pos_0);
         for (int i = 0; i < batch.n_tokens; i++) {
             pos[i                     ] = pos_0 + i;
             pos[i + batch.n_tokens    ] = pos_0 + i;
@@ -234,6 +252,8 @@ struct decode_embd_batch {
             /*n_seq_id       =*/ batch.n_seq_id + offset,
             /*seq_id         =*/ batch.seq_id   + offset,
             /*logits         =*/ batch.logits   + offset,
+            /*logical_pos    =*/ batch.logical_pos ? batch.logical_pos + offset : nullptr,
+            /*embd_nextn     =*/ nullptr,
         };
     }
 };
@@ -301,7 +321,7 @@ int32_t mtmd_helper_decode_image_chunk_with_decoder(
             const auto n_tokens = mtmd_image_tokens_get_n_tokens(image_tokens);
             std::vector<mtmd_decoder_pos> rel_pos(n_tokens);
             mtmd_helper_image_get_decoder_pos(image_tokens, n_past, rel_pos.data());
-            batch_embd.set_position_mrope_2d(rel_pos, seq_id);
+            batch_embd.set_position_mrope_2d(rel_pos, seq_id, n_past);
         } else if (chunk_type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
             batch_embd.set_position_mrope_1d(n_past, seq_id);
         } else {
