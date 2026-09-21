@@ -2981,6 +2981,67 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_OVERRIDE_TENSOR"));
     add_opt(common_arg(
+        {"--kvmem"}, "enable the KVMem tiered/sparse KV memory (needs a LLAMA_KVMEM build)",
+        [](common_params & params) {
+            params.kvmem = true;
+        }
+    ).set_env("LLAMA_ARG_KVMEM"));
+    add_opt(common_arg(
+        {"--kvmem-budget"}, "N",
+        "KVMem GPU working-set tokens (0 = n_ctx)",
+        [](common_params & params, int value) {
+            params.kvmem_budget = value;
+        }
+    ).set_env("LLAMA_ARG_KVMEM_BUDGET"));
+    add_opt(common_arg(
+        {"--kvmem-gen-reserve"}, "N",
+        "KVMem decode slack tokens kept inside the working set (default 256)",
+        [](common_params & params, int value) {
+            params.kvmem_gen_reserve = value;
+        }
+    ).set_env("LLAMA_ARG_KVMEM_GEN_RESERVE"));
+    add_opt(common_arg(
+        {"--kvmem-block-tokens"}, "N",
+        "KVMem block size in tokens (default 128)",
+        [](common_params & params, int value) {
+            params.kvmem_block_tokens = value;
+        }
+    ).set_env("LLAMA_ARG_KVMEM_BLOCK_TOKENS"));
+    add_opt(common_arg(
+        {"--kvmem-query-last"}, "N",
+        "retrieval query = last N prompt tokens (default 64)",
+        [](common_params & params, int value) {
+            params.kvmem_query_last = value;
+        }
+    ).set_env("LLAMA_ARG_KVMEM_QUERY_LAST"));
+    add_opt(common_arg(
+        {"--kvmem-gpu-ratio"}, "R",
+        "cap the KVMem GPU pool at this fraction of VRAM (default 0.50)",
+        [](common_params & params, const std::string & value) {
+            params.kvmem_gpu_ratio = std::stof(value);
+        }
+    ).set_env("LLAMA_ARG_KVMEM_GPU_RATIO"));
+    add_opt(common_arg(
+        {"--kvmem-method"}, "METHOD",
+        "KVMem selection policy: recency | retrieval (default: retrieval)",
+        [](common_params & params, const std::string & value) {
+            if (value == "retrieval") {
+                params.kvmem_retrieval = true;
+            } else if (value == "recency") {
+                params.kvmem_retrieval = false;
+            } else {
+                throw std::runtime_error(string_format("error: invalid kvmem-method = %s (expected: recency or retrieval)\n", value.c_str()));
+            }
+        }
+    ).set_env("LLAMA_ARG_KVMEM_METHOD"));
+    add_opt(common_arg(
+        {"--kvmem-harvest-v"},
+        "prefill D2H V together with raw-K (default: off)",
+        [](common_params & params) {
+            params.kvmem_harvest_v = true;
+        }
+    ).set_env("LLAMA_ARG_KVMEM_HARVEST_V"));
+    add_opt(common_arg(
         {"-cmoe", "--cpu-moe"},
         "keep all Mixture of Experts (MoE) weights in the CPU",
         [](common_params & params) {

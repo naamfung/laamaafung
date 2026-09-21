@@ -14,6 +14,9 @@
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
+#if defined(LLAMA_KVMEM)
+#include "llama-kvmem-hooks.h"
+#endif
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
@@ -1356,11 +1359,34 @@ private:
             params_base.load_progress_callback_user_data = &load_progress_text;
         }
 
+#if defined(LLAMA_KVMEM)
+        // KVMem reads its configuration from a process-global, so it must be set
+        // before the context (and therefore its memory) is created. The K/V cache
+        // types come from the usual -ctk/-ctv options (llama_memory_params).
+        if (params_base.kvmem) {
+            llama_kvmem_params kp = {};
+            kp.enabled          = true;
+            kp.block_tokens     = (uint32_t) std::max(0, params_base.kvmem_block_tokens);
+            kp.budget           = (uint32_t) std::max(0, params_base.kvmem_budget);
+            kp.gen_reserve      = (uint32_t) std::max(0, params_base.kvmem_gen_reserve);
+            kp.sink_tokens      = 0;
+            kp.recent_tokens    = 0;
+            kp.method           = params_base.kvmem_retrieval ? 1 : 0;
+            kp.query_begin      = -1;
+            kp.query_end        = -1;
+            kp.force_pos        = -1;
+            kp.gpu_memory_ratio = params_base.kvmem_gpu_ratio;
+            kp.harvest_v        = params_base.kvmem_harvest_v;
+            kp.mtp_state        = 1;
+            llama_kvmem_set_params(&kp);
+            SRV_INF("%s", "KVMem memory requested (tiered/sparse KV)\n");
+        }
+#endif
+
         llama_init = common_init_from_params(params_base);
 
         model_tgt = llama_init->model();
         ctx_tgt   = llama_init->context();
-
         if (model_tgt == nullptr) {
             SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
             return false;
@@ -3858,6 +3884,16 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         slot.t_start_generation = 0;
 
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
+#if defined(LLAMA_KVMEM)
+                        if (params_base.kvmem) {
+                            // Minimal KVMem policy: the retrieval query is the last N tokens of
+                            // this prompt. TODO: derive the real "last user turn" span from the
+                            // chat parse (the standalone kvmem server does that).
+                            const int32_t q_end   = (int32_t) input_tokens.size();
+                            const int32_t q_begin = std::max(0, q_end - std::max(1, params_base.kvmem_query_last));
+                            llama_kvmem_set_request_span(q_begin, q_end, -1);
+                        }
+#endif
 
                         SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                 slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
@@ -4547,6 +4583,15 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;
+#if defined(LLAMA_KVMEM)
+                if (params_base.kvmem) {
+                    // Prefill finished: apply the retrieval selection, then stop harvesting
+                    // prefill K/V. apply_retrieval() recomputes the selection, so it cannot
+                    // trip the adapter's "stale selection" guard.
+                    llama_kvmem_apply_retrieval(ctx_tgt);
+                    llama_kvmem_end_prefill_capture();
+                }
+#endif
 
                 if (slot.can_speculate()) {
                     common_speculative_begin(spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());
