@@ -77,10 +77,10 @@ GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release
 KVMem（分層/稀疏 KV 記憶，`llama-server` 本體直接驅動，須 v21 分支）：
 
 ```sh
-GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_PREFETCH_EXPERTS=1 D:/Programs/llama-cpp-repos/laamaafung-v21/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-top-k 64 --reasoning-presence-penalty 1.2 --fit on -ngl all -ngld all --n-cpu-moe 36 --threads 10 --threads-http 2 --parallel 1 --kv-unified --kvmem --kvmem-budget 32768 --kvmem-gpu-ratio 0.45 --kvmem-block-tokens 128 --kvmem-gen-reserve 256 --kvmem-query-max 512 --cache-type-k q8_0 --cache-type-v turbo4 --host 0.0.0.0 --port 8008 --batch-size 16384 --ubatch-size 256 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --ctx-checkpoints 32 --checkpoint-min-step 8192 --cache-idle-slots --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --frequency_penalty 0.0 --jinja --spec-type draft-mtp,ngram-mod,ngram-map-k4v --spec-draft-n-max 2 --spec-draft-n-min 0 --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 24 --spec-ngram-mod-n-max 86 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+GGML_CUDA_REGISTER_HOST=1 GGML_SCHED_PREFETCH_EXPERTS=1 D:/Programs/llama-cpp-repos/laamaafung-v21/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-top-k 64 --reasoning-presence-penalty 1.2 --fit on -ngl all -ngld all --n-cpu-moe 36 --threads 10 --threads-http 2 --parallel 1 --kv-unified --kvmem --kvmem-budget 32768 --kvmem-gpu-ratio 0.90 --kvmem-block-tokens 128 --kvmem-gen-reserve 256 --kvmem-query-max 512 --cache-type-k q8_0 --cache-type-v turbo4 --host 0.0.0.0 --port 8008 --batch-size 16384 --ubatch-size 256 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --ctx-checkpoints 32 --checkpoint-min-step 8192 --cache-idle-slots --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --frequency_penalty 0.0 --jinja --spec-type draft-mtp,ngram-mod,ngram-map-k4v --spec-draft-n-max 2 --spec-draft-n-min 0 --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 24 --spec-ngram-mod-n-max 86 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
-> 上例是「生產參數 + KVMem」的組合（`-c 131072` 配 `--kvmem-budget 32768`、`--kvmem-gpu-ratio 0.45`）。
+> 上例是「生產參數 + KVMem」的組合（`-c 131072` 配 `--kvmem-budget 32768`、`--kvmem-gpu-ratio 0.90`）。
 > 注意 KVMem 下**不要**加 `--context-shift` / `--prompt-truncate` / `--cache-reuse`：前兩者會被拒絕或自動禁用，後者依賴 K-shift 亦會自動禁用（見下文「KVMem」一節）。
 > 純 CPU 或小顯存試跑可把 `-ngl all --n-cpu-moe 36` 換成 `-ngl 0`，並把 `--kvmem-budget`/`--ctx-size` 按比例調小。
 
@@ -170,7 +170,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | --- | --- | --- |
 | `--kvmem` | 關閉 | 總開關（環境變數 `LLAMA_ARG_KVMEM`） |
 | `--kvmem-budget N` | `0` = `--ctx-size` | 顯存工作集 token 數，**最關鍵的容量參數**，見下方配置建議 |
-| `--kvmem-gpu-ratio R` | `0.50` | KVMem 顯存池上限佔 VRAM 的比例（與權重、計算緩衝共享顯存；8GB 卡建議 0.40–0.45） |
+| `--kvmem-gpu-ratio R` | `0.50` | KVMem 顯存池上限佔 **VRAM 總量**的比例：`cap_blocks = (VRAM × R) / 塊大小`。若 `--kvmem-budget + --kvmem-gen-reserve` 超過這個上限，池（即工作集）會被**靜默壓小**，所以設太小會悄悄削弱 KVMem 的效果。**生產環境用 `0.90`**；設完請用 `KVMEM_TRACE=1` 的 `KVMEM_KV_BYTES` 行核對 `cap_blocks` 與實際 `budget`/`pool` 是否符合預期。 |
 | `--kvmem-block-tokens N` | `128` | 塊大小。越大檢索粒度越粗、元數據越省 |
 | `--kvmem-gen-reserve N` | `256` | 生成階段保留在工作集中的 slack token 數 |
 | `--kvmem-query-last N` | `64` | prompt 無 chat 訊息分界（raw `/completion`）時的查詢長度 = 最後 N tokens；有分界時僅作兜底 |
@@ -178,7 +178,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `--kvmem-method M` | `retrieval` | `retrieval`（按查詢檢索歷史塊）或 `recency`（只保留最近內容，等於純壓縮） |
 | `--kvmem-harvest-v` | 關閉 | 前填時同時把 V 搬到主機（增加前填開銷，換取更完整的檢索載入） |
 
-**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gpu-ratio 0.45` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）。
+**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。`--kvmem-gpu-ratio` 是**上限**而非目標值：它按 VRAM 總量換算可容納的塊數，若 `budget + gen_reserve` 超出就會把池壓小（見上表）。**生產環境取 `0.90`**，讓上限不成為約束、實際工作集完全由 `--kvmem-budget` 決定。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gpu-ratio 0.90` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）。
 
 **日誌排查（`KVMEM_TRACE=1`）**：`KVMEM_KV_BYTES cells=.. budget=.. pool=..`（是否啟用與池大小）、`KVMem query span = [a, b) of N prompt tokens (last user turn|fallback: last tokens)`（本回合查詢區間及來源）、`KVMEM_CAPTURE tag=q/k`（捕獲是否生效）、`KVMEM_TRACE harvest n=.. q=.. k=..`、`KVMEM_TRACE retrieval stage_in=.. skip=.. window=..`、`KVMEM_DECODE_MEAN flush block=.. n=..`。若這些行全部缺失或計數為 0，代表 KVMem 並未真正參與，請先檢查是否被 `--parallel`、SWA 或 recurrent 條件擋下。
 
