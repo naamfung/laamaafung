@@ -205,6 +205,9 @@ public:
     // for compatibility with speculative decoding, ctx shift, slot save/load
     const llama_tokens & get_tokens() const;
 
+    // indexed access that stays valid for media prompts too (get_tokens() asserts on media)
+    llama_token token_at(size_t i) const { return tokens[i]; }
+
     llama_tokens get_text_tokens() const;
 
     // for compatibility with speculative decoding

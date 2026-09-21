@@ -620,6 +620,13 @@ struct server_slot {
                 if (ctx_dft) {
                     common_context_seq_rm(ctx_dft, id, self_check_rollback_pos, -1);
                 }
+#if defined(LLAMA_KVMEM)
+                // KVMem's tiered store keeps per-row position metadata next to the KV cache, so
+                // every row that just left the cache must leave the store too. The hook is a
+                // no-op unless KVMem is the active memory (and params_base is not reachable from
+                // the slot here), so it is called unconditionally.
+                llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) self_check_rollback_pos));
+#endif
                 prompt.tokens.keep_first(self_check_rollback_size - 1);
 
                 i_batch = batch.size();
@@ -1042,16 +1049,23 @@ static std::pair<int32_t, int32_t> kvmem_last_user_span(
     }
 
     // a span starts at the role marker (e.g. "<|im_start|>user\n"); the content
-    // starts after it
-    const auto & tok_all = toks.get_tokens();
+    // starts after it. Compare through the indexed accessor - get_tokens() asserts
+    // on media prompts and the delimiters are plain text tokens anyway.
     for (const auto & d : tparams.message_delimiters.delimiters) {
         if (d.role != COMMON_CHAT_ROLE_USER || d.tokens.empty()) {
             continue;
         }
-        if ((size_t) begin + d.tokens.size() > tok_all.size()) {
+        if ((size_t) begin + d.tokens.size() > toks.size()) {
             continue;
         }
-        if (std::equal(d.tokens.begin(), d.tokens.end(), tok_all.begin() + begin)) {
+        bool match = true;
+        for (size_t i = 0; i < d.tokens.size(); i++) {
+            if (toks.token_at((size_t) begin + i) != d.tokens[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
             begin += (int32_t) d.tokens.size();
             break;
         }
@@ -4530,6 +4544,14 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             if (ctx_dft) {
                                 common_context_seq_rm(ctx_dft, slot.id, p_last, -1);
                             }
+#if defined(LLAMA_KVMEM)
+                            if (params_base.kvmem) {
+                                // same bookkeeping as the reused-prefix path above: the row at
+                                // p_last has just left the KV cache. This is the branch an
+                                // mtmd prompt takes when its last chunk ends up fully cached.
+                                llama_kvmem_truncate_cached((uint32_t) std::max(0, p_last));
+                            }
+#endif
                             return;
                         }
 
@@ -4875,6 +4897,12 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         }
 
                         slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);
+#if defined(LLAMA_KVMEM)
+                        if (params_base.kvmem) {
+                            // speculative rollback: drop the same tail from the KVMem store
+                            llama_kvmem_truncate_cached((uint32_t) std::max(0, ckpt.pos_max + 1));
+                        }
+#endif
 
                         slot.prompt.tokens.keep_first(ckpt.n_tokens);
                         slot.smpl = std::move(smpl_save);
@@ -4917,6 +4945,12 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             SLT_DBG(slot, "add accepted tokens: sampled=%d, ids.size=%zu, n_draft=%zu\n", slot.sampled, ids.size(), n_draft);
 
             slot.mem.seq_rm(slot.id, slot.prompt.tokens.pos_next(), -1);
+#if defined(LLAMA_KVMEM)
+            if (params_base.kvmem) {
+                // accepted draft tokens shift the prompt end; drop the same tail from the store
+                llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) slot.prompt.tokens.pos_next()));
+            }
+#endif
 
             for (size_t i = 0; i < ids.size(); ++i) {
                 completion_token_output result;
