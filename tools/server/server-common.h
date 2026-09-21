@@ -191,6 +191,12 @@ public:
     // returns a pair of pointer to the chunk (nullptr if not found) and its start index in tokens
     std::pair<const mtmd::input_chunk_ptr *, size_t> find_next_media_chunk(size_t idx) const;
 
+    // all media chunks in token order, each with the index where it starts
+    // note: consecutive media chunks are adjacent in the token list (see the example
+    //       above: img0 occupies 5..7, so img1 starts exactly at 8), so iterating with
+    //       find_next_media_chunk(at + n) skips every other chunk. Use this instead.
+    std::vector<std::pair<const mtmd::input_chunk_ptr *, size_t>> get_media_chunks() const;
+
     void push_back(llama_token tok);
 
     // will create a copy of the chunk if it contains non-text data

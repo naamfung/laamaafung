@@ -1074,17 +1074,14 @@ static std::pair<int32_t, int32_t> kvmem_last_user_span(
     // the text question follows the media chunks of this turn: never score image
     // tokens as part of the query
     if (toks.has_media()) {
-        size_t idx = (size_t) begin;
-        while (true) {
-            auto [chunk, at] = toks.find_next_media_chunk(idx);
-            if (chunk == nullptr || (int32_t) at >= end) {
+        for (const auto & [chunk, at] : toks.get_media_chunks()) {
+            if ((int32_t) at >= end) {
                 break;
             }
             const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
             if ((int32_t) (at + n) > begin) {
                 begin = (int32_t) std::min<size_t>(at + n, (size_t) end);
             }
-            idx = at + n;
         }
     }
 
@@ -4072,19 +4069,15 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             // coordinates, same space as the store's token rows.
                             std::vector<uint32_t> mm_starts, mm_ends;
                             if (input_tokens.has_media()) {
-                                size_t idx = 0;
-                                while (true) {
-                                    auto [chunk, at] = input_tokens.find_next_media_chunk(idx);
-                                    if (chunk == nullptr) {
-                                        break;
-                                    }
+                                std::string mm_dbg;
+                                for (const auto & [chunk, at] : input_tokens.get_media_chunks()) {
                                     const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
                                     mm_starts.push_back((uint32_t) at);
                                     mm_ends  .push_back((uint32_t) (at + n));
-                                    idx = at + n;
+                                    mm_dbg += " [" + std::to_string(at) + "," + std::to_string(at + n) + ")";
                                 }
-                                SLT_INF(slot, "KVMem media rows: %zu chunk(s) in [0, %d)\n",
-                                        mm_starts.size(), n_prompt);
+                                SLT_INF(slot, "KVMem media rows: %zu chunk(s) in [0, %d):%s\n",
+                                        mm_starts.size(), n_prompt, mm_dbg.c_str());
                             }
                             llama_kvmem_set_media_ranges(mm_starts.data(), mm_ends.data(), mm_starts.size());
                         }
@@ -4470,7 +4463,13 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             SLT_ERR(slot, "failed to process image, res = %d\n", res);
                             send_error(slot, "failed to process image", ERROR_TYPE_SERVER);
                             slot.release();
-                            continue;
+                            // release() -> reset() moves the task out of the slot, so slot.task
+                            // is nullptr from here on: both this loop's own condition
+                            // (slot.task->n_tokens()) and the code right after it
+                            // (slot.task->params.message_spans) would dereference null.
+                            // Nothing is left to do for this slot - leave the per-slot
+                            // callback instead of looping back into it.
+                            return;
                         }
 
                         slot.n_prompt_tokens_processed += n_tokens_out;

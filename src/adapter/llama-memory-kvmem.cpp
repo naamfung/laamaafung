@@ -688,6 +688,12 @@ void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
     }
 }
 
+void llama_memory_kvmem::rollback_to(uint32_t token_pos) {
+    harvest_flush();
+    harvest_gpu_v_commit();
+    runtime_->truncate_to(token_pos);
+}
+
 void llama_memory_kvmem::set_replay(bool replay) {
     if (replay && !replay_) {
         harvest_flush();
@@ -1300,7 +1306,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
                     n_new_tokens, resident_tokens(), kv_size_, incoming);
         } catch (const std::exception & e) {
             LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            runtime_->truncate_to(t0);
+            rollback_to(t0);
             return false;
         }
     }
@@ -1324,7 +1330,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
             }
         } catch (const std::exception & e) {
             LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            runtime_->truncate_to(t0);
+            rollback_to(t0);
             return false;
         }
     } else {
@@ -1337,7 +1343,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
                 // Pinned retrieval will not evict the working set. gen_reserve
                 // exhaustion is a known v1 limit (see docs/architecture.md).
                 LLAMA_LOG_ERROR("%s: no free GPU slot for block %u\n", __func__, id);
-                runtime_->truncate_to(t0);
+                rollback_to(t0);
                 return false;
             }
             store.set_block_gpu_slot(id, slot);
@@ -1348,7 +1354,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     for (uint32_t id : incoming) {
         if (id < store.block_count() && store.blocks()[id].gpu_slot < 0) {
             LLAMA_LOG_ERROR("%s: incoming block %u was not placed on GPU\n", __func__, id);
-            runtime_->truncate_to(t0);
+            rollback_to(t0);
             return false;
         }
     }

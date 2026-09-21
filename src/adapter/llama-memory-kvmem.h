@@ -220,6 +220,13 @@ private:
     void harvest_gpu_v_commit();
     void harvest_gpu_v_flush_slab();
     void harvest_write_batch();
+    // Roll the store back to `token_pos` after a failed append.
+    // Must drain the in-flight async harvest first: a pending HarvestVJob holds a GPU
+    // source pointer and a target position (pos0/n) belonging to rows that the rollback
+    // is about to drop, so writing it back afterwards resurrects truncated rows and
+    // leaves the store and the raw tier disagreeing. truncate_cached() already observes
+    // this ordering; the prepare_working_set() failure paths did not.
+    void rollback_to(uint32_t token_pos);
     // After a prefill graph, enqueue packed K/V D2H for GPU-resident
     // full blocks. Does not wait; apply_plan / retrieval commit.
     void harvest_full_blocks_async();

@@ -357,6 +357,16 @@ std::pair<const mtmd::input_chunk_ptr *, size_t> server_tokens::find_next_media_
     return { nullptr, 0 };
 }
 
+std::vector<std::pair<const mtmd::input_chunk_ptr *, size_t>> server_tokens::get_media_chunks() const {
+    std::vector<std::pair<const mtmd::input_chunk_ptr *, size_t>> res;
+    res.reserve(map_idx_to_media.size());
+    // std::map iterates in key order == token order
+    for (const auto & kv : map_idx_to_media) {
+        res.emplace_back(&kv.second, kv.first);
+    }
+    return res;
+}
+
 void server_tokens::push_back(llama_token tok) {
     if (tok == LLAMA_TOKEN_NULL) {
         throw std::runtime_error("Invalid token");

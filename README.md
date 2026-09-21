@@ -98,7 +98,8 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 
 > 上例的 `-c 262144` / `-n 32768` / `-ub 128` / `-b 512` / `--kvmem-*` 全部沿用官版 KVMem 伺服器的生產值，只把 `--kv-dtype q8_0` 拆成 `-ctk q8_0 -ctv turbo4`、`--enable-thinking` 換成 `--reasoning on`。
 > `--kvmem-budget`（工作集）與 `--kvmem-gen-reserve`（單輪生成頭寸）是唯二需要按自己機器／單輪生成長度調整的；其餘 KVMem 參數預設即生產值。
-> 帶圖像時**整張圖必須整體駐留**：`--kvmem-budget` 要 ≥ 單張圖的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢，否則會拋 `mandatory image group and query exceed KV selection budget`（`32768` 足以容納多張圖）。
+> 帶圖像時**整張圖必須整體駐留**：`--kvmem-budget` 要 ≥ 單張圖的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢，否則請求會被明確拒絕（HTTP 500，訊息為 `mandatory image group and query exceed KV selection budget`）。服務器**不會**因這種請求崩潰，後續請求照常服務（`--kvmem-budget 32768` 足以容納多張圖）。
+> **多圖**：同一條訊息裡**相鄰且尺寸相同**的圖片，會被 Qwen-VL 按「視頻幀合併」語義兩兩拼成一張畫布（`clip_model_n_temporal_merge`），模型看到的是合併後的圖；要讓每張圖各自獨立，請在兩張圖之間插一個文本 part（哪怕只是一個換行，見下文「啟用條件」的多圖說明）。
 > 注意 KVMem 下**不要**加 `--context-shift` / `--prompt-truncate` / `--cache-reuse`：前兩者會被拒絕或自動禁用，後者依賴 K-shift 亦會自動禁用（見下文「KVMem」一節）。
 > 純 CPU 或小顯存試跑可把 `-ngl 99` 換成 `-ngl 0`，並把 `-c` / `--kvmem-budget` 按比例調小。
 
@@ -183,7 +184,10 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 - 需要 `LLAMA_KVMEM` 構建（v21 分支的構建已默認開啟）；
 - `--parallel` 會**強制為 1**（KVMem 要求 `n_seq_max == 1`）：顯式非 1 會打警告 `KVMem requires n_parallel = 1, but N was requested - forcing n_parallel = 1`，`auto` 則打提示；
 - 純線性注意力（recurrent）架構與 SWA 模型不支援（日誌分別為 `KVMem skips purely recurrent arch ...` 與 `KVMem skips SWA models`）；混合注意力模型（如 Qwen3.5/3.6 的門控 DeltaNet + 門控注意力）可用；
-- 多模態（mmproj）：**已支持**（官版參數集帶 `--mmproj`，示例照搬）。圖像塊佔用連續的 cache 行、但攜帶 2-D（M-RoPE）模型位置，因此 `llama-server` 會為嵌入批設置 `llama_batch::logical_pos`（相鄰行號）並把媒體行的範圍告知 KVMem（`set_media_ranges`），KVMem 才能按行尋址且**整張圖整體保留**。**注意 `--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢**，否則會拋 `mandatory image group and query exceed KV selection budget`（圖像組是強制的，不能拆塊）；生產 `--kvmem-budget 32768` 足以容納多張圖。
+- 多模態（mmproj）：**已支持**（官版參數集帶 `--mmproj`，示例照搬）。圖像塊佔用連續的 cache 行、但攜帶 2-D（M-RoPE）模型位置，因此 `llama-server` 會為嵌入批設置 `llama_batch::logical_pos`（相鄰行號）並把媒體行的範圍告知 KVMem（`set_media_ranges`），KVMem 才能按行尋址且**整張圖整體保留**。
+  - **預算**：`--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢，否則請求被拒絕（`mandatory image group and query exceed KV selection budget`，HTTP 500）。圖像組是強制的、不能拆塊。高細節大圖的行數會隨原生解像度上升：實測 224×224 純色圖 ≈ 49 行、1024×1024 ≈ 1024 行、2048×2048 ≈ 4096 行（`KVMEM_TRACE=1` 的 `KVMem media rows: N chunk(s) ... [start,end)` 可核對）。
+  - **多圖**：同一條訊息裡**相鄰（中間無文本）且尺寸相同**的圖片會被 Qwen-VL 視為**視頻幀**兩兩合併成一張畫布（`mtmd.cpp` 的 `n_merge_frames = clip_model_n_temporal_merge()`，每組上限 2 張、逐對 `(1,2)(3,4)…`）。合併後模型看到的是拼合圖（例如兩張純色圖會被描述成「左右兩半」），且整組只佔一張畫布的 token 數。**要讓每張圖各自獨立，請在兩張圖之間插一個文本 part**（例如 `\n`）；尺寸不同則不會合併。日誌的 `KVMem media rows: N chunk(s)` 是判斷實際分塊數的可靠依據。
+  - **錯誤恢復**：圖像解碼失敗（如超出預算）只影響該次請求（HTTP 500），不會拖垮服務器。
 
 **與其他功能的交互**
 
