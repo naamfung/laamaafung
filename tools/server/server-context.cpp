@@ -1563,11 +1563,29 @@ private:
 
         // ctx_shift (runtime K-shift) is already disabled by common_init_from_params
         // when llama_memory_can_shift() returns false; prompt_truncate (initial prompt
-        // truncation) is independent and remains unaffected.
+        // truncation) is a separate feature and stays enabled for such a context.
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
                 SRV_WRN("%s\n", "cache_reuse is not supported by this context, it will be disabled");
+            }
+        }
+
+        if (params_base.kvmem) {
+            // KVMem keeps a tiered index (block original positions + per-row metadata) built from
+            // the position numbering of the tokens it was fed, so nothing in the server may remap
+            // or rewrite that numbering afterwards. --context-shift implies --prompt-truncate
+            // (see common/arg.cpp), and truncation erases a *middle* block of the prompt while
+            // rewriting the token array: every offset derived from the original array is then
+            // silently wrong - the KVMem retrieval query span (kvmem_last_user_span) and the chat
+            // message spans that drive --ctx-checkpoints (last_user_message_pos / is_user_start).
+            // Silently losing the middle of a conversation is worse than a clear error, so refuse
+            // truncation and let the client trim the prompt, or raise --ctx-size.
+            if (params_base.prompt_truncate) {
+                params_base.prompt_truncate = false;
+                SRV_WRN("%s\n", "prompt truncate is not supported by KVMem (it erases a middle block and "
+                                "desynchronises the retrieval query and checkpoint message spans), it will be "
+                                "disabled - raise --ctx-size instead");
             }
         }
 
@@ -2151,6 +2169,14 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
             task.tokens.clear();
             task.tokens.insert(new_tokens);
+
+            // The token array was just rewritten, so every offset derived from its original
+            // numbering is stale. Recompute the chat message spans against the array we are about
+            // to decode: they place the --ctx-checkpoints boundaries (last_user_message_pos /
+            // is_user_start) and, when KVMem is enabled, they define the retrieval query span.
+            // Truncation requires !mctx, so there can be no media chunks whose offsets would need
+            // remapping here.
+            task.params.message_spans = task.tokens.find_message_spans(task.params.message_delimiters);
 
             slot.truncated = true;
 
@@ -3741,12 +3767,27 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     return;
                 }
 
-                if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
-                    // The memory cannot remap positions (recurrent memory, or a tiered/sparse
-                    // backend such as KVMem whose block index is built from the old numbering).
-                    // common_init_from_params() already disables ctx_shift for such a context,
-                    // so this is a safety net: never shift a memory that cannot follow.
-                    SRV_WRN("%s\n", "context shift is not supported by this context, refusing to shift");
+                // A context shift remaps every position, so two things must hold before we may do
+                // it: the target memory has to support it, and so does the draft memory, because
+                // slot.mem.seq_add() remaps both of them (see common_memory::seq_add).
+                // Note that recurrent memory reports can_shift() == true (moving its head position
+                // is trivially supported), so this is *not* a "KVMem / recurrent" pair - the false
+                // cases are KVMem and the odd non-shiftable attention memories (step35, multiple
+                // pos-per-embd, SWA with mismatched base/swa sizes).
+                // common_init_from_params() already disables ctx_shift for a non-shiftable target,
+                // so this stays a safety net: never shift a memory that cannot follow.
+                // params_base.kvmem is checked explicitly and on purpose - KVMem's tiered index
+                // (block original positions + per-row metadata) cannot follow a remap, and that
+                // guarantee must not silently depend on the adapter's get_can_shift() alone.
+                const bool can_shift_dft = ctx_dft == nullptr ||
+                                           llama_memory_can_shift(llama_get_memory(ctx_dft));
+                if (params_base.kvmem ||
+                        !llama_memory_can_shift(llama_get_memory(ctx_tgt)) ||
+                        !can_shift_dft) {
+                    SLT_WRN(slot, "%s", params_base.kvmem
+                            ? "KVMem does not support context shift: the tiered block index is built from the "
+                              "old position numbering and cannot follow a remap - raise --ctx-size instead\n"
+                            : "context shift is not supported by this context, refusing to shift\n");
                     send_error(slot, "context shift is not supported by this context", ERROR_TYPE_SERVER);
                     slot.release();
                     return;
