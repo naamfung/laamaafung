@@ -163,7 +163,7 @@ $llamaServer -m $model \
 
 KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只把當前工作集常駐顯存，其餘分層存放主機內存並按需換回；檢索模式下以「本回合最後一條 user 訊息」的 token 區間作查詢，從歷史塊中挑回相關內容。目的：在**有限顯存**下驅動遠超顯存容量的上下文（例如 8GB 顯存 × 128K 上下文）。
 
-與獨立進程 `llama-kvmem-server` 不同，本分支把 KVMem 接進了 **`llama-server` 本體**，因此 v21 的其餘特性（`--reasoning-*`、`--spec-*`、`--ctx-checkpoints`、`--cache-*`、turbo 系列 V 量化）全部保留。可直接套用的啟動命令見上文「啟動示例」的 KVMem 一節。
+與獨立進程 `llama-kvmem-server` 不同，本分支把 KVMem 接進了 **`llama-server` 本體**，因此 v21 的其餘特性（`--reasoning-*`、`--spec-*`、`--ctx-checkpoints`、`--cache-*`、turbo 系列 **KV** 量化）全部保留。可直接套用的啟動命令見上文「啟動示例」的 KVMem 一節。
 
 **由官版 `llama-kvmem-server` 遷移（參數對照）**
 
@@ -175,7 +175,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `-ngl 99` | `-ngl 99` | 同名同義。 |
 | `--kvmem-budget` / `--kvmem-gen-reserve` / `--kvmem-gpu-ratio` / `--kvmem-block-tokens` | 同名 | KVMem 參數一一對應（預設值見下表）。 |
 | `--no-kvmem-image-autoscale` | 同名 | **兩邊都已支援**：行數超預算的圖像會在 token 化**之前**自動縮小（見「啟用條件」）。關掉後兩邊都回同一條訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）。 |
-| `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K/V 分開設，KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，因此 turbo2/3/4 也能用於 V。 |
+| `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K 與 V 分開設，但 `-ctk` 與 `-ctv` **接受完全相同的取值清單** —— `f32 / f16 / bf16 / q8_0 / q4_0 / q4_1 / iq4_nl / q5_0 / q5_1 / turbo2 / turbo3 / turbo4`（同一份 `get_all_kv_cache_types()`、同一個 `kv_cache_type_from_str()` 解析器）。**turbo2/3/4 對 K 與 V 都可用，沒有「只能用於 V」的限制**；上例只是 K 取精度、V 取壓縮的常見搭配。KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，兩者各自生效。唯一要注意的是別處的加速條件：CUDA 的 fused turbo MMA 路徑要求 **K 與 V 同型**（見下文「TurboQuant」一節），所以 `-ctk turbo4 -ctv turbo3` 這類混搭不會走上融合路徑。 |
 | `--enable-thinking`、`--reasoning-effort`、`--reasoning-budget` | `--reasoning on`、`--reasoning-budget`（＋ `--reasoning-format/-preserve/-temp/-top-p/...`） | llama-server 用 `--reasoning [on\|off\|auto]` 開關；「思考強度」由 `--reasoning-budget` 與一整套 `--reasoning-*` 採樣覆蓋表達，沒有 `effort` 這個名字。 |
 | `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義；mmproj × KVMem 已支持（見下方「啟用條件」的 `--kvmem-budget` 要求）。 |
 | `--chat-template-file`、`--temp/--top-p/--top-k/--min-p/--*-penalty` | 同名 | 同名同義。 |
