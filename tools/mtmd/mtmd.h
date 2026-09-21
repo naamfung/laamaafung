@@ -147,6 +147,31 @@ MTMD_API int mtmd_get_audio_sample_rate(const mtmd_context * ctx);
 // get the current marker string
 MTMD_API const char * mtmd_get_marker(const mtmd_context * ctx);
 
+// Cap the number of tokens one image may occupy, for models whose image
+// preprocessor uses dynamic resolution (the Qwen-VL family and friends).
+//
+// The preprocessor already resizes the received bitmap to fit the model's own
+// image-token limit, which is derived from --image-min/max-tokens. This lowers
+// that limit for the following mtmd_tokenize() calls, so an image that would
+// otherwise be too large is downscaled *before* it becomes tokens, instead of
+// being rejected afterwards.
+//
+// The request is clamped against the model's own limit, which is captured once:
+// every call is expressed relative to it, so a small cap from one request does
+// not leak into the next, and a cap can only ever lower the limit - never raise
+// it - so buffers sized from the model's own limit remain sufficient. Images are
+// never enlarged either: a source smaller than the cap keeps its resolution.
+// Pass a non-positive value to restore the model's own limit.
+//
+// Returns the model's own per-image token limit (what a non-positive request
+// restores), or -1 when the model has no dynamic-resolution image preprocessing,
+// in which case there is nothing to cap.
+MTMD_API int32_t mtmd_set_image_token_cap(mtmd_context * ctx, int32_t max_tokens);
+
+// The currently effective per-image token cap, or -1 when the model has no
+// dynamic-resolution image preprocessing.
+MTMD_API int32_t mtmd_get_image_token_cap(const mtmd_context * ctx);
+
 // mtmd_bitmap
 //
 // if bitmap is image:

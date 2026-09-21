@@ -295,6 +295,13 @@ struct mtmd_context {
     std::unique_ptr<mtmd_audio_preprocessor> audio_preproc;
     std::unique_ptr<mtmd_image_preprocessor> image_preproc;
 
+    // Model's own per-image token limit, captured before any override so that
+    // mtmd_set_image_token_cap() can always be expressed relative to it instead of
+    // accumulating: without this the cap of one request would leak into the next.
+    // -1 = not captured yet.
+    int32_t image_token_cap_orig = -1;
+    int32_t image_min_pixels_orig = -1;
+
     // batching
     int32_t batch_max_tokens;
 
@@ -1717,6 +1724,60 @@ int mtmd_get_audio_sample_rate(const mtmd_context * ctx) {
 
 const char * mtmd_get_marker(const mtmd_context * ctx) {
     return ctx->media_marker.c_str();
+}
+
+// Pixels covered by one image token, i.e. the patch the vision tower collapses
+// each token to. image_max_pixels = max_tokens * patch_area, which is how
+// --image-max-tokens is applied at load time (clip_hparams::set_limit_image_tokens).
+static int32_t mtmd_patch_area(const clip_hparams & hp) {
+    const int32_t merge = hp.n_merge > 0 ? hp.n_merge : 1;
+    const int32_t align = hp.patch_size * merge;
+    return align > 0 ? align * align : 0;
+}
+
+int32_t mtmd_get_image_token_cap(const mtmd_context * ctx) {
+    if (ctx == nullptr || ctx->ctx_v == nullptr || ctx->image_preproc == nullptr) {
+        return -1;
+    }
+    const clip_hparams & hp = *clip_get_hparams(ctx->ctx_v);
+    const int32_t area = mtmd_patch_area(hp);
+    if (area <= 0 || hp.image_max_pixels <= 0) {
+        return -1;
+    }
+    return hp.image_max_pixels / area;
+}
+
+int32_t mtmd_set_image_token_cap(mtmd_context * ctx, int32_t max_tokens) {
+    if (ctx == nullptr || ctx->ctx_v == nullptr || ctx->image_preproc == nullptr) {
+        return -1;
+    }
+    clip_hparams & hp = *const_cast<clip_hparams *>(clip_get_hparams(ctx->ctx_v));
+    const int32_t area = mtmd_patch_area(hp);
+    if (area <= 0 || hp.image_max_pixels <= 0) {
+        return -1; // model has no dynamic-resolution image preprocessing
+    }
+
+    // Capture the model's own limits once. Every later call is expressed relative to
+    // them, so a small cap from one request cannot leak into the next one.
+    if (ctx->image_token_cap_orig < 0) {
+        ctx->image_token_cap_orig = hp.image_max_pixels / area;
+        ctx->image_min_pixels_orig = hp.image_min_pixels;
+    }
+
+    const int32_t eff = (max_tokens <= 0)
+        ? ctx->image_token_cap_orig
+        : std::min(ctx->image_token_cap_orig, max_tokens);
+
+    hp.image_max_pixels = eff * area;
+    // The dynamic-resolution preprocessor reads the pair as a range, so the floor
+    // must not sit above the ceiling. Restoring it from the captured original keeps
+    // repeat calls idempotent.
+    hp.image_min_pixels = std::min(ctx->image_min_pixels_orig, hp.image_max_pixels);
+
+    // warmup_image_size is deliberately left alone: it drove the buffer allocation
+    // at load time, and `eff` never exceeds the model's own cap, so those buffers
+    // still fit every image this cap can produce.
+    return ctx->image_token_cap_orig;
 }
 
 //

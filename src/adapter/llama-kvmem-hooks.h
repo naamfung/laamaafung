@@ -36,12 +36,32 @@ struct llama_kvmem_params {
     bool     raw_k_nvme;           // put raw-K/V authority on NVMe (qw3-style)
     bool     harvest_v;            // prefill D2H V with K (default off; not implied by raw_k_nvme)
     int32_t  mtp_state;            // 0 snapshots, 1 auto, 2 replay
+    bool     image_autoscale;      // shrink oversized images to fit `budget` (see llama_kvmem_image_token_cap)
 };
 
 // Call before llama_init_from_model. A null pointer resets to defaults
 // (disabled).
 LLAMA_API void llama_kvmem_set_params(const struct llama_kvmem_params * params);
 LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
+
+// Maximum number of tokens each *image* in one request may occupy, derived from
+// the working-set budget. Pass the number of media files in the request.
+//
+// An image is a "mandatory group": KVMem keeps a whole image resident and never
+// splits it across blocks, so an image whose row count exceeds what is left of
+// the budget cannot be scheduled at all ("mandatory image group and query exceed
+// KV selection budget"). The image preprocessor can shrink the image before it
+// is turned into tokens, so the cap is published here and applied ahead of
+// tokenization.
+//
+// Returns -1 for "no opinion": KVMem disabled, autoscale off, no explicit
+// budget (KVMem then follows the context size), or no media. The caller should
+// leave the model's own limit untouched in that case.
+//
+// The value is a request in KVMem's own terms, not a promise: the caller passes
+// it to the vision layer, which clamps it against the model's own image-token
+// limit (so this can only ever lower it, never raise it).
+LLAMA_API int32_t llama_kvmem_image_token_cap(int32_t n_media);
 
 // Legacy eval-callback entry. Always returns false so ggml does not split the
 // graph. Capture harvest runs after the full ubatch compute instead.

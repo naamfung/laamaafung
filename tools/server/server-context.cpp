@@ -1482,6 +1482,7 @@ private:
             kp.gpu_memory_ratio = params_base.kvmem_gpu_ratio;
             kp.harvest_v        = params_base.kvmem_harvest_v;
             kp.mtp_state        = 1;
+            kp.image_autoscale  = params_base.kvmem_image_autoscale;
             llama_kvmem_set_params(&kp);
             SRV_INF("%s", "KVMem memory requested (tiered/sparse KV)\n");
         }

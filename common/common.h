@@ -528,6 +528,7 @@ struct common_params {
     float   kvmem_gpu_ratio      =  0.90f;// cap the KVMem GPU pool at this fraction of VRAM
     bool    kvmem_retrieval      =  true; // true = retrieval, false = recency
     bool    kvmem_harvest_v      = false; // prefill D2H V together with raw-K
+    bool    kvmem_image_autoscale = true; // shrink images that do not fit the working set
     int32_t grp_attn_n            =     1; // group-attention factor
     int32_t grp_attn_w            =   512; // group-attention width
     int32_t n_print               =    -1; // print token count every n tokens (-1 = disabled)

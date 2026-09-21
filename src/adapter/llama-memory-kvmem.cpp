@@ -253,6 +253,36 @@ const struct llama_kvmem_params * llama_kvmem_get_params(void) {
     return &g_kvmem_params;
 }
 
+int32_t llama_kvmem_image_token_cap(int32_t n_media) {
+    const llama_kvmem_params & p = g_kvmem_params;
+    if (!p.enabled || !p.image_autoscale || p.budget == 0 || n_media <= 0) {
+        return -1;
+    }
+
+    const uint32_t block = p.block_tokens ? p.block_tokens : 128u;   // same default the adapter resolves
+    const uint32_t sink  = p.sink_tokens ? p.sink_tokens : block;
+
+    // Everything the working set must hold besides the image: the sink, one block
+    // of rounding on either side of the media group (a group is block-aligned and
+    // never split), and the retrieval query with the text around the image. The
+    // query is capped by --kvmem-query-max, which defaults to four blocks.
+    const uint32_t reserve = sink + 4u * block;
+
+    // The smallest image still worth keeping: two blocks. Below the reserve there
+    // is nothing left to give, so fall back to the floor rather than to zero - an
+    // image that is too big will still be refused cleanly (the failure path does
+    // not crash), and a small query often leaves enough room for the floor.
+    const uint32_t floor_tokens = 2u * block;
+
+    const uint32_t avail = (p.budget > reserve) ? (p.budget - reserve) : 0u;
+    const uint32_t cap   = std::max(floor_tokens, avail / (uint32_t) n_media);
+
+    // Only ever lowers the effective cap: the caller hands this to mtmd, which
+    // clamps it against the model's own limit, so buffers sized at load time stay
+    // sufficient.
+    return (int32_t) cap;
+}
+
 static uint32_t kvmem_align_tokens(uint32_t tokens, uint32_t block_tokens) {
     if (block_tokens == 0) {
         return 0;

@@ -6,6 +6,9 @@
 #include "mtmd-helper.h"
 #include "chat.h"
 #include "base64.hpp"
+#if defined(LLAMA_KVMEM)
+#include "llama-kvmem-hooks.h"
+#endif
 
 #include "server-common.h"
 
@@ -726,6 +729,24 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & promp
     };
     mtmd::input_chunks chunks(mtmd_input_chunks_init());
     auto bitmaps_c_ptr = bitmaps.c_ptr();
+#if defined(LLAMA_KVMEM)
+    // Shrink oversized images *before* they become tokens. An image is a mandatory
+    // group in KVMem's selection (kept whole, never split across blocks), so one
+    // whose row count does not fit what is left of the working-set budget cannot be
+    // scheduled at all. The model can only refuse that after tokenization, so the
+    // budget has to be applied here, where the preprocessor still owns the pixels.
+    // No-op unless KVMem is enabled with an explicit budget and autoscale on.
+    {
+        const int32_t cap = llama_kvmem_image_token_cap((int32_t) files.size());
+        if (cap > 0) {
+            const int32_t limit = mtmd_set_image_token_cap(mctx, cap);
+            if (limit > 0 && cap < limit) {
+                LOG_INF("%s: KVMem budget caps one image at %d tokens (model limit %d) for %zu media file(s)\n",
+                        __func__, cap, limit, files.size());
+            }
+        }
+    }
+#endif
     int32_t tokenized = mtmd_tokenize(mctx,
                                       chunks.ptr.get(),
                                       &inp_txt,

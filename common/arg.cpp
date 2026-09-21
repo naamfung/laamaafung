@@ -3051,6 +3051,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_KVMEM_HARVEST_V"));
     add_opt(common_arg(
+        {"--no-kvmem-image-autoscale"},
+        "do not shrink images that exceed the KVMem working-set budget "
+        "(default: shrink them before tokenization, so a large image is downscaled "
+        "instead of being rejected)",
+        [](common_params & params) {
+            params.kvmem_image_autoscale = false;
+        }
+    ).set_env("LLAMA_ARG_NO_KVMEM_IMAGE_AUTOSCALE"));
+    add_opt(common_arg(
         {"-cmoe", "--cpu-moe"},
         "keep all Mixture of Experts (MoE) weights in the CPU",
         [](common_params & params) {
