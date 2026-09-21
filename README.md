@@ -174,6 +174,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `-ub 128 -b 512` | `--ubatch-size 128 --batch-size 512`（或 `-ub` / `-b`） | 同名同義。 |
 | `-ngl 99` | `-ngl 99` | 同名同義。 |
 | `--kvmem-budget` / `--kvmem-gen-reserve` / `--kvmem-gpu-ratio` / `--kvmem-block-tokens` | 同名 | KVMem 參數一一對應（預設值見下表）。 |
+| `--no-kvmem-image-autoscale` | 同名 | **兩邊都已支援**：行數超預算的圖像會在 token 化**之前**自動縮小（見「啟用條件」）。關掉後官版回 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400），llama-server 回 `mandatory image group and query exceed KV selection budget`（HTTP 500）。 |
 | `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K/V 分開設，KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，因此 turbo2/3/4 也能用於 V。 |
 | `--enable-thinking`、`--reasoning-effort`、`--reasoning-budget` | `--reasoning on`、`--reasoning-budget`（＋ `--reasoning-format/-preserve/-temp/-top-p/...`） | llama-server 用 `--reasoning [on\|off\|auto]` 開關；「思考強度」由 `--reasoning-budget` 與一整套 `--reasoning-*` 採樣覆蓋表達，沒有 `effort` 這個名字。 |
 | `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義；mmproj × KVMem 已支持（見下方「啟用條件」的 `--kvmem-budget` 要求）。 |
@@ -188,6 +189,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
   - **預算**：`--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。圖像組是強制的、不能拆塊，所以這一項不滿足時**預設會先自動縮小圖像**（見下），只有連縮放下限都放不下（或關閉了自動縮放）才會拒絕該請求（`mandatory image group and query exceed KV selection budget`，HTTP 500）。高細節大圖的行數會隨原生解像度上升：實測 224×224 純色圖 ≈ 49 行、1024×1024 ≈ 1024 行、2048×2048 ≈ 4096 行（`KVMEM_TRACE=1` 的 `KVMem media rows: N chunk(s) ... [start,end)` 可核對）。
   - **圖像自動縮放（預設開）**：行數超預算時，在 **token 化之前**按比例把圖縮小，而不是讓請求失敗。KVMem 先算出「一張圖可用的 token 數」＝ `(budget − (sink + 4 個塊)) ÷ 本次請求的圖片數`，交給 vision 層把該模型的 image-token 上限壓低；Qwen-VL 的動態解析度預處理器隨即在 bitmap 階段把圖縮到預算內，所以縮放發生在**像素層**、比「先 token 化再拒絕」早一步。三個性質值得記住：**只降上限、從不放大**（小圖保持原解析度）；**以模型的原始上限為基準逐請求重算**，不會跨請求累積；**下限為 2 個塊**（預設 256 tokens）。
   - 這與 **DeepSeek Harness 的圖像歸一化標準一致**：DSH 放行大圖、再按比例縮到 `normalizedImageMaxPixels = 2048×2048`；而本模型預設的 image-token 上限（4096 tokens × `patch_area` 1024 px）= 4,194,304 px，**恰好也是 2048×2048**。也就是說**預算充裕時（≳5K 行）行為與 DSH 完全一致、不做任何額外降質**，只有預算不足時才進一步縮小。日誌會打 `KVMem budget caps one image at N tokens (model limit M) for K media file(s)`；想完全關掉用 `--no-kvmem-image-autoscale`（回復為直接拒絕）。
+  - **`llama-kvmem-server` 同樣支援**（同名開關）：那裡的「拒絕」原本是它自己的守衛，報 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）；接上自動縮放後會先縮圖、請求正常完成。**注意它是獨立編譯的目標，需要 `tools/CMakeLists.txt` 給它 `LLAMA_KVMEM=1`**，否則 `server-common.cpp` 裡的 `#if defined(LLAMA_KVMEM)` 鉤子會被靜默編掉（本分支已補）。
   - **多圖**：同一條訊息裡**相鄰（中間無文本）且尺寸相同**的圖片會被 Qwen-VL 視為**視頻幀**兩兩合併成一張畫布（`mtmd.cpp` 的 `n_merge_frames = clip_model_n_temporal_merge()`，每組上限 2 張、逐對 `(1,2)(3,4)…`）。合併後模型看到的是拼合圖（例如兩張純色圖會被描述成「左右兩半」），且整組只佔一張畫布的 token 數。**要讓每張圖各自獨立，請在兩張圖之間插一個文本 part**（例如 `\n`）；尺寸不同則不會合併。日誌的 `KVMem media rows: N chunk(s)` 是判斷實際分塊數的可靠依據。
   - **錯誤恢復**：圖像解碼失敗（如超出預算）只影響該次請求（HTTP 500），不會拖垮服務器。
 

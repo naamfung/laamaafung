@@ -122,6 +122,8 @@ static void print_usage(const char * argv0) {
             "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
             "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
+            "  --no-kvmem-image-autoscale do not shrink images that exceed the KVMem working-set budget\n"
+            "                             (default: shrink them before tokenization)\n"
             "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 | turbo2 | turbo3 | turbo4 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0 | turbo2 | turbo3 | turbo4)\n"
@@ -1537,6 +1539,9 @@ int main(int argc, char ** argv) {
     json template_defaults = json::object();
     bool mmproj_gpu = true;
     int image_min_tokens = -1, image_max_tokens = -1;
+    // Shrink images that would not fit the working-set budget, before they become
+    // tokens. Same policy as llama-server; see llama_kvmem_image_token_cap().
+    bool kvmem_image_autoscale = true;
     std::string host = "127.0.0.1";
     std::string nvme_dir;
     int port = 8080;
@@ -1697,6 +1702,10 @@ int main(int argc, char ** argv) {
             st.kparams.harvest_v = true;
         } else if (eq(arg, "--kvmem-raw-k-nvme")) {
             st.kparams.raw_k_nvme = true;
+        } else if (eq(arg, "--no-kvmem-image-autoscale")) {
+            kvmem_image_autoscale = false;
+        } else if (eq(arg, "--kvmem-image-autoscale")) {
+            kvmem_image_autoscale = true;
         } else if (eq(arg, "--kv-dtype") || eq(arg, "-ctk") || eq(arg, "--cache-type-k")
                    || eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
             bool ok = false;
@@ -1864,6 +1873,7 @@ int main(int argc, char ** argv) {
 
     // No speculative rollback state is needed without MTP.
     if (!st.spec_mtp) st.kparams.mtp_state = 0;
+    st.kparams.image_autoscale = kvmem_image_autoscale;
     if (st.kparams.enabled) {
         if (!nvme_dir.empty()) {
             st.kparams.nvme_dir = nvme_dir.c_str();

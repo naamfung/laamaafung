@@ -71,5 +71,11 @@ else()
         )
         target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd)
         target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
+        # This target compiles its own copy of server/server-common.cpp, which guards its
+        # KVMem hooks with `#if defined(LLAMA_KVMEM)`. Without the define those hooks are
+        # silently compiled out here (llama_kvmem_image_token_cap, i.e. the pre-tokenization
+        # image downscale) even though the tool itself is KVMem-only and calls the adapter
+        # unconditionally, so the define has to be set per target.
+        target_compile_definitions(llama-kvmem-server PRIVATE LLAMA_KVMEM=1)
     endif()
 endif()
