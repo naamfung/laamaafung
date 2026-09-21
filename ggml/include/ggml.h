@@ -435,7 +435,11 @@ extern "C" {
         GGML_TYPE_TQ3_1S  = 45, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
         GGML_TYPE_TQ4_1S  = 46, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
         GGML_TYPE_Q2_0    = 47,
-        GGML_TYPE_COUNT   = 48,
+        // Prism-private Q2_0 at group size 128 (upstream Q2_0 is group 64). High id so it
+        // slots above the types laamaafung defines; type_traits is sized to COUNT (144) with 48..141 unused.
+        GGML_TYPE_PQ2_0 = 142, // Prism-private Q2_0 at group size 128
+        GGML_TYPE_PTQ1_0 = 143, // Prism-private ternary, group 128
+        GGML_TYPE_COUNT   = 144,
     };
 
     // precision
@@ -480,6 +484,8 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
+        GGML_FTYPE_MOSTLY_PQ2_0 = 128, // except 1d tensors (Prism-private group-128 Q2_0)
+        GGML_FTYPE_MOSTLY_PTQ1_0 = 129, // except 1d tensors (Prism-private group-128 ternary)
     };
 
     // available tensor operations:

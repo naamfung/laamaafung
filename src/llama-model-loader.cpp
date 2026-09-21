@@ -58,6 +58,10 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q6_K:      name = LLAMA_FTYPE_PREFIX "Q6_K"; break;
         case LLAMA_FTYPE_MOSTLY_TQ1_0:     name = LLAMA_FTYPE_PREFIX "TQ1_0 - 1.69 bpw ternary"; break;
         case LLAMA_FTYPE_MOSTLY_TQ2_0:     name = LLAMA_FTYPE_PREFIX "TQ2_0 - 2.06 bpw ternary"; break;
+        case LLAMA_FTYPE_MOSTLY_PQ2_0: name = LLAMA_FTYPE_PREFIX "PQ2_0 - 2.13 bpw (group 128)"; break;
+        case LLAMA_FTYPE_MOSTLY_PTQ1_0: name = LLAMA_FTYPE_PREFIX "PTQ1_0 - 1.75 bpw ternary (group 128)"; break;
+        // ggufs packed before the Q2_0_G128 -> PQ2_0 rename carry the old ftype value.
+        case LLAMA_FTYPE_MOSTLY_PQ2_0_LEGACY: name = LLAMA_FTYPE_PREFIX "PQ2_0 - 2.13 bpw (group 128, legacy ftype)"; break;
         case LLAMA_FTYPE_MOSTLY_TQ3_1S:    name = LLAMA_FTYPE_PREFIX "TQ3_1S - 4.0 bpw WHT-rotated 3-bit"; break;
         case LLAMA_FTYPE_MOSTLY_TQ4_1S:    name = LLAMA_FTYPE_PREFIX "TQ4_1S - 5.0 bpw WHT-rotated 4-bit"; break;
         case LLAMA_FTYPE_MOSTLY_IQ2_XXS:   name = LLAMA_FTYPE_PREFIX "IQ2_XXS - 2.0625 bpw"; break;
@@ -763,6 +767,8 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_NVFP4:   ftype = LLAMA_FTYPE_MOSTLY_NVFP4;   break;
             case GGML_TYPE_Q1_0:    ftype = LLAMA_FTYPE_MOSTLY_Q1_0;    break;
             case GGML_TYPE_Q2_0:    ftype = LLAMA_FTYPE_MOSTLY_Q2_0;    break;
+            case GGML_TYPE_PQ2_0: ftype = LLAMA_FTYPE_MOSTLY_PQ2_0; break;
+            case GGML_TYPE_PTQ1_0: ftype = LLAMA_FTYPE_MOSTLY_PTQ1_0; break;
             default:
                 {
                     LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));
