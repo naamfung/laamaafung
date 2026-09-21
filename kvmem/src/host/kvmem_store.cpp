@@ -381,7 +381,7 @@ std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected
         uint32_t need = 0;
         for (uint32_t i = lo[id]; i < hi[id]; ++i) need += !kept[i];
         if (count + need > budget) {
-            if (required) throw std::runtime_error("mandatory image group and query exceed KV selection budget");
+            if (required) throw std::runtime_error(KV_MEM_FIT_IMAGE_GROUP_MSG);
             return;
         }
         for (uint32_t i = lo[id]; i < hi[id]; ++i) kept[i] = true;

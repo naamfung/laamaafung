@@ -283,6 +283,95 @@ int32_t llama_kvmem_image_token_cap(int32_t n_media) {
     return (int32_t) cap;
 }
 
+// The second fit failure (media group plus query) has no kernel counterpart - the
+// kernel's constrain_media() only reports the group case - so its text lives here,
+// next to the accessors that hand it out and recognise it.
+static const char * kvmem_fit_image_and_query_msg() {
+    return "latest image and text query exceed KV budget; reduce the image size or query span";
+}
+
+const char * llama_kvmem_fit_error_message(int code) {
+    switch (code) {
+        case LLAMA_KVMEM_FIT_IMAGE_GROUP:     return kvmem::KV_MEM_FIT_IMAGE_GROUP_MSG;
+        case LLAMA_KVMEM_FIT_IMAGE_AND_QUERY: return kvmem_fit_image_and_query_msg();
+        default:                              return nullptr;
+    }
+}
+
+int llama_kvmem_classify_fit_error(const char * what) {
+    if (what == nullptr) {
+        return LLAMA_KVMEM_FIT_OK;
+    }
+    // Text comparison against the same constants the messages come from, so the
+    // text and the recognition can never disagree.
+    if (std::strcmp(what, kvmem::KV_MEM_FIT_IMAGE_GROUP_MSG) == 0) return LLAMA_KVMEM_FIT_IMAGE_GROUP;
+    if (std::strcmp(what, kvmem_fit_image_and_query_msg()) == 0)     return LLAMA_KVMEM_FIT_IMAGE_AND_QUERY;
+    return LLAMA_KVMEM_FIT_OK;
+}
+
+int llama_kvmem_check_fit(const uint32_t * starts, const uint32_t * ends, size_t n_media,
+                          uint32_t query_begin, uint32_t prompt_end) {
+    const llama_kvmem_params & p = g_kvmem_params;
+    if (!p.enabled || p.budget == 0 || n_media == 0 || starts == nullptr || ends == nullptr) {
+        return LLAMA_KVMEM_FIT_OK;
+    }
+    const uint32_t block  = p.block_tokens ? p.block_tokens : 128u;
+    const uint32_t budget = p.budget / block;
+    if (budget == 0) {
+        return LLAMA_KVMEM_FIT_OK;
+    }
+
+    // A media group is kept whole and block-aligned, including its boundary blocks -
+    // the same rounding the store's constrain_media() applies. Adjacent groups merge,
+    // exactly as they do there.
+    std::vector<std::pair<uint32_t, uint32_t>> groups;
+    for (size_t i = 0; i < n_media; ++i) {
+        if (ends[i] <= starts[i]) {
+            continue;
+        }
+        const uint32_t lo = (starts[i] ? starts[i] - 1 : 0) / block;
+        const uint32_t hi = (std::min<uint32_t>(prompt_end, ends[i] + 1) + block - 1) / block;
+        if (!groups.empty() && lo < groups.back().second) {
+            groups.back().second = hi;
+        } else {
+            groups.emplace_back(lo, hi);
+        }
+    }
+    if (groups.empty()) {
+        return LLAMA_KVMEM_FIT_OK;
+    }
+
+    const uint32_t sink = std::max(1u, p.sink_tokens / block);
+    for (const auto & g : groups) {
+        if (g.second - g.first + std::min(g.first, sink) > budget) {
+            return LLAMA_KVMEM_FIT_IMAGE_GROUP;
+        }
+    }
+
+    // The latest image and the query must be resident together.
+    std::vector<std::pair<uint32_t, uint32_t>> required = {
+        {0, sink},
+        {groups.back().first, groups.back().second},
+        {query_begin / block, (prompt_end + block - 1) / block},
+    };
+    std::sort(required.begin(), required.end());
+    uint64_t covered = 0;
+    uint32_t lo = required.front().first;
+    uint32_t hi = required.front().second;
+    for (size_t i = 1; i < required.size(); ++i) {
+        if (required[i].first > hi) {
+            covered += hi - lo;
+            lo = required[i].first;
+            hi = required[i].second;
+        } else {
+            hi = std::max(hi, required[i].second);
+        }
+    }
+    covered += hi - lo;
+
+    return (covered > budget) ? LLAMA_KVMEM_FIT_IMAGE_AND_QUERY : LLAMA_KVMEM_FIT_OK;
+}
+
 static uint32_t kvmem_align_tokens(uint32_t tokens, uint32_t block_tokens) {
     if (block_tokens == 0) {
         return 0;

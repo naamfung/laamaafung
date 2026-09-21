@@ -6,6 +6,7 @@
 
 #include "llama.h"
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -62,6 +63,36 @@ LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 // it to the vision layer, which clamps it against the model's own image-token
 // limit (so this can only ever lower it, never raise it).
 LLAMA_API int32_t llama_kvmem_image_token_cap(int32_t n_media);
+
+// Pre-flight capacity check for a request that carries images.
+//
+// KVMem keeps a mandatory image group whole - it is never split across blocks - so
+// an image whose blocks do not fit what is left of the working-set budget cannot be
+// scheduled at all. Whether that happens is a property of the REQUEST (the image is
+// too large for the configured budget), not an internal fault, so the servers check
+// it *before* running the prefill and answer with a client error instead of failing
+// somewhere inside the decode.
+//
+// Row ranges are start-inclusive / end-exclusive in the same space as the store's
+// token rows (as produced by server_tokens::get_media_chunks()); `prompt_end` is the
+// token count of the whole prompt and `query_begin` the first row of the retrieval
+// query. Returns one of the LLAMA_KVMEM_FIT_* codes below.
+#define LLAMA_KVMEM_FIT_OK              0 // the request fits (also: KVMem off / no images)
+#define LLAMA_KVMEM_FIT_IMAGE_GROUP     1 // the mandatory media group alone exceeds the budget
+#define LLAMA_KVMEM_FIT_IMAGE_AND_QUERY 2 // the media group plus the query exceed the budget
+LLAMA_API int llama_kvmem_check_fit(const uint32_t * starts, const uint32_t * ends, size_t n_media,
+                                    uint32_t query_begin, uint32_t prompt_end);
+
+// Response text for a non-zero code from llama_kvmem_check_fit() (nullptr for OK).
+// This is the same string the kernel throws for the same condition, and it names the
+// two knobs that resolve it, so a pre-flight rejection and a caught exception read
+// identically to the client.
+LLAMA_API const char * llama_kvmem_fit_error_message(int code);
+
+// Non-zero when `what` is an exception message produced by that same condition.
+// Lets the servers answer 400 even when the failure surfaces as a thrown exception
+// rather than through llama_kvmem_check_fit().
+LLAMA_API int llama_kvmem_classify_fit_error(const char * what);
 
 // Legacy eval-callback entry. Always returns false so ggml does not split the
 // graph. Capture harvest runs after the full ubatch compute instead.

@@ -3593,6 +3593,18 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 callback(slot);
             } catch (const std::exception & e) {
                 SLT_ERR(slot, "got exception: %s\n", e.what());
+#if defined(LLAMA_KVMEM)
+                // "The request does not fit the working set" is a property of the request,
+                // not a server fault: answer it as a client error with the actionable text
+                // rather than a 500. llama_kvmem_check_fit() normally rejects these before
+                // the prefill, so this is the path where it still slipped through.
+                const int fit = llama_kvmem_classify_fit_error(e.what());
+                if (fit != LLAMA_KVMEM_FIT_OK) {
+                    send_error(slot, llama_kvmem_fit_error_message(fit), ERROR_TYPE_INVALID_REQUEST);
+                    slot.release();
+                    continue;
+                }
+#endif
                 send_error(slot, std::string("got exception: ") + e.what(), ERROR_TYPE_SERVER);
                 slot.release();
             }
@@ -4081,6 +4093,26 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                                         mm_starts.size(), n_prompt, mm_dbg.c_str());
                             }
                             llama_kvmem_set_media_ranges(mm_starts.data(), mm_ends.data(), mm_starts.size());
+
+                            // Reject a request that cannot be scheduled *before* spending a
+                            // prefill on it. A mandatory image group bigger than the working
+                            // set has no valid selection, and the client is the one who can
+                            // fix it (smaller image, or a larger --kvmem-budget), so this is
+                            // a client error carrying the same actionable text the kernel
+                            // throws for the condition - not the generic 500 the failure
+                            // used to produce from deep inside the decode.
+                            const int fit = llama_kvmem_check_fit(mm_starts.data(), mm_ends.data(),
+                                    mm_starts.size(), (uint32_t) std::max(0, q0), (uint32_t) n_prompt);
+                            if (fit != LLAMA_KVMEM_FIT_OK) {
+                                const char * fit_msg = llama_kvmem_fit_error_message(fit);
+                                SLT_ERR(slot, "%s\n", fit_msg);
+                                send_error(slot, fit_msg, ERROR_TYPE_INVALID_REQUEST);
+                                slot.release();
+                                // release() moves the task out of the slot, so slot.task is
+                                // nullptr from here on - leave the per-slot callback instead
+                                // of touching the slot again.
+                                return;
+                            }
                         }
 #endif
 

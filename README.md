@@ -98,7 +98,7 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 
 > 上例的 `-c 262144` / `-n 32768` / `-ub 128` / `-b 512` / `--kvmem-*` 全部沿用官版 KVMem 伺服器的生產值，只把 `--kv-dtype q8_0` 拆成 `-ctk q8_0 -ctv turbo4`、`--enable-thinking` 換成 `--reasoning on`。
 > `--kvmem-budget`（工作集）與 `--kvmem-gen-reserve`（單輪生成頭寸）是唯二需要按自己機器／單輪生成長度調整的；其餘 KVMem 參數預設即生產值。
-> 帶圖像時**整張圖必須整體駐留**：`--kvmem-budget` 要 ≥ 單張圖的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。放不下時**預設會先在 token 化之前把圖縮小**（見下文「圖像自動縮放」）；只有連縮放下限都放不下、或關閉了自動縮放，才會明確拒絕（HTTP 500，訊息為 `mandatory image group and query exceed KV selection budget`）。服務器**不會**因這種請求崩潰，後續請求照常服務（`--kvmem-budget 32768` 足以容納多張全解析度圖）。
+> 帶圖像時**整張圖必須整體駐留**：`--kvmem-budget` 要 ≥ 單張圖的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。放不下時**預設會先在 token 化之前把圖縮小**（見下文「圖像自動縮放」）；只有連縮放下限都放不下、或關閉了自動縮放，才會明確拒絕（HTTP 400，訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`，與官版 `llama-kvmem-server` 相同）。服務器**不會**因這種請求崩潰，後續請求照常服務（`--kvmem-budget 32768` 足以容納多張全解析度圖）。
 > **多圖**：同一條訊息裡**相鄰且尺寸相同**的圖片，會被 Qwen-VL 按「視頻幀合併」語義兩兩拼成一張畫布（`clip_model_n_temporal_merge`），模型看到的是合併後的圖；要讓每張圖各自獨立，請在兩張圖之間插一個文本 part（哪怕只是一個換行，見下文「啟用條件」的多圖說明）。
 > 注意 KVMem 下**不要**加 `--context-shift` / `--prompt-truncate` / `--cache-reuse`：前兩者會被拒絕或自動禁用，後者依賴 K-shift 亦會自動禁用（見下文「KVMem」一節）。
 > 純 CPU 或小顯存試跑可把 `-ngl 99` 換成 `-ngl 0`，並把 `-c` / `--kvmem-budget` 按比例調小。
@@ -174,7 +174,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `-ub 128 -b 512` | `--ubatch-size 128 --batch-size 512`（或 `-ub` / `-b`） | 同名同義。 |
 | `-ngl 99` | `-ngl 99` | 同名同義。 |
 | `--kvmem-budget` / `--kvmem-gen-reserve` / `--kvmem-gpu-ratio` / `--kvmem-block-tokens` | 同名 | KVMem 參數一一對應（預設值見下表）。 |
-| `--no-kvmem-image-autoscale` | 同名 | **兩邊都已支援**：行數超預算的圖像會在 token 化**之前**自動縮小（見「啟用條件」）。關掉後官版回 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400），llama-server 回 `mandatory image group and query exceed KV selection budget`（HTTP 500）。 |
+| `--no-kvmem-image-autoscale` | 同名 | **兩邊都已支援**：行數超預算的圖像會在 token 化**之前**自動縮小（見「啟用條件」）。關掉後兩邊都回同一條訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）。 |
 | `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K/V 分開設，KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，因此 turbo2/3/4 也能用於 V。 |
 | `--enable-thinking`、`--reasoning-effort`、`--reasoning-budget` | `--reasoning on`、`--reasoning-budget`（＋ `--reasoning-format/-preserve/-temp/-top-p/...`） | llama-server 用 `--reasoning [on\|off\|auto]` 開關；「思考強度」由 `--reasoning-budget` 與一整套 `--reasoning-*` 採樣覆蓋表達，沒有 `effort` 這個名字。 |
 | `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義；mmproj × KVMem 已支持（見下方「啟用條件」的 `--kvmem-budget` 要求）。 |
@@ -186,12 +186,12 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 - `--parallel` 會**強制為 1**（KVMem 要求 `n_seq_max == 1`）：顯式非 1 會打警告 `KVMem requires n_parallel = 1, but N was requested - forcing n_parallel = 1`，`auto` 則打提示；
 - 純線性注意力（recurrent）架構與 SWA 模型不支援（日誌分別為 `KVMem skips purely recurrent arch ...` 與 `KVMem skips SWA models`）；混合注意力模型（如 Qwen3.5/3.6 的門控 DeltaNet + 門控注意力）可用；
 - 多模態（mmproj）：**已支持**（官版參數集帶 `--mmproj`，示例照搬）。圖像塊佔用連續的 cache 行、但攜帶 2-D（M-RoPE）模型位置，因此 `llama-server` 會為嵌入批設置 `llama_batch::logical_pos`（相鄰行號）並把媒體行的範圍告知 KVMem（`set_media_ranges`），KVMem 才能按行尋址且**整張圖整體保留**。
-  - **預算**：`--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。圖像組是強制的、不能拆塊，所以這一項不滿足時**預設會先自動縮小圖像**（見下），只有連縮放下限都放不下（或關閉了自動縮放）才會拒絕該請求（`mandatory image group and query exceed KV selection budget`，HTTP 500）。高細節大圖的行數會隨原生解像度上升：實測 224×224 純色圖 ≈ 49 行、1024×1024 ≈ 1024 行、2048×2048 ≈ 4096 行（`KVMEM_TRACE=1` 的 `KVMem media rows: N chunk(s) ... [start,end)` 可核對）。
+  - **預算**：`--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。圖像組是強制的、不能拆塊，所以這一項不滿足時**預設會先自動縮小圖像**（見下），只有連縮放下限都放不下（或關閉了自動縮放）才會拒絕該請求。拒絕時回 **HTTP 400**（`invalid_request_error`）而非 500 —— 這是請求本身放不下，不是服務器故障；訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget` 直接點出兩個解法，與官版 `llama-kvmem-server` 逐字相同。判定在**前填之前**做（`llama_kvmem_check_fit()`），所以失敗是瞬時的，不會先跑完一次前填才報錯。高細節大圖的行數會隨原生解像度上升：實測 224×224 純色圖 ≈ 49 行、1024×1024 ≈ 1024 行、2048×2048 ≈ 4096 行（`KVMEM_TRACE=1` 的 `KVMem media rows: N chunk(s) ... [start,end)` 可核對）。
   - **圖像自動縮放（預設開）**：行數超預算時，在 **token 化之前**按比例把圖縮小，而不是讓請求失敗。KVMem 先算出「一張圖可用的 token 數」＝ `(budget − (sink + 4 個塊)) ÷ 本次請求的圖片數`，交給 vision 層把該模型的 image-token 上限壓低；Qwen-VL 的動態解析度預處理器隨即在 bitmap 階段把圖縮到預算內，所以縮放發生在**像素層**、比「先 token 化再拒絕」早一步。三個性質值得記住：**只降上限、從不放大**（小圖保持原解析度）；**以模型的原始上限為基準逐請求重算**，不會跨請求累積；**下限為 2 個塊**（預設 256 tokens）。
   - 這與 **DeepSeek Harness 的圖像歸一化標準一致**：DSH 放行大圖、再按比例縮到 `normalizedImageMaxPixels = 2048×2048`；而本模型預設的 image-token 上限（4096 tokens × `patch_area` 1024 px）= 4,194,304 px，**恰好也是 2048×2048**。也就是說**預算充裕時（≳5K 行）行為與 DSH 完全一致、不做任何額外降質**，只有預算不足時才進一步縮小。日誌會打 `KVMem budget caps one image at N tokens (model limit M) for K media file(s)`；想完全關掉用 `--no-kvmem-image-autoscale`（回復為直接拒絕）。
   - **`llama-kvmem-server` 同樣支援**（同名開關）：那裡的「拒絕」原本是它自己的守衛，報 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）；接上自動縮放後會先縮圖、請求正常完成。**注意它是獨立編譯的目標，需要 `tools/CMakeLists.txt` 給它 `LLAMA_KVMEM=1`**，否則 `server-common.cpp` 裡的 `#if defined(LLAMA_KVMEM)` 鉤子會被靜默編掉（本分支已補）。
   - **多圖**：同一條訊息裡**相鄰（中間無文本）且尺寸相同**的圖片會被 Qwen-VL 視為**視頻幀**兩兩合併成一張畫布（`mtmd.cpp` 的 `n_merge_frames = clip_model_n_temporal_merge()`，每組上限 2 張、逐對 `(1,2)(3,4)…`）。合併後模型看到的是拼合圖（例如兩張純色圖會被描述成「左右兩半」），且整組只佔一張畫布的 token 數。**要讓每張圖各自獨立，請在兩張圖之間插一個文本 part**（例如 `\n`）；尺寸不同則不會合併。日誌的 `KVMem media rows: N chunk(s)` 是判斷實際分塊數的可靠依據。
-  - **錯誤恢復**：圖像解碼失敗（如超出預算）只影響該次請求（HTTP 500），不會拖垮服務器。
+  - **錯誤恢復**：放不下的請求只影響該次請求（HTTP 400），不會拖垮服務器；即便異常是在前填深處才浮現，也會被歸類成同一條 400 訊息（`llama_kvmem_classify_fit_error()`），不會退回 500。
 
 **與其他功能的交互**
 
@@ -217,7 +217,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `--kvmem-query-max N` | `512` | 檢索查詢長度上限，超出時保留尾部（`0` = 不限制） |
 | `--kvmem-method M` | `retrieval` | `retrieval`（按查詢檢索歷史塊）或 `recency`（只保留最近內容，等於純壓縮） |
 | `--kvmem-harvest-v` | 關閉 | 前填時同時把 V 搬到主機（增加前填開銷，換取更完整的檢索載入） |
-| `--no-kvmem-image-autoscale` | 自動縮放**開啟** | 關閉圖像自動縮放（環境變數 `LLAMA_ARG_NO_KVMEM_IMAGE_AUTOSCALE`）。預設開啟時，超出行數預算的圖像會在 **token 化之前**按比例縮小，而不是讓請求失敗；關閉後回到直接拒絕（HTTP 500）。見下文「啟用條件」的多模態說明。 |
+| `--no-kvmem-image-autoscale` | 自動縮放**開啟** | 關閉圖像自動縮放（環境變數 `LLAMA_ARG_NO_KVMEM_IMAGE_AUTOSCALE`）。預設開啟時，超出行數預算的圖像會在 **token 化之前**按比例縮小，而不是讓請求失敗；關閉後回到直接拒絕（HTTP 400，訊息見下文）。見「啟用條件」的多模態說明。 |
 
 **配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。`--kvmem-gen-reserve` 單獨看是「**單輪生成頭寸**」：要 ≥ 你預期最長的一輪生成（寫碼／長推理動輒數千 token），官版生產值取 8192、上下限由用戶自定；只給 256 之類的測試刻度，KVMem 的召回會在生成途中被自己的換出邏輯吃掉。`--kvmem-gpu-ratio` 是**上限**而非目標值：它按 VRAM 總量換算可容納的塊數，若 `budget + gen_reserve` 超出就會把池壓小（見上表）。**預設即 `0.90`**，讓上限不成為約束、實際工作集完全由 `--kvmem-budget` 決定，一般不必顯式指定；只有在顯存確實不足時才調小。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gen-reserve 8192 --kvmem-gpu-ratio 0.90` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）。
 

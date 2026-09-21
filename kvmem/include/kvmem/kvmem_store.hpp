@@ -30,6 +30,15 @@ namespace kvmem {
 
 enum class KvTier : uint8_t { GPU = 0, CPU = 1, SSD = 2 };
 
+// Message for "this request does not fit the selection budget": a mandatory image
+// group (kept whole, never split across blocks) plus the query need more blocks than
+// the working set has. That is a property of the REQUEST, not an internal fault, so
+// every server layer reports it as a client error carrying this exact text.
+// Defined once here so the kernel throw, llama-server's pre-flight check and the
+// standalone llama-kvmem-server cannot drift apart; the adapter re-exports it.
+inline constexpr const char * KV_MEM_FIT_IMAGE_GROUP_MSG =
+    "image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget";
+
 // Metadata for one context block, spanning all attention layers (a token range
 // has KV in every attention layer). Physical storage handles per tier are
 // added in the tiering task (#41); v1 tracks logical placement + remap state.
