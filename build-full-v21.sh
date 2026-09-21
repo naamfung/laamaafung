@@ -13,6 +13,17 @@ rm -rf "$BUILD_DIR"
 # 清理跨分支共享残留的预构建前端资源, 避免误用不匹配版本的静态页面
 rm -rf tools/ui/dist
 
+# CUDA 架构选择, 用于在"支持的不同 GPU"上都能顺利编译:
+#   1. 显式传 CUDA_ARCH (如 CUDA_ARCH='80;86;89;90' 或 CUDA_ARCH='75-real;80-virtual')
+#      时, 编译该列表覆盖的所有架构, 单一直产物可运行于列表内任意一张 GPU。
+#   2. 未设置时用 "native", 即让 CMake 自动探测编译机上的 GPU 架构并按其编译,
+#      编译最快且性能最好 (前提是运行环境与编译机同型号 GPU)。
+# 关键: 必须把 CMAKE_CUDA_ARCHITECTURES 显式传在根级命令行。GGML 内部的架构探测
+#      在 ggml-cuda 子目录作用域里 set(), 不会向上传播到 src/; 而 KVMem 的
+#      llama-kvmem-stagein.cu 要编入 llama 目标, 该目标只有拿到架构值才不会报
+#      "CUDA_ARCHITECTURES is empty for target llama"。 后续 CUDA 目标会自动继承此值。
+CUDA_ARCH="${CUDA_ARCH:-native}"
+
 # LLAMA_KVMEM=ON + ROOT 指向仓库根: 构建含 KVMem 的全部程序
 # BUILD_UI=ON 编译界面
 #
@@ -30,10 +41,10 @@ rm -rf tools/ui/dist
 #   而且该进程会顺势回退到"重新配置"分支, 在本就并行编译时跑一次 configure,
 #   于是日志里出现 Configuring incomplete / 工程文件被改写的隐患。
 #   本脚本每次都是 rm -rf 构建目录后全量配置, 不依赖增量自检, 故直接关闭它。
-cmake -B "$BUILD_DIR" -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_BUILD_TYPE=Release -DLLAMA_KVMEM=ON -DLLAMA_KVMEM_ROOT="$PWD" -DCMAKE_SUPPRESS_REGENERATION=ON
+cmake -B "$BUILD_DIR" -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_BUILD_TYPE=Release -DLLAMA_KVMEM=ON -DLLAMA_KVMEM_ROOT="$PWD" -DCMAKE_SUPPRESS_REGENERATION=ON
 
 # cmake --build "$BUILD_DIR" --config Release --target llama-server --parallel
-cmake --build "$BUILD_DIR" -j --config Release
+cmake --build "$BUILD_DIR" -j8 --config Release
 
 # 收尾自检: MSB8066 只会中断单个工程, 不会让 --build 整体失败, 容易漏掉静默缺失的产物
 missing=0
