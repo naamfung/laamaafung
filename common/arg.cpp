@@ -2995,7 +2995,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_KVMEM_BUDGET"));
     add_opt(common_arg(
         {"--kvmem-gen-reserve"}, "N",
-        "KVMem decode slack tokens kept inside the working set (default 256)",
+        "KVMem decode slack tokens kept inside the working set (default 8192; a coding "
+        "agent needs at least a few thousand, 8192-24576 is the production range)",
         [](common_params & params, int value) {
             params.kvmem_gen_reserve = value;
         }

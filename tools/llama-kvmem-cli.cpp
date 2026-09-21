@@ -30,7 +30,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem                    enable KVMem slot-pool memory\n"
             "  --kvmem-block-tokens N     block size (default 32)\n"
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx (identity)\n"
-            "  --kvmem-gen-reserve N      extra GPU tokens for decode (default 256)\n"
+            "  --kvmem-gen-reserve N      extra GPU tokens for decode (default 8192; production 8192-24576)\n"
             "  --kvmem-sink-tokens N      always-kept prefix; 0 = one block\n"
             "  --kvmem-recent-tokens N    always-kept suffix blocks (default 0)\n"
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
@@ -77,7 +77,7 @@ int main(int argc, char ** argv) {
 
     llama_kvmem_params kparams = {};
     kparams.block_tokens = 32;
-    kparams.gen_reserve = 256;
+    kparams.gen_reserve = 8192;
     kparams.method = 1;  // retrieval
     kparams.query_begin = -1;
     kparams.query_end = -1;
@@ -289,7 +289,7 @@ int main(int argc, char ** argv) {
         const uint32_t bt = kparams.block_tokens ? kparams.block_tokens : 32u;
         const uint32_t sink = kparams.sink_tokens == 0 ? bt : kparams.sink_tokens;
         const uint32_t room = kparams.budget > sink ? kparams.budget - sink : bt;
-        const uint32_t cap = std::min(kparams.gen_reserve ? kparams.gen_reserve : 256u, room);
+        const uint32_t cap = std::min(kparams.gen_reserve ? kparams.gen_reserve : 8192u, room);
         if (static_cast<uint32_t>(n_batch) > cap) {
             fprintf(stderr, "llama-kvmem-cli: clamping -b %d → %u so each prefill chunk fits the slot pool\n",
                     n_batch, cap);

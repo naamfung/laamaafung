@@ -377,7 +377,7 @@ static kvmem_pool_plan kvmem_compute_pool(
     } else {
         budget = kvmem_align_tokens(budget, p.block_tokens);
     }
-    uint32_t gen_reserve = g_kvmem_params.gen_reserve ? g_kvmem_params.gen_reserve : 256u;
+    uint32_t gen_reserve = g_kvmem_params.gen_reserve ? g_kvmem_params.gen_reserve : 8192u;
     gen_reserve = kvmem_align_tokens(gen_reserve, p.block_tokens);
 
     const uint32_t il0 = kvmem_first_attn_layer(model);
@@ -395,9 +395,20 @@ static kvmem_pool_plan kvmem_compute_pool(
                 (p.gpu_total * ratio) / std::max(p.block_bytes, uint64_t{1}));
     }
 
+    // The slot pool can never usefully exceed the context: a sequence can never hold more
+    // than n_ctx_seq tokens, so cells above that could never be filled. Clamp unconditionally
+    // (the old branch only did it for budget == 0), otherwise a production-sized
+    // --kvmem-gen-reserve combined with an explicit --kvmem-budget would over-allocate in a
+    // small context. Keep the semantic working set (budget); shrink the slack first.
     uint32_t pool = budget + gen_reserve;
-    if (pool > cparams.n_ctx_seq && g_kvmem_params.budget == 0) {
-        pool = cparams.n_ctx_seq;
+    if (cparams.n_ctx_seq > 0 && pool > (uint32_t) cparams.n_ctx_seq) {
+        pool = kvmem_align_tokens(cparams.n_ctx_seq, p.block_tokens);
+        if (budget >= pool) {
+            gen_reserve = std::min(gen_reserve, p.block_tokens);
+            budget      = pool > gen_reserve ? pool - gen_reserve : pool;
+        } else {
+            gen_reserve = pool - budget;
+        }
     }
     if (p.cap_blocks > 0) {
         const uint32_t cap_tokens = p.cap_blocks * p.block_tokens;

@@ -107,7 +107,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx\n"
             "  --kvmem-block-tokens N     block size (default 128)\n"
             "  --kvmem-sink-tokens N      always-kept prefix; default 0 = one block; rounds down, minimum one block\n"
-            "  --kvmem-gen-reserve N      decode slack (default 256)\n"
+            "  --kvmem-gen-reserve N      decode slack (default 8192; production 8192-24576)\n"
             "  --kvmem-recent-tokens N    always-kept newest suffix in select budget (default 0)\n"
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
             "  --kvmem-query-last N       fallback query-last if last-user span missing (default 64)\n"
@@ -1547,7 +1547,7 @@ int main(int argc, char ** argv) {
     kvmem_server_options options;
     st.kparams.mtp_state = 2; // ReplaySSM by default when MTP is enabled.
     st.kparams.block_tokens = 128;
-    st.kparams.gen_reserve = 256;
+    st.kparams.gen_reserve = 8192;
     st.kparams.recent_tokens = 0;
     st.kparams.method = 1;
     st.kparams.enabled = true;
