@@ -89,9 +89,12 @@ void ggml_cuda_flash_attn_ext_mma_turbo_case(ggml_backend_cuda_context & ctx, gg
 
     // need_f16_K = need_f16_V = false: launch_fattn does NOT convert turbo bytes to f16;
     // the kernel receives raw quantized KV + the true byte pitch. stream_k = true.
+    // NOTE: the 0.23 baseline inserted a use_sparse argument before warp_size.
+    // Passing warp_size_host there silently enabled the sparse launch path and
+    // cost ~18% decode speed on turbo KV (measured, llama-bench tg128).
     launch_fattn<DV, ncols1, ncols2>
         (ctx, dst, fattn_kernel, nwarps, nbytes_shared_total, nbatch_fa,
-         /*need_f16_K=*/false, /*need_f16_V=*/false, /*stream_k=*/true, warp_size_host);
+         /*need_f16_K=*/false, /*need_f16_V=*/false, /*stream_k=*/true, /*use_sparse=*/false, warp_size_host);
 }
 
 
