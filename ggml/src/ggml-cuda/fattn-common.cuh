@@ -2458,7 +2458,7 @@ void launch_fattn(
         (const char *) Q->data,
         K_data,
         V_data,
-        mask ? ((const char *) mask->data) : nullptr,
+        (causal || !mask) ? nullptr : ((const char *) mask->data),
         sinks ? ((const char *) sinks->data) : nullptr,
         KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data,
@@ -2468,9 +2468,8 @@ void launch_fattn(
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
         K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
-        mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
-        causal ? 1 : 0
+        causal ? 1 : (mask ? mask->ne[1] : 0), causal ? 0 : (mask ? mask->ne[2] : 0), causal ? 0 : (mask ? mask->ne[3] : 0),
+        causal ? 0 : (mask ? mask->nb[1] : 0), causal ? 0 : (mask ? mask->nb[2] : 0), causal ? 0 : (mask ? mask->nb[3] : 0)
     );
     CUDA_CHECK(cudaGetLastError());
 
