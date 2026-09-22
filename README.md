@@ -84,7 +84,7 @@ model="D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf"
 mmproj="D:/models/Mudler/mmproj-Qwen-AgentWorld-35B-A3B-BF16.gguf"
 template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
 $llamaServer --model $model --host 0.0.0.0 --port 8008 \
--c 262144 -n 32768 -ub 128 -b 512 -ngl 99 --parallel 1 \
+-c 262144 -n 32768 -ub 128 -b 512 -ngl 99 --n-cpu-moe 33 --parallel 1 \
 --cuda-register-host --sched-prefetch-experts 1 \
 --kvmem --kvmem-budget 32768 --kvmem-gen-reserve 8192 --kvmem-gpu-ratio 0.9 --kvmem-block-tokens 128 \
 -ctk q8_0 -ctv turbo4 \
@@ -95,6 +95,7 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 ```
 
 > 上例的 `-c 262144` / `-n 32768` / `-ub 128` / `-b 512` / `--kvmem-*` 全部沿用官版 KVMem 伺服器的生產值，只把 `--kv-dtype q8_0` 拆成 `-ctk q8_0 -ctv turbo4`、`--enable-thinking` 換成 `--reasoning on`。
+> **MoE 模型必須顯式指定 `--n-cpu-moe`**（如上例的 33）：實測省略它時，啟動即報 `failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort`——`--fit` 的自動適配需要足夠的自由度（專家層卸載）才能把 35B 塞進 8GB 顯存，鎖死 `-ngl` 又沒有 `-ncmoe` 就無解。補上後實測 8 秒完成載入、推理正常（Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP，RTX 3060 Ti）。
 > `--kvmem-budget`（工作集）與 `--kvmem-gen-reserve`（單輪生成頭寸）是唯二需要按自己機器／單輪生成長度調整的；其餘 KVMem 參數預設即生產值。
 > 帶圖像時**整張圖必須整體駐留**：`--kvmem-budget` 要 ≥ 單張圖的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。放不下時**預設會先在 token 化之前把圖縮小**（見下文「圖像自動縮放」）；只有連縮放下限都放不下、或關閉了自動縮放，才會明確拒絕（HTTP 400，訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`，與官版 `llama-kvmem-server` 相同）。服務器**不會**因這種請求崩潰，後續請求照常服務（`--kvmem-budget 32768` 足以容納多張全解析度圖）。
 > **多圖**：同一條訊息裡**相鄰且尺寸相同**的圖片，會被 Qwen-VL 按「視頻幀合併」語義兩兩拼成一張畫布（`clip_model_n_temporal_merge`），模型看到的是合併後的圖；要讓每張圖各自獨立，請在兩張圖之間插一個文本 part（哪怕只是一個換行，見下文「啟用條件」的多圖說明）。
