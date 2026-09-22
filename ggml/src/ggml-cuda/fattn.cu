@@ -476,12 +476,23 @@ static bool ggml_cuda_fattn_default_quant_pair(ggml_type type_K, ggml_type type_
         ggml_cuda_fattn_quant_variant(type_K) <= ggml_cuda_fattn_quant_variant(type_V));
 }
 
+// laamaafung: TurboQuant KV types (incl. TCQ) are supported by the VEC and the
+// fused turbo-MMA kernels but are not part of the baseline's generic type list.
+static bool ggml_cuda_fattn_is_turbo_kv(ggml_type t) {
+    return t == GGML_TYPE_TURBO2_0 || t == GGML_TYPE_TURBO3_0 || t == GGML_TYPE_TURBO4_0 ||
+           t == GGML_TYPE_TURBO1_5 ||
+           t == GGML_TYPE_TURBO3_TCQ || t == GGML_TYPE_TURBO2_TCQ;
+}
+
 static bool ggml_cuda_fattn_pair_compiled(ggml_type type_K, ggml_type type_V) {
     type_K = ggml_cuda_fattn_canonical_kv_type(type_K);
     type_V = ggml_cuda_fattn_canonical_kv_type(type_V);
 
-    if (!ggml_cuda_fattn_kv_type_supported(type_K) || !ggml_cuda_fattn_kv_type_supported(type_V) ||
-        type_K == GGML_TYPE_IQ4_NL || type_V == GGML_TYPE_IQ4_NL) {
+    const bool turbo = ggml_cuda_fattn_is_turbo_kv(type_K) || ggml_cuda_fattn_is_turbo_kv(type_V);
+    if (!turbo && (!ggml_cuda_fattn_kv_type_supported(type_K) || !ggml_cuda_fattn_kv_type_supported(type_V))) {
+        return false;
+    }
+    if (type_K == GGML_TYPE_IQ4_NL || type_V == GGML_TYPE_IQ4_NL) {
         return false;
     }
 
@@ -628,7 +639,15 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
     if (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type)) {
-        return BEST_FATTN_KERNEL_NONE;
+        // laamaafung: TurboQuant KV types bypass the standard check (handled by the
+        // turbo-MMA / VEC paths). Without this the op would be scheduled onto the CPU.
+        if (ggml_cuda_fattn_is_turbo_kv(K->type) || ggml_cuda_fattn_is_turbo_kv(V->type)) {
+            if (K->ne[0] % 64 != 0) {
+                return BEST_FATTN_KERNEL_NONE;
+            }
+        } else {
+            return BEST_FATTN_KERNEL_NONE;
+        }
     }
 
     if (mask && mask->ne[2] != 1) {
@@ -637,6 +656,18 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
+    // laamaafung: TCQ KV has VEC kernels only (D=128/256); never route it to the
+    // MMA/TILE kernels, which cannot decode trellis-coded bitstreams.
+    const bool tcq_kv = K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ ||
+                        V->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO2_TCQ;
+    if (tcq_kv) {
+        if (K->ne[0] != 128 && K->ne[0] != 256) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
+        return (K->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0)
+            ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_MMA_F16;
+    }
+
     const bool can_use_vector_kernel =
         ggml_cuda_fattn_pair_compiled(K->type, V->type) &&
         Q->ne[0] <= 512 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 &&
@@ -908,12 +939,18 @@ static void ggml_cuda_flash_attn_ext_mma_turbo_prefill(ggml_backend_cuda_context
 static bool ggml_cuda_turbo_mma_fused() {
     static const bool v = []{
         const char * s = getenv("GGML_TURBO_MMA_FUSED");
-        return !(s && s[0] == '0');  // default ON (faster GQA-packed MMA, quality-neutral); GGML_TURBO_MMA_FUSED=0 = VEC kill-switch
+        // v25 (0.23 baseline): the fused turbo-MMA path is OPT-IN while it is being
+        // re-validated against the rebased kernel (it aborts with a CUDA error on
+        // the 0.23 baseline; the VEC path is at parity with the 0.18 results).
+        // GGML_TURBO_MMA_FUSED=1 enables it, anything else keeps VEC.
+        return s != nullptr && s[0] == '1';
     }();
     return v;
 }
 
 static void ggml_cuda_flash_attn_ext_dispatch(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    { static const bool fa_debug_d = getenv("GGML_FA_DEBUG") != nullptr;
+      if (fa_debug_d) { fprintf(stderr, "[FA] dispatch best=%d\n", (int) ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)); } }
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
@@ -1012,6 +1049,9 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const bool has_exact_tail = dst->src[5] != nullptr && dst->src[6] != nullptr && dst->src[7] != nullptr &&
         dst->src[8] != nullptr && dst->src[9] != nullptr;
     const bool uses_kvarn = ggml_cuda_flash_attn_ext_kvarn_uses_views(dst);
+    // [DEBUG] GGML_FA_DEBUG=1
+    static const bool fa_debug = getenv("GGML_FA_DEBUG") != nullptr;
+    if (fa_debug) { fprintf(stderr, "[FA] entry K=%s V=%s ne1=%lld tail=%d kvarn=%d\n", ggml_type_name(dst->src[1]->type), ggml_type_name(dst->src[2]->type), (long long) dst->src[0]->ne[1], (int) has_exact_tail, (int) uses_kvarn); }
     const bool portable_kvarn_tail = uses_kvarn && has_exact_tail &&
         ggml_cuda_flash_attn_ext_kvarn_direct_tail_supported(ctx.device, dst);
     if (portable_kvarn_tail) {
@@ -1042,6 +1082,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
         const bool turbo_matched = (K->type == V->type &&
             (K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO2_0));
+        if (fa_debug) { fprintf(stderr, "[FA] turbo block: matched=%d fused=%d Vne0=%lld Qne0=%lld\n", (int) turbo_matched, (int) ggml_cuda_turbo_mma_fused(), (long long) V->ne[0], (long long) Q->ne[0]); }
         if (ggml_cuda_turbo_mma_fused() && turbo_matched
                 && V->ne[0] == Q->ne[0] && turing_mma_available(cc)) {
             if (Q->ne[1] <= 4) {
