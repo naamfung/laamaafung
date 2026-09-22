@@ -1760,3 +1760,10 @@ static __device__ __forceinline__ int ptq1_0_trit(const block_ptq1_0 * x, const 
     }
     return (int) ((v * 3) >> 8) - 1;
 }
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_PTQ1_0> {
+    static constexpr int qk = QK_PTQ1_0;
+    static constexpr int qr = QR_PTQ1_0;
+    static constexpr int qi = QI_PTQ1_0;
+};

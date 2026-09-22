@@ -552,8 +552,6 @@ static __global__ void dequantize_block_ptq1_0(const block_ptq1_0 * __restrict__
     }
 }
 
-template <typename dst_t>
-
 #if !defined(GGML_USE_HIP)
 template <typename dst_t>
 static __device__
@@ -577,6 +575,8 @@ __forceinline__ void dequantize_ptq1_0_qs4(uint32_t packed, float d, dst_t * __r
     }
 }
 #endif // !defined(GGML_USE_HIP)
+
+template <typename dst_t>
 
 static void dequantize_row_ptq1_0_cuda(const void * __restrict__ vx,
                                        dst_t * __restrict__ y,
