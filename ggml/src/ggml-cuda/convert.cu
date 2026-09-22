@@ -607,16 +607,6 @@ static void dequantize_tq4_1s_warp_nc_cuda(const void * vx, dst_t * y,
     dequantize_block_cuda<QK_TQ4_1S, QR_TQ4_1S, dequantize_tq4_1s, dst_t>(vx, y, ne00, ne01, ne02, ne03, s01, s02, s03, stream);
 }
 
-static void dequantize_block_q8_0_f16_cuda(const void * __restrict__ vx, half * __restrict__ y, const int64_t k, cudaStream_t stream) {
-    const int num_blocks = (k + CUDA_Q8_0_NE_ALIGN - 1) / CUDA_Q8_0_NE_ALIGN;
-    if (k % CUDA_Q8_0_NE_ALIGN == 0) {
-        const bool need_check = false;
-        dequantize_block_q8_0_f16<need_check><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
-    } else {
-        const bool need_check = true;
-        dequantize_block_q8_0_f16<need_check><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
-    }
-}
 
 to_bf16_cuda_t ggml_get_to_bf16_cuda(ggml_type type) {
     switch (type) {
@@ -721,7 +711,6 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_tq4_1s_warp_cuda<half>;  // fast warp-cooperative WHT
         case GGML_TYPE_TQ3_1S:
             return dequantize_block_cont_cuda<QK_TQ3_0, QR_TQ3_1S, dequantize_tq3_1s>;
-        case GGML_TYPE_F32:
         case GGML_TYPE_Q6_0:
             return dequantize_block_cont_cuda<QK6_0, QR6_0, dequantize_q6_0>;
         case GGML_TYPE_Q6_1:

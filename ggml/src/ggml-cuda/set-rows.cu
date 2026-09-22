@@ -1891,7 +1891,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
-    else if (dst->type == GGML_TYPE_TURBO3_0) {
+    } else if (dst->type == GGML_TYPE_TURBO3_0) {
         set_rows_cuda_turbo3<idx_t>(ctx, src0, src1, dst);
     } else if (dst->type == GGML_TYPE_TURBO2_0) {
         set_rows_cuda_turbo2<idx_t>(ctx, src0, src1, dst);

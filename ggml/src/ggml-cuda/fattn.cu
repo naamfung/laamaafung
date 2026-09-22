@@ -393,6 +393,13 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
     FATTN_VEC_CASE(256, type_K, type_V)       \
     FATTN_VEC_CASE(512, type_K, type_V)       \
 
+// laamaafung: turbo/TCQ VEC kernels keep per-thread shared-memory LUTs/codebooks,
+// which exceed the 48KB smem limit at D=512 (ptxas 'uses too much shared data').
+#define FATTN_VEC_CASES_LE256(type_K, type_V) \
+    FATTN_VEC_CASE( 64, type_K, type_V)       \
+    FATTN_VEC_CASE(128, type_K, type_V)       \
+    FATTN_VEC_CASE(256, type_K, type_V)       \
+
 static ggml_type ggml_cuda_fattn_canonical_kv_type(ggml_type type) {
     return type == GGML_TYPE_F32 ? GGML_TYPE_F16 : type;
 }
