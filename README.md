@@ -42,8 +42,8 @@
   git clone -b v22 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化 + TCQ KV 量化分支（v23，非穩定）**：
-  在 `v22` 之上加入 **TCQ（Trellis-Coded Quantization）KV 量化**：`turbo3_tcq`（3.25 bpv）／`turbo2_tcq`（2.25 bpv），見下文「啟動示例」的「TCQ KV 量化」。需要更小的 KV cache 佔用時用此分支：
+- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，非穩定）**：
+  在 `v22` 之上加入 **TCQ（Trellis-Coded Quantization）KV 量化**：`turbo3_tcq`（3.25 bpv）／`turbo2_tcq`（2.25 bpv），以及 **turbo1.5 三值 KV 量化**：`turbo1.5`（2.25 bpv 有效載荷），見下文「啟動示例」的「TCQ KV 量化」與「turbo1.5 KV 量化」。需要更小的 KV cache 佔用時用此分支：
   ```sh
   git clone -b v23 https://github.com/naamfung/laamaafung.git
   ```
@@ -192,6 +192,32 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 
 > 不帶 `--kvmem*` 即為無 KVMem 版本，其餘參數不變。實測（Qwen3.5-9B IQ4_XS，RTX 3060 Ti，`-ngl 99 -c 8192`，`llama-kvmem-cli`）：`turbo3_tcq` 約 80 t/s、`turbo2_tcq` 約 83 t/s，對照 `turbo3` 84.6／`turbo4` 84.8（trellis 遍歷的常規開銷）；KVMem + `turbo3_tcq` 組合同樣通過。輸出正確性已驗證（連貫中文長文與 17×23=391 多方法計算）。
 
+turbo1.5 KV 量化（`turbo1.5`，須 v23 分支）：
+
+turbo1.5 是 turbo 系列的**三值**版本：每 32 值一塊、5 trit/byte 打包（`packed = Σ(trit_i+1)×3^i`），理論載荷 2.25 bpv、存儲口徑 4.0 bpv（16 字節/32 值，含 7 字節對齊填充）。與 `turbo2/3/4` 一樣採用 128-group 修正范數 + Walsh–Hadamard 旋轉（旋轉激活上做三值量化，K/V 寫入與 Q 變換都在 graph 層自動配對，點積數學等價），量化誤差低於同位率的標量三值。與 TCQ 不同，**turbo1.5 可與 `turbo2/3/4`／`q8_0`／`f16` 交叉混搭**（例如 `-ctk q8_0 -ctv turbo1.5`），也可 K/V 同型走專用 VEC 注意力內核（與 TCQ 一樣不參與 MMA 融合路徑）；head_dim 須為 128 的倍數（不足時緩存自動零填充到 128 對齊）。要跑 `turbo1.5` 把 `-ctk` / `-ctv` 換掉即可，其餘參數不變：
+
+```sh
+llamaServer="G:/Agents/kvmem-works/laamaafung/build-v23/bin/Release/llama-server.exe"
+############################################################
+model="C:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive/Qwen3.5-9B-Uncensored-Genesis-FITKIT-IQ4_XS-UP-4.888G-genesis-imatrix/Qwen3.5-9B-Uncensored-Genesis-FITKIT-IQ4_XS-UP-4.888G-genesis-imatrix"
+############################################################
+mmproj="G:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-GGUF-ORIGINAL/mmproj-Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-BF16.gguf"
+############################################################
+template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
+############################################################
+$llamaServer --model $model --host 0.0.0.0 --port 8008 \
+-c 262144 -n 32768 -ub 128 -b 512 -ngl 99 --parallel 1 \
+--cuda-register-host --sched-prefetch-experts 1 \
+--kvmem --kvmem-budget 32768 --kvmem-gen-reserve 8192 --kvmem-gpu-ratio 0.9 --kvmem-block-tokens 128 \
+-ctk turbo1.5 -ctv turbo1.5 \
+--reasoning on --reasoning-budget 2048 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我响应。" \
+--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --frequency-penalty 0.0 --repeat-penalty 1.0 \
+--mmproj $mmproj --no-mmproj-offload --image-min-tokens 1024 \
+--chat-template-file $template --alias Agentic-Turbo-Coder
+```
+
+> 不帶 `--kvmem*` 即為無 KVMem 版本，其餘參數不變。CLI 亦接受 `turbo1_5` 別名（`llama-bench` 同）。實測（Qwen3.5-9B IQ4_XS，RTX 3060 Ti，`-ngl 99 -c 8192`，`llama-kvmem-cli`）：`turbo1.5` 約 84 t/s，對照 `turbo3` 84.6／`turbo4` 84.8（同條件，LUT 查表的 unpack 開銷與三值解碼大體相抵）；純 `llama-cli` 無 KVMem 實測 80.9 t/s。輸出正確性已驗證（連貫中文長文與 17×23=391 多方法計算；KVMem 組合與 `llama-server -ctk turbo1.5` 亦同樣通過）。
+
 文本 + 视觉：
 
 ```sh
@@ -262,7 +288,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `-ngl 99` | `-ngl 99` | 同名同義。 |
 | `--kvmem-budget` / `--kvmem-gen-reserve` / `--kvmem-gpu-ratio` / `--kvmem-block-tokens` | 同名 | KVMem 參數一一對應（預設值見下表）。 |
 | `--no-kvmem-image-autoscale` | 同名 | **兩邊都已支援**：行數超預算的圖像會在 token 化**之前**自動縮小（見「啟用條件」）。關掉後兩邊都回同一條訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）。 |
-| `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K 與 V 分開設，但 `-ctk` 與 `-ctv` **接受完全相同的取值清單** —— `f32 / f16 / bf16 / q8_0 / q4_0 / q4_1 / iq4_nl / q5_0 / q5_1 / turbo2 / turbo3 / turbo4 / turbo3_tcq / turbo2_tcq`（同一份 `get_all_kv_cache_types()`、同一個 `kv_cache_type_from_str()` 解析器；TCQ 兩型須 v23 分支）。**turbo2/3/4 對 K 與 V 都可用，沒有「只能用於 V」的限制**（TCQ 兩型同樣 K/V 皆可，但 **K 與 V 必須同為 TCQ 系列**，不得與非 TCQ 類型混搭，見「TCQ KV 量化」）；上例只是 K 取精度、V 取壓縮的常見搭配。KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，兩者各自生效。唯一要注意的是別處的加速條件：CUDA 的 fused turbo MMA 路徑要求 **K 與 V 同型**，所以 `-ctk turbo4 -ctv turbo3` 這類混搭不會走上融合路徑 —— 但**仍然在 GPU 上執行**，只是回退到一般注意力派發（依架構走 `MMA_F16` 或 `VEC`，詳見下文「TurboQuant」一節），並非沒有加速。 |
+| `--kv-dtype q8_0` | `-ctk q8_0 -ctv turbo4` | llama-server **沒有** `--kv-dtype`：K 與 V 分開設，但 `-ctk` 與 `-ctv` **接受完全相同的取值清單** —— `f32 / f16 / bf16 / q8_0 / q4_0 / q4_1 / iq4_nl / q5_0 / q5_1 / turbo2 / turbo3 / turbo4 / turbo3_tcq / turbo2_tcq / turbo1.5`（同一份 `get_all_kv_cache_types()`、同一個 `kv_cache_type_from_str()` 解析器；TCQ 兩型與 `turbo1.5` 須 v23 分支）。**turbo2/3/4 對 K 與 V 都可用，沒有「只能用於 V」的限制**（TCQ 兩型同樣 K/V 皆可，但 **K 與 V 必須同為 TCQ 系列**，不得與非 TCQ 類型混搭，見「TCQ KV 量化」；`turbo1.5` 同樣 K/V 皆可，且**可與非 TCQ 類型交叉混搭**，見「turbo1.5 KV 量化」）；上例只是 K 取精度、V 取壓縮的常見搭配。KVMem 直接從 `llama_memory_params.type_k/type_v` 取類型，兩者各自生效。唯一要注意的是別處的加速條件：CUDA 的 fused turbo MMA 路徑要求 **K 與 V 同型**，所以 `-ctk turbo4 -ctv turbo3` 這類混搭不會走上融合路徑 —— 但**仍然在 GPU 上執行**，只是回退到一般注意力派發（依架構走 `MMA_F16` 或 `VEC`，詳見下文「TurboQuant」一節），並非沒有加速。 |
 | `--enable-thinking`、`--reasoning-effort`、`--reasoning-budget` | `--reasoning on`、`--reasoning-budget`（＋ `--reasoning-format/-preserve/-temp/-top-p/...`） | llama-server 用 `--reasoning [on\|off\|auto]` 開關；「思考強度」由 `--reasoning-budget` 與一整套 `--reasoning-*` 採樣覆蓋表達，沒有 `effort` 這個名字。 |
 | `--mmproj` / `--no-mmproj-offload` / `--image-min-tokens` | 同名 | 同名同義；mmproj × KVMem 已支持（見下方「啟用條件」的 `--kvmem-budget` 要求）。 |
 | `--chat-template-file`、`--temp/--top-p/--top-k/--min-p/--*-penalty` | 同名 | 同名同義。 |
@@ -398,13 +424,13 @@ llama_context::from_params: n_ubatch set to auto, selected value: 4096 based on 
 
 #### TurboQuant 键值缓存 與 MMA 融合路徑
 
-透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`，v23 分支另支援 TCQ 兩型 `turbo3_tcq` / `turbo2_tcq`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；條件不滿足時（Volta 及更早、或 K/V 不同型等）會自動回退到一般注意力派發，仍在 GPU 上執行（詳見本節末尾）。
+透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`，v23 分支另支援 TCQ 兩型 `turbo3_tcq` / `turbo2_tcq` 與三值型 `turbo1.5`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；條件不滿足時（Volta 及更早、或 K/V 不同型等）會自動回退到一般注意力派發，仍在 GPU 上執行（詳見本節末尾）。
 
 | 環境變數 | 預設值 | 描述 |
 | --- | --- | --- |
 | `GGML_TURBO_MMA_FUSED` | `1`（開啟） | 控制 CUDA fused turbo MMA 路徑。設為 `0` 可關閉融合，回退到一般注意力派發（依架構走 `MMA_F16` 或 `VEC`；功能完整，僅失去內聯反量化與 GQA 打包的額外收益）。 |
 
-MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo2`（另需 Turing 及以上的 tensor core、`V->ne[0] == Q->ne[0]`，且 `Q->ne[0]` 為 128 或 256；`turbo2` + head_dim 256 刻意不融合，見 `ggml/src/ggml-cuda/fattn.cu` 的註解）。**TCQ 兩型（`turbo3_tcq` / `turbo2_tcq`）不參與 MMA 融合**：它們始終走專用的 VEC 注意力內核（碼本常駐共享記憶體的逐元素點積路徑），要求 head_dim 為 128 或 256，且 K 與 V 必須同為 TCQ 系列（可交叉搭配）。
+MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo2`（另需 Turing 及以上的 tensor core、`V->ne[0] == Q->ne[0]`，且 `Q->ne[0]` 為 128 或 256；`turbo2` + head_dim 256 刻意不融合，見 `ggml/src/ggml-cuda/fattn.cu` 的註解）。**TCQ 兩型（`turbo3_tcq` / `turbo2_tcq`）與三值型 `turbo1.5` 不參與 MMA 融合**：它們始終走專用的 VEC 注意力內核（TCQ 是碼本常駐共享記憶體的逐元素點積路徑、`turbo1.5` 是 q8_1 Q 路徑的逐元素點積路徑），要求 head_dim 為 128 或 256。TCQ 要求 K 與 V 同為 TCQ 系列（可交叉搭配）；`turbo1.5` 則可與 `turbo2/3/4`／`q8_0`／`f16` 自由混搭（11 種 K/V 組合都有實例化內核），含 `turbo1.5` 的混搭同樣走 VEC 路徑。
 
 條件不滿足時**不是失去 GPU 加速**，而是回退到一般注意力派發（仍在 CUDA 上跑、KV 壓縮效果照舊），實際走哪一條視架構與 batch 而定：
 - **Volta 及更早**：無 tensor core → TILE / VEC。

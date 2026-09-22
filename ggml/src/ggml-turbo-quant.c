@@ -1025,6 +1025,97 @@ size_t quantize_tq4_1s(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst
     return nrows * row_size;
 }
 
+/* ---------- TURBO1_5: WHT-rotated ternary {-C, 0, +C} ---------- */
+
+#define TURBO1_5_C        0.107632f
+#define TURBO1_5_BOUNDARY 0.053837f
+
+static const int turbo1_5_pow3[5] = {1, 3, 9, 27, 81};
+
+void quantize_row_turbo1_5_ref(const float * GGML_RESTRICT x, block_turbo1_5 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO1_5 == 0);
+
+    // WHT group size: 128 if 128-aligned, else 64 (matching the CUDA set-rows kernel dispatch)
+    int group_size = (k % 128 == 0) ? 128 : 64;
+    assert(k % group_size == 0);
+
+    const int n_groups = k / group_size;
+    const int blocks_per_group = group_size / QK_TURBO1_5;
+
+    for (int g = 0; g < n_groups; g++) {
+        const float * grp_src = x + g * group_size;
+        block_turbo1_5 * grp_dst = y + g * blocks_per_group;
+
+        // 1. L2 norm over the group
+        float norm_sq = 0.0f;
+        float buf[128];  // max group_size
+        for (int j = 0; j < group_size; j++) {
+            buf[j] = grp_src[j];
+            norm_sq += buf[j] * buf[j];
+        }
+        float grp_norm = sqrtf(norm_sq);
+        float inv_norm = (grp_norm > 1e-10f) ? 1.0f / grp_norm : 0.0f;
+
+        // 2. Normalize
+        for (int j = 0; j < group_size; j++) buf[j] *= inv_norm;
+
+        // 3. Forward WHT rotation
+        turbo_cpu_fwht(buf, group_size);
+
+        // 4. Ternary quantize + pack 5 trits per byte into sub-blocks
+        float recon_sq = 0.0f;
+        for (int b = 0; b < blocks_per_group; b++) {
+            block_turbo1_5 * blk = &grp_dst[b];
+            const int off = b * QK_TURBO1_5;
+
+            memset(blk->trits, 0, 7);
+            memset(blk->_pad, 0, 7);
+
+            for (int j = 0; j < QK_TURBO1_5; j++) {
+                const float v = buf[off + j];
+                const int trit = (v < -TURBO1_5_BOUNDARY) ? -1 : (v > TURBO1_5_BOUNDARY) ? 1 : 0;
+                recon_sq += (trit != 0) ? (TURBO1_5_C * TURBO1_5_C) : 0.0f;
+                blk->trits[j / 5] |= (uint8_t)((trit + 1) * turbo1_5_pow3[j % 5]);
+            }
+        }
+
+        // 5. Corrected norm: grp_norm / recon_norm (matching CUDA kernel)
+        float recon_norm = sqrtf(recon_sq);
+        float corrected = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
+        for (int b = 0; b < blocks_per_group; b++) {
+            grp_dst[b].norm = GGML_FP32_TO_FP16(corrected);
+        }
+    }
+}
+
+void dequantize_row_turbo1_5(const block_turbo1_5 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO1_5 == 0);
+    const int nb = k / QK_TURBO1_5;
+    for (int block = 0; block < nb; block++) {
+        const float norm = GGML_FP16_TO_FP32(x[block].norm);
+        for (int j = 0; j < QK_TURBO1_5; j++) {
+            const int trit = ((x[block].trits[j / 5] / turbo1_5_pow3[j % 5]) % 3) - 1;
+            y[block * QK_TURBO1_5 + j] = (float)trit * TURBO1_5_C * norm;
+        }
+    }
+}
+
+size_t quantize_turbo1_5(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                         int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    assert(n_per_row % QK_TURBO1_5 == 0);
+
+    size_t row_size = (n_per_row / QK_TURBO1_5) * sizeof(block_turbo1_5);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_turbo1_5_ref(
+            src + row * n_per_row,
+            (block_turbo1_5 *)((char *)dst + row * row_size),
+            n_per_row
+        );
+    }
+    return nrows * row_size;
+}
+
 /* ---------- TURBO3_TCQ: 3-bit Trellis-Coded Quantization (CPU fallback) ---------- */
 
 void dequantize_row_turbo3_tcq(const block_turbo3_tcq * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {

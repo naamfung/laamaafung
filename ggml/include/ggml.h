@@ -437,8 +437,9 @@ extern "C" {
         GGML_TYPE_Q2_0    = 47,
         GGML_TYPE_TURBO3_TCQ = 48, // TurboQuant 3-bit TCQ: Viterbi trellis-coded quantization
         GGML_TYPE_TURBO2_TCQ = 49, // TurboQuant 2-bit TCQ: Viterbi trellis-coded quantization
+        GGML_TYPE_TURBO1_5 = 50, // TurboQuant 1.5: WHT-rotated ternary {-C,0,+C}, 5 trits/byte
         // Prism-private Q2_0 at group size 128 (upstream Q2_0 is group 64). High id so it
-        // slots above the types laamaafung defines; type_traits is sized to COUNT (144) with 50..141 unused.
+        // slots above the types laamaafung defines; type_traits is sized to COUNT (144) with 51..141 unused.
         GGML_TYPE_PQ2_0 = 142, // Prism-private Q2_0 at group size 128
         GGML_TYPE_PTQ1_0 = 143, // Prism-private ternary, group 128
         GGML_TYPE_COUNT   = 144,

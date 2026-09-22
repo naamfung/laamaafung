@@ -1729,7 +1729,7 @@ int main(int argc, char ** argv) {
             bool ok = false;
             const ggml_type t = kvmem_parse_cache_type(need(arg), &ok);
             if (!ok) {
-                fprintf(stderr, "unsupported cache type (want f16|f32|q8_0|q5_0|q4_0|turbo2|turbo3|turbo4|turbo3_tcq|turbo2_tcq)\n");
+                fprintf(stderr, "unsupported cache type (want f16|f32|q8_0|q5_0|q4_0|turbo2|turbo3|turbo4|turbo3_tcq|turbo2_tcq|turbo1.5)\n");
                 return 1;
             }
             if (eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {

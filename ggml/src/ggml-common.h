@@ -406,6 +406,18 @@ typedef struct {
 } block_turbo2_tcq;                     // 36 bytes total for 128 values (2.25 bpv)
 static_assert(sizeof(block_turbo2_tcq) == sizeof(ggml_half) + 34, "wrong turbo2_tcq block size/padding");
 
+// TurboQuant1.5: WHT-rotated ternary {-C, 0, +C} KV cache (C = 0.107632).
+// One block = 32 elements. 5 trits per byte, packed = Σ (trit_i+1) × 3^i; 32 trits → 7 bytes.
+// The L2 norm is computed per 128-element rotation group; all 4 sub-blocks of a group
+// carry the same corrected norm (grp_norm / recon_norm). 2.25 bpv effective payload.
+#define QK_TURBO1_5 32
+typedef struct {
+    ggml_half norm;                     //  2 bytes: corrected group L2 norm (shared across group sub-blocks)
+    uint8_t   trits[7];                 //  7 bytes: 32 trits, 5 per byte (base-3, trit+1 in {0,1,2})
+    uint8_t   _pad[7];                  //  7 bytes: alignment padding (zeroed by writers)
+} block_turbo1_5;                       // 16 bytes per 32 values (4.0 bpv stored, 2.25 bpv payload)
+static_assert(sizeof(block_turbo1_5) == 2 + 14, "wrong turbo1_5 block size/padding");
+
 // TQ3_1S: WHT-rotated 3-bit weight quantization (8-level Lloyd-Max for N(0,1))
 // Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
 // Per block: d0(fp16) + d1(fp16) + 3-bit indices packed (12 bytes) = 16 bytes per 32 values

@@ -608,6 +608,7 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
     } else if (src0->type == src1->type && (src0->type == GGML_TYPE_TURBO2_0 ||
                                               src0->type == GGML_TYPE_TURBO3_0 ||
                                               src0->type == GGML_TYPE_TURBO4_0 ||
+                                              src0->type == GGML_TYPE_TURBO1_5 ||
                                               src0->type == GGML_TYPE_TURBO3_TCQ ||
                                               src0->type == GGML_TYPE_TURBO2_TCQ)) {
         // Non-contiguous same-type turbo copy: raw byte copy

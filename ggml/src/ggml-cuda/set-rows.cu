@@ -1094,6 +1094,368 @@ static void set_rows_cuda_turbo2(
     }
 }
 
+// ---- TurboQuant1.5 set_rows: 128/64-element WHT groups + ternary {-C,0,+C} quantization ----
+//
+// GROUP_SIZE/32 = 4 sub-blocks per group (QK_TURBO1_5 = 32). One norm per group
+// (written to all 4 sub-blocks). Ternary packing: 5 trits per byte, packed = Σ (trit_i+1) × 3^i.
+// Trit mapping: trit ∈ {-1,0,+1} → trit_val ∈ {0,1,2}.
+
+template <typename idx_t, int GROUP_SIZE>
+__launch_bounds__(128)
+static __global__ void k_set_rows_turbo1_5(
+        const float * __restrict__ src0,
+        const idx_t * __restrict__ src1,
+        block_turbo1_5 * __restrict__ dst,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t ne10,
+        const int64_t ne11,
+        const int64_t ne12,
+        const int64_t ne13,
+        const int64_t s01,
+        const int64_t s02,
+        const int64_t s03,
+        const int64_t s10,
+        const int64_t s11,
+        const int64_t s12,
+        const int64_t s1,
+        const int64_t s2,
+        const int64_t s3) {
+
+    static_assert(GROUP_SIZE == 128 || GROUP_SIZE == 64, "GROUP_SIZE must be 128 or 64");
+
+    const int j = threadIdx.x;
+
+    // Decode blockIdx.x → (i_grp, i01, i02, i03)
+    constexpr int blocks_per_group = GROUP_SIZE / QK_TURBO1_5;
+    const int64_t n_groups_per_row = ne00 / GROUP_SIZE;
+    const int64_t g = blockIdx.x;
+    const int64_t i_grp = g % n_groups_per_row;
+    int64_t       tmp   = g / n_groups_per_row;
+    const int64_t i01   = tmp % ne01;
+    tmp                 = tmp / ne01;
+    const int64_t i02   = tmp % ne12;
+    const int64_t i03   = tmp / ne12;
+
+    const int64_t i12 = i02;
+    const int64_t i11 = i01 % ne11;
+    const int64_t i10 = i01;
+
+    const int64_t dst_row = *(src1 + i10*s10 + i11*s11 + i12*s12);
+    const float * src_row = src0 + i01*s01 + i02*s02 + i03*s03;
+    block_turbo1_5 * dst_row_ptr = (block_turbo1_5 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
+    block_turbo1_5 * blk_base    = dst_row_ptr + i_grp * blocks_per_group;
+
+    // ---- Step 1: Load element j (coalesced) ----
+    __shared__ float x[GROUP_SIZE];
+    x[j] = src_row[i_grp * GROUP_SIZE + j];
+    __syncthreads();
+
+    // ---- InnerQ: calibrate on original (unscaled) values ----
+    if (d_innerq_calibrating) {
+        atomicAdd(&d_innerq_sq_accum[j], x[j] * x[j]);
+        if (j == 0) atomicAdd(&d_innerq_count, 1);
+    }
+
+    // ---- InnerQ: apply channel scale (only when active) ----
+    if (d_innerq_active) {
+        x[j] *= d_innerq_scale[j];
+    }
+    __syncthreads();
+
+    // ---- Step 2: Parallel L2 norm ----
+    constexpr int n_warps = GROUP_SIZE / WARP_SIZE;
+    __shared__ float warp_accum[n_warps];
+    float v = x[j];
+    float v2 = v * v;
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        v2 += __shfl_xor_sync(0xffffffff, v2, offset);
+    if (j % WARP_SIZE == 0)
+        warp_accum[j / WARP_SIZE] = v2;
+    __syncthreads();
+
+    __shared__ float s_norm_sq;
+    if (j == 0) {
+        float total = 0.0f;
+        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
+        s_norm_sq = total;
+    }
+    __syncthreads();
+    const float inv_norm  = (s_norm_sq > 1e-20f) ? rsqrtf(s_norm_sq) : 0.0f;
+    const float grp_norm  = s_norm_sq * inv_norm;
+
+    // ---- Step 3: Normalize ----
+    x[j] *= inv_norm;
+    __syncthreads();
+
+    // ---- Step 4: Forward WHT (signs1 → butterfly → signs2, normalized) ----
+    if (GROUP_SIZE == 128) {
+        x[j] *= TURBO_WHT_SIGNS1[j];
+    } else {
+        x[j] *= TURBO_WHT_SIGNS1_64[j];
+    }
+    __syncthreads();
+
+#define WHT_STAGE_T15(h) \
+    if (j % (2*(h)) < (h)) { float a = x[j], b = x[j+(h)]; x[j] = a+b; x[j+(h)] = a-b; } \
+    __syncthreads();
+
+    WHT_STAGE_T15(1)
+    WHT_STAGE_T15(2)
+    WHT_STAGE_T15(4)
+    WHT_STAGE_T15(8)
+    WHT_STAGE_T15(16)
+    WHT_STAGE_T15(32)
+    if (GROUP_SIZE == 128) { WHT_STAGE_T15(64) }
+#undef WHT_STAGE_T15
+
+    constexpr float inv_sqrt_group = (GROUP_SIZE == 128) ? 0.08838834764831845f : 0.125f;
+    if (GROUP_SIZE == 128) {
+        x[j] = x[j] * inv_sqrt_group * TURBO_WHT_SIGNS2[j];
+    } else {
+        x[j] = x[j] * inv_sqrt_group * TURBO_WHT_SIGNS2_64[j];
+    }
+    __syncthreads();
+
+    // ---- Step 5: Ternary quantize ----
+    const float rv = x[j];
+    const int trit = (rv < -TURBO1_5_BOUNDARY) ? -1 : (rv > TURBO1_5_BOUNDARY) ? 1 : 0;
+
+    // ---- Step 6: Pack trits (warp-cooperative, 5 trits per byte via __shfl_sync) ----
+    // Warp warp_id handles turbo1.5 sub-block warp_id (elements warp_id*32 .. warp_id*32+31).
+    const int warp_id = j / WARP_SIZE;
+    const int lane    = j % WARP_SIZE;
+    block_turbo1_5 * blk = blk_base + warp_id;
+
+    const int my_trit_val = trit + 1;  // map {-1,0,+1} → {0,1,2}
+    const int byte_idx = lane / 5;     // bytes 0..5 have 5 trits; byte 6 has 2 trits
+    const int trit_pos = lane % 5;
+    static const int pow3[5] = {1, 3, 9, 27, 81};
+
+    int packed = 0;
+#pragma unroll
+    for (int k = 0; k < 5; k++) {
+        int t = __shfl_sync(0xffffffff, my_trit_val, byte_idx * 5 + k);
+        packed += t * pow3[k];
+    }
+    // Only the first thread in each 5-trit group writes (trit_pos == 0),
+    // and only for valid byte indices (< 7)
+    if (trit_pos == 0 && byte_idx < 7) {
+        blk->trits[byte_idx] = (uint8_t)packed;
+    }
+
+    // Zero the padding bytes (one thread per block)
+    if (lane == 0) {
+        for (int p = 0; p < 7; p++) {
+            blk->_pad[p] = 0;
+        }
+    }
+
+    // ---- Step 7: Reconstruction norm ----
+    // recon_norm_sq = C² × count_nonzero (since trit² = 1 for ±1, 0 for 0)
+    float rc = (trit != 0) ? (TURBO1_5_C_VAL * TURBO1_5_C_VAL) : 0.0f;
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        rc += __shfl_xor_sync(0xffffffff, rc, offset);
+    if (j % WARP_SIZE == 0)
+        warp_accum[j / WARP_SIZE] = rc;
+    __syncthreads();
+
+    __shared__ float s_recon_sq;
+    if (j == 0) {
+        float total = 0.0f;
+        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
+        s_recon_sq = total;
+    }
+    __syncthreads();
+    const float corrected_norm = (s_recon_sq > 1e-20f) ? grp_norm * rsqrtf(s_recon_sq) : grp_norm;
+
+    // ---- Step 8: Write corrected norm (one thread per turbo1.5 sub-block) ----
+    if (lane == 0) blk->norm = __float2half(corrected_norm);
+
+    GGML_UNUSED(ne10);
+    GGML_UNUSED(ne13);
+}
+
+// ---- TurboQuant1.5 tail kernel: straight ternary quantize without WHT rotation ----
+
+template <typename idx_t>
+static __global__ void k_set_rows_turbo1_5_tail(
+        const float * __restrict__ src0,
+        const idx_t * __restrict__ src1,
+        block_turbo1_5 * __restrict__ dst,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t ne10,
+        const int64_t ne11,
+        const int64_t ne12,
+        const int64_t ne13,
+        const int64_t s01,
+        const int64_t s02,
+        const int64_t s03,
+        const int64_t s10,
+        const int64_t s11,
+        const int64_t s12,
+        const int64_t s1,
+        const int64_t s2,
+        const int64_t s3,
+        const int tail_size) {
+
+    const int j = threadIdx.x;
+
+    int64_t tmp = blockIdx.x;
+    const int64_t i01 = tmp % ne01; tmp /= ne01;
+    const int64_t i02 = tmp % ne12;
+    const int64_t i03 = tmp / ne12;
+
+    const int64_t i11 = i01 % ne11;
+    const int64_t i10 = i01;
+    const int64_t i12 = i02;
+
+    const int64_t dst_row = *(src1 + i10*s10 + i11*s11 + i12*s12);
+    const float * src_row = src0 + i01*s01 + i02*s02 + i03*s03;
+    block_turbo1_5 * dst_row_ptr = (block_turbo1_5 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
+
+    // Tail starts after all full groups (use 128 as group size)
+    const int64_t n_full = ne00 / 128;
+    const int64_t tail_start = n_full * 128;
+    block_turbo1_5 * blk_base = dst_row_ptr + n_full * (128 / QK_TURBO1_5);
+
+    const float val = src_row[tail_start + j];
+
+    // ---- L2 norm ----
+    const int n_warps = tail_size / WARP_SIZE;
+    const int warp_id = j / WARP_SIZE;
+    const int lane    = j % WARP_SIZE;
+
+    __shared__ float warp_accum[4];
+    float v2 = val * val;
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        v2 += __shfl_xor_sync(0xffffffff, v2, offset);
+    if (lane == 0) warp_accum[warp_id] = v2;
+    __syncthreads();
+
+    __shared__ float s_norm_sq;
+    if (j == 0) {
+        float total = 0.0f;
+        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
+        s_norm_sq = total;
+    }
+    __syncthreads();
+    const float inv_norm = (s_norm_sq > 1e-20f) ? rsqrtf(s_norm_sq) : 0.0f;
+    const float grp_norm = s_norm_sq * inv_norm;
+
+    // ---- Normalize (no WHT!) ----
+    const float rv = val * inv_norm;
+
+    // ---- Ternary quantize ----
+    const int trit = (rv < -TURBO1_5_BOUNDARY) ? -1 : (rv > TURBO1_5_BOUNDARY) ? 1 : 0;
+
+    // ---- Pack trits ----
+    block_turbo1_5 * blk = blk_base + warp_id;
+
+    const int my_trit_val = trit + 1;
+    const int byte_idx = lane / 5;
+    const int trit_pos = lane % 5;
+    static const int pow3[5] = {1, 3, 9, 27, 81};
+
+    int packed = 0;
+#pragma unroll
+    for (int k = 0; k < 5; k++) {
+        int t = __shfl_sync(0xffffffff, my_trit_val, byte_idx * 5 + k);
+        packed += t * pow3[k];
+    }
+    if (trit_pos == 0 && byte_idx < 7) {
+        blk->trits[byte_idx] = (uint8_t)packed;
+    }
+
+    if (lane == 0) {
+        for (int p = 0; p < 7; p++) blk->_pad[p] = 0;
+    }
+
+    // ---- Reconstruction norm ----
+    float rc = (trit != 0) ? (TURBO1_5_C_VAL * TURBO1_5_C_VAL) : 0.0f;
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        rc += __shfl_xor_sync(0xffffffff, rc, offset);
+    if (lane == 0) warp_accum[warp_id] = rc;
+    __syncthreads();
+
+    __shared__ float s_recon_sq;
+    if (j == 0) {
+        float total = 0.0f;
+        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
+        s_recon_sq = total;
+    }
+    __syncthreads();
+    const float corrected_norm = (s_recon_sq > 1e-20f) ? grp_norm * rsqrtf(s_recon_sq) : grp_norm;
+
+    if (lane == 0) blk->norm = __float2half(corrected_norm);
+
+    GGML_UNUSED(ne10);
+    GGML_UNUSED(ne13);
+    GGML_UNUSED(ne00);
+}
+
+template<typename idx_t>
+static void set_rows_cuda_turbo1_5(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+
+    const float * src0_d = (const float *)src0->data;
+    const idx_t * src1_d = (const idx_t *)src1->data;
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+    GGML_ASSERT(ne00 % QK_TURBO1_5 == 0);
+
+    cudaStream_t stream = ctx.stream();
+
+    int group_size = 128;
+    memcpy(&group_size, dst->op_params, sizeof(int));
+    if (group_size != 64 && group_size != 128) group_size = 128;
+    GGML_ASSERT(ne00 % group_size == 0);
+
+    const int64_t n_full_groups   = ne00 / group_size;
+    const int     tail_size       = (int)(ne00 % group_size);
+
+    const int64_t s01 = nb01/sizeof(float);
+    const int64_t s02 = nb02/sizeof(float);
+    const int64_t s03 = nb03/sizeof(float);
+    const int64_t s10 = nb10/sizeof(idx_t);
+    const int64_t s11 = nb11/sizeof(idx_t);
+    const int64_t s12 = nb12/sizeof(idx_t);
+
+    // InnerQ: check/finalize calibration before kernel launch
+    turbo_innerq_check_finalize(group_size, ne00);
+
+    if (n_full_groups > 0) {
+        const int64_t ne_total = n_full_groups * ne01 * ne02 * ne03;
+        if (group_size == 128) {
+            k_set_rows_turbo1_5<idx_t, 128><<<(int)ne_total, 128, 0, stream>>>(
+                src0_d, src1_d, (block_turbo1_5 *)dst->data,
+                ne00, ne01, ne10, ne11, ne12, ne13,
+                s01, s02, s03, s10, s11, s12,
+                nb1, nb2, nb3);
+        } else {
+            k_set_rows_turbo1_5<idx_t, 64><<<(int)ne_total, 64, 0, stream>>>(
+                src0_d, src1_d, (block_turbo1_5 *)dst->data,
+                ne00, ne01, ne10, ne11, ne12, ne13,
+                s01, s02, s03, s10, s11, s12,
+                nb1, nb2, nb3);
+        }
+    }
+
+    if (tail_size > 0) {
+        GGML_ASSERT(tail_size % QK_TURBO1_5 == 0);
+        const int64_t n_rows = ne01 * ne02 * ne03;
+        k_set_rows_turbo1_5_tail<idx_t><<<(int)n_rows, tail_size, 0, stream>>>(
+            src0_d, src1_d, (block_turbo1_5 *)dst->data,
+            ne00, ne01, ne10, ne11, ne12, ne13,
+            s01, s02, s03, s10, s11, s12,
+            nb1, nb2, nb3, tail_size);
+    }
+}
+
 // ---- TurboQuant4 set_rows: 128-element groups with WHT rotation + 4-bit quantization ----
 //
 // turbo4 block size IS the WHT group size (128), so 1 CUDA block = 1 turbo4 block.
@@ -1403,6 +1765,8 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
         set_rows_cuda_turbo2<idx_t>(ctx, src0, src1, dst);
     } else if (dst->type == GGML_TYPE_TURBO4_0) {
         set_rows_cuda_turbo4<idx_t>(ctx, src0, src1, dst);
+    } else if (dst->type == GGML_TYPE_TURBO1_5) {
+        set_rows_cuda_turbo1_5<idx_t>(ctx, src0, src1, dst);
     } else if (dst->type == GGML_TYPE_TURBO3_TCQ) {
         load_tcq_norm_alpha();
         GGML_ASSERT(ne00 % QK_TURBO3_TCQ == 0);
