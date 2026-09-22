@@ -324,6 +324,16 @@ struct gguf_reader {
         if (!read(tmp)) {
             return false;
         }
+        // laamaafung compatibility: GGUF files saved with the old 0.18 baseline
+        // may carry these tensor type numbers; remap to the renumbered enum.
+        // (45/46/47 cannot occur in new-format files: beellama's 45/46/47 are
+        // KV-only cache types that are never written into GGUF.)
+        switch (tmp) {
+            case 45: tmp = GGML_TYPE_TQ3_1S; break; // old baseline TQ3_1S
+            case 46: tmp = GGML_TYPE_TQ4_1S; break; // old baseline TQ4_1S
+            case 47: tmp = GGML_TYPE_Q2_0;   break; // old baseline Prism Q2_0 - identical block layout/traits as current GGML_TYPE_Q2_0
+            default: break;
+        }
         dst = ggml_type(tmp);
         return true;
     }
