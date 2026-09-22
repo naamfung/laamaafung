@@ -529,6 +529,21 @@ struct server_slot {
         return n_remaining > 0; // no budget
     }
 
+#if defined(LLAMA_KVMEM)
+    // KVMem keeps a tiered store next to the KV cache. Its GPU slot pool is
+    // budget (pinned retrieval working set) + gen_reserve (decode slack), so
+    // slot.n_ctx - which is the whole context - says nothing about whether the
+    // *next* decode step still fits. Ask the adapter directly: can it still
+    // append one more token at the current store end? A false here is the same
+    // condition that used to surface as "no free GPU slot" -> rc=1 ->
+    // "Context size has been exceeded", except now it stops cleanly first.
+    bool kvmem_can_append_one() {
+        std::string reason;
+        const uint32_t end = llama_kvmem_store_n_tokens();
+        return llama_kvmem_can_append(end, /*generation_rows=*/1, /*all_history=*/false, reason);
+    }
+#endif
+
     bool is_processing() const {
         return state != SLOT_STATE_IDLE;
     }
@@ -2621,6 +2636,21 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     slot.prompt.n_tokens(), slot.task->n_tokens(), slot.n_decoded, slot.n_ctx);
         }
 
+#if defined(LLAMA_KVMEM)
+        // KVMem: gen_reserve, not n_ctx, is what caps a single turn's output.
+        // Stop before the decode that would fail, so the client gets a normal
+        // finish_reason=length instead of a torn-down request.
+        if (params_base.kvmem && slot.has_next_token && !slot.kvmem_can_append_one()) {
+            slot.truncated      = true;
+            slot.stop           = STOP_TYPE_LIMIT;
+            slot.has_next_token = false;
+
+            SLT_WRN(slot, "stopped: KVMem generation reserve exhausted, n_decoded = %d, "
+                    "store_n_tokens = %u (raise --kvmem-gen-reserve for longer turns)\n",
+                    slot.n_decoded, llama_kvmem_store_n_tokens());
+        }
+#endif
+
         // check the limits
         if (slot.n_decoded > 0 && slot.has_next_token && !slot.has_budget(params_base)) {
             slot.stop           = STOP_TYPE_LIMIT;
@@ -4696,7 +4726,20 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 if (n_batch == 1 && ret == 1) {
                     // TODO: try to terminate only the largest active slot/sequence and continue with the rest
                     //       need to remove the tokens from the current batch too
-                    err = "Context size has been exceeded.";
+#if defined(LLAMA_KVMEM)
+                    // With KVMem the whole context is not the limit: a slot pool
+                    // (budget + gen_reserve) is. "Context size has been exceeded"
+                    // would point the user at --ctx-size / --context-shift, which
+                    // cannot help. Name the real knob instead.
+                    if (params_base.kvmem) {
+                        err = "KVMem ran out of GPU slots for this request. The pinned retrieval "
+                              "working set cannot be evicted, so a single turn is capped by "
+                              "--kvmem-gen-reserve - raise it, or lower --kvmem-budget, and retry.";
+                    } else
+#endif
+                    {
+                        err = "Context size has been exceeded.";
+                    }
                 }
 
                 if (ret == -1) {
