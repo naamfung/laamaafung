@@ -65,19 +65,58 @@ https://huggingface.co/mudler/Qwen-AgentWorld-35B-A3B-APEX-GGUF/tree/main
 Q80 + Q80：
 
 ```sh
-GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-repeat-penalty 1.1 --reasoning-repeat-last-n 256 --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action boost --cycle-boost-factor 0.5 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe \
+--model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" \
+--ctx-size 131072 --flash-attn on \
+--reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" \
+--reasoning-format deepseek --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-repeat-penalty 1.1 --reasoning-repeat-last-n 256 \
+--fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified \
+--cache-type-k q8_0 --cache-type-v q8_0 \
+--host 0.0.0.0 --port 8008 \
+--batch-size auto --ubatch-size auto --load-mode mlock-ram --no-mmproj \
+--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 \
+--temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 \
+--jinja --spec-type draft-mtp --spec-draft-n-max 4 \
+--cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action boost --cycle-boost-factor 0.5 \
+--chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 Q80 + TURBO4：
 
 ```sh
-GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all -ngld all --n-cpu-moe 33 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v turbo4 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe \
+--model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" \
+--ctx-size 131072 --flash-attn on \
+--reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" \
+--reasoning-format deepseek \
+--fit 1 -ngl all -ngld all --n-cpu-moe 33 --threads 18 --threads-http 2 --parallel 1 --kv-unified \
+--cache-type-k q8_0 --cache-type-v turbo4 \
+--host 0.0.0.0 --port 8008 \
+--batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj \
+--cache-prompt --cache-ram 8192 \
+--temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 \
+--reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 \
+--jinja --spec-type draft-mtp --spec-draft-n-max 4 \
+--chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 TURBO4 + TURBO3：
 
 ```sh
-GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe --model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" --ctx-size 131072 --flash-attn on --reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit on -ngl all -ngld all --n-cpu-moe 33 --threads 10 --threads-http 2 --parallel 1 --kv-unified --cache-type-k turbo4 --cache-type-v turbo3 --host 0.0.0.0 --port 8008 --batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj --cache-prompt --cache-ram 8192 --temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+GGML_CUDA_REGISTER_HOST=1 D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe \
+--model "D:/models/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf" \
+--ctx-size 131072 --flash-attn on \
+--reasoning on --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" \
+--reasoning-format deepseek \
+--fit on -ngl all -ngld all --n-cpu-moe 33 --threads 10 --threads-http 2 --parallel 1 --kv-unified \
+--cache-type-k turbo4 --cache-type-v turbo3 \
+--host 0.0.0.0 --port 8008 \
+--batch-size auto --ubatch-size auto --ctx-checkpoints 42 --load-mode mlock-ram --no-mmproj \
+--cache-prompt --cache-ram 8192 \
+--temp 0.6 --top-p 0.85 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 \
+--reasoning-temp 1.0 --reasoning-top-p 0.95 --reasoning-presence-penalty 1.07 \
+--jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose \
+--chat-template-file D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 KVMem（分層/稀疏 KV 記憶，`llama-server` 本體直接驅動，須 v21 分支）：
@@ -408,7 +447,19 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 如果須要處理可能超過上下文限制的請求，可以加入 `--prompt-truncate`（初始截斷）或 `--context-shift`（運行時 K-shift，隱含啟用初始截斷）。對於真正採用 SWA 架構的模型，若需要生成階段的運行時 K-shift 完整可用，須同時加入 `--swa-full`（**以上兩者在使用 `--kvmem` 時皆不適用**，見下文「KVMem」一節）：
 
 ```sh
-./laamaafung/build/bin/Release/llama-server.exe --model /path/to/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf --ctx-size 131072 --flash-attn on --reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" --reasoning-format deepseek --fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 --host 0.0.0.0 --port 8008 -b 16384 -ub 256 --load-mode mlock --no-mmproj --cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --context-shift --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 --jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --verbosity 5 --chat-template-file /path/to/iStartModel/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
+./laamaafung/build/bin/Release/llama-server.exe \
+--model /path/to/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf \
+--ctx-size 131072 --flash-attn on \
+--reasoning on --reasoning-preserve --reasoning-budget 8192 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我回答。" \
+--reasoning-format deepseek \
+--fit 1 -ngl all --n-cpu-moe 34 --threads 18 --threads-http 2 --parallel 1 --kv-unified \
+--cache-type-k q8_0 --cache-type-v q8_0 \
+--host 0.0.0.0 --port 8008 \
+-b 16384 -ub 256 --load-mode mlock --no-mmproj \
+--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64 --context-shift \
+--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat_penalty 1.0 --presence_penalty 0.0 \
+--jinja --spec-type draft-mtp --spec-draft-n-max 4 --verbose --verbosity 5 \
+--chat-template-file /path/to/iStartModel/tmpl/Qwen-Agentic-HONT.jinja --alias Agentic-Turbo-Coder
 ```
 
 > **注意：** Qwen3.5/3.6 系列模型（MoE 與稠密變體）採用混合注意力機制（門控 DeltaNet 線性注意力 + 門控注意力），並非標準的滑動窗口注意力架構，GGUF 模型頭中 `n_swa = 0`。因此 `--swa-full` 對這些模型無效，載入時會自動檢測並禁用同時彈出警告 `swa_full is not supported by this model, it will be disabled`，此為正確行為，llama.cpp 已自動安全降級。`--context-shift` 會因 K-shift 不可用而自動禁用並警告，但 `--prompt-truncate` 不受影響，初始 prompt 截斷仍然生效。生成階段到達 context 上限時會優雅停止（`STOP_TYPE_LIMIT`）。**惟啟用 `--kvmem` 時例外：`--context-shift` 一律拒絕，`--prompt-truncate` 亦會被自動禁用並警告，超長提示返回 400 `exceed_context_size`——請改為加大 `--ctx-size`，詳見下文「KVMem」一節。**Qwen3.5/3.6 系列本身支援長上下文（如 256K/512K），無需依賴 SWA 即可高效處理長序列。若想消除日誌噪音，請直接移除 `--swa-full`。`--swa-full` 僅對 GGUF 文件頭中明確聲明滑動窗口注意力且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。
