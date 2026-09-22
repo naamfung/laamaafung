@@ -3090,7 +3090,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_KVMEM_QUERY_MAX"));
     add_opt(common_arg(
         {"--kvmem-gpu-ratio"}, "R",
-        "cap the KVMem GPU pool at this fraction of VRAM (default 0.90)",
+        "cap the KVMem GPU pool at this fraction of VRAM (default 0.50)",
         [](common_params & params, const std::string & value) {
             params.kvmem_gpu_ratio = std::stof(value);
         }

@@ -147,11 +147,17 @@ public:
     // the new tail; recency pressure must not evict selected history.
     void keep_selected_window() { keep_selected_ = true; }
     // After skip/reselect prefill: pin so decode mean-K uses gen_reserve.
+    // Records gen_start_pos so alloc_slot() exhaustion can spin the ring
+    // inside gen_reserve instead of failing (docs/architecture.md follow-up).
     void pin_working_set() {
         retrieval_pinned_ = true;
         keep_selected_ = true;
+        gen_start_pos_ = store_n_tokens();
     }
     size_t free_slot_count() const { return free_slots_.size(); }
+    // Ring buffer inside gen_reserve. Returns a slot freed by staging out the
+    // oldest completed generation block, or -1 when no such block exists.
+    int32_t reclaim_generation_slot();
     void truncate_cached(uint32_t n_past);
     void occupy_in(llama_kv_cache * cache, uint32_t block_id);
     llama_pos model_pos(uint32_t logical_pos) const;
@@ -381,6 +387,9 @@ private:
     bool replay_ = false;
     bool retrieval_pinned_ = false;
     bool keep_selected_ = false;
+    // First store position of the current pinned generation. Blocks at or past
+    // it are this turn's output and are the only ring candidates.
+    uint32_t gen_start_pos_ = 0;
     bool prefill_capture_ = true;
     int32_t method_ = 0;
     int32_t query_begin_ = -1;

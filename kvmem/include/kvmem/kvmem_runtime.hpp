@@ -67,6 +67,12 @@ public:
     // spill_outgoing + admit_incoming (host tests; no llama seq_rm).
     void finish_reselect();
 
+    // Ring buffer helper: copy one GPU-resident block to the host tiers and
+    // free its GPU slot immediately, without going through last_plan_ /
+    // pending_. Returns false when the block is missing or already off GPU.
+    // Used by the adapter when alloc_slot() runs dry inside gen_reserve.
+    bool evict_block(uint32_t block_id);
+
     void reselect() {
         prepare_reselect();
         finish_reselect();
