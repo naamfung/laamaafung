@@ -1,6 +1,24 @@
 #include "common.cuh"
 #include "ggml.h"
 
+// laamaafung: recurrent-state step helpers used by the KVMem GDN replay path
+// (gdn_fold_f32 / gdn_conv_fold_f32 in gated_delta_net.cu).
+template <int rows, int width>
+static __device__ __forceinline__ float gdn_delta_f32(
+        const float (&state)[rows], const float (&key)[rows], float decay, float value, float beta) {
+    float partial = 0.0f;
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+        partial += state[r] * key[r];
+    }
+    const float dot = warp_reduce_sum<width>(partial);
+    return (value - decay * dot) * beta;
+}
+
+static __device__ __forceinline__ float gdn_update_f32(float state, float key, float decay, float delta) {
+    return decay * state + key * delta;
+}
+
 // fused-kernel recurrent-state output; strides in elements (per-seq stride is always D, set in-kernel)
 struct ggml_cuda_gated_delta_net_fused_cache {
     float * data;        // rollback slot 0
