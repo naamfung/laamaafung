@@ -2206,7 +2206,7 @@ template <int DV, int ncols1, int ncols2>
 void launch_fattn(
     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
     const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const bool use_sparse,
-    const int warp_size = WARP_SIZE, const bool causal = false
+    const int warp_size = WARP_SIZE, const bool causal_in = false
 ) {
     constexpr int ncols = ncols1 * ncols2;
 
@@ -2219,6 +2219,14 @@ void launch_fattn(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
     const ggml_tensor * body_meta = dst->src[8];
+
+    // laamaafung: kill-switch for the built-in causal mask synthesis (A/B + debugging).
+    // Default ON; GGML_FATTN_BUILTIN_CAUSAL=0 forces the mask-tensor path.
+    static const bool builtin_causal_enabled = []{
+        const char * e = getenv("GGML_FATTN_BUILTIN_CAUSAL");
+        return !(e && e[0] == '0');
+    }();
+    const bool causal = causal_in && builtin_causal_enabled;
 
     ggml_tensor * KQV = dst;
 
