@@ -311,9 +311,21 @@ function(ggml_cuda_get_fattn_vec_default_pairs OUT_VAR)
         endforeach()
     endforeach()
 
+    # laamaafung: turbo/TCQ/turbo1.5 VEC pairs are always compiled (36 pairs).
+    set(_turbo_pairs
+        turbo3_0:turbo3_0 turbo3_0:q8_0 q8_0:turbo3_0 f16:turbo3_0 turbo3_0:f16
+        turbo2_0:turbo2_0 turbo2_0:q8_0 q8_0:turbo2_0 f16:turbo2_0 turbo2_0:f16
+        turbo3_0:turbo2_0 turbo2_0:turbo3_0
+        turbo4_0:turbo4_0 turbo4_0:q8_0 q8_0:turbo4_0 f16:turbo4_0 turbo4_0:f16
+        turbo4_0:turbo3_0 turbo3_0:turbo4_0 turbo4_0:turbo2_0 turbo2_0:turbo4_0
+        turbo3_tcq:turbo3_tcq turbo2_tcq:turbo2_tcq turbo3_tcq:turbo2_tcq turbo2_tcq:turbo3_tcq
+        turbo1_5:turbo1_5 turbo1_5:q8_0 q8_0:turbo1_5 f16:turbo1_5 turbo1_5:f16
+        turbo3_0:turbo1_5 turbo1_5:turbo3_0 turbo2_0:turbo1_5 turbo1_5:turbo2_0
+        turbo4_0:turbo1_5 turbo1_5:turbo4_0)
+    list(APPEND _pairs ${_turbo_pairs})
     list(LENGTH _pairs _pair_count)
-    if (NOT _pair_count EQUAL 50)
-        message(FATAL_ERROR "Default CUDA FA vec policy expected 50 pairs, got ${_pair_count}")
+    if (NOT _pair_count EQUAL 86)
+        message(FATAL_ERROR "Default CUDA FA vec policy expected 86 pairs, got ${_pair_count}")
     endif()
 
     set(${OUT_VAR} ${_pairs} PARENT_SCOPE)

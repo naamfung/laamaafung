@@ -3,6 +3,7 @@
 #include "fattn-common.cuh"
 #include "fattn-kvarn-dispatch.cuh"
 #include "fattn-mma-f16.cuh"
+#include "fattn-mma-turbo.cuh"
 #include "fattn-tile.cuh"
 #include "fattn-vec.cuh"
 #include "fattn.cuh"
@@ -480,6 +481,12 @@ static bool ggml_cuda_fattn_pair_compiled(ggml_type type_K, ggml_type type_V) {
 #if defined(GGML_CUDA_FA_ALL_QUANTS)
     return true;
 #else
+    // laamaafung: turbo/TCQ VEC pairs are always compiled (matches old baseline behavior).
+    if (type_K == type_V && (type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO2_0 ||
+                             type_K == GGML_TYPE_TURBO4_0 || type_K == GGML_TYPE_TURBO1_5 ||
+                             type_K == GGML_TYPE_TURBO3_TCQ || type_K == GGML_TYPE_TURBO2_TCQ)) {
+        return true;
+    }
     if (type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 ||
         type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16) {
         return type_K == type_V;
@@ -756,6 +763,139 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     return f16_extra.end - (uintptr_t) dst->data;
 }
 
+
+// ---------------------------------------------------------------------------
+// turbo4 fused MMA decode dispatch (mirrors the f16 switch helpers, type-parametric).
+// Only reached from the gate for turbo4 K==V, D in {128,256}, Q->ne[1] <= 4, turing MMA.
+//
+// The reachable (ncols1, ncols2) set for Q->ne[1] in {1..4} with GQA-packing is exactly
+// {(1,8),(2,8),(4,8),(2,4),(4,4),(4,2),(8,1)} - the 7 compiled instances per D. Each ncols2
+// has an explicit dispatcher so ONLY those pairs are instantiated (an unguarded ncols1=8/ncols2
+// fallthrough would also instantiate uncompiled cases like (8,4) -> link error).
+
+template <int DKQ, int DV, ggml_type type_K, ggml_type type_V>
+static void ggml_cuda_flash_attn_ext_mma_turbo_dispatch_ncols1_8(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * Q = dst->src[0]; // ncols2 == 8: (1,8),(2,8),(4,8)
+    if (Q->ne[1] <= 1) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 1, 8, type_K, type_V>(ctx, dst); return; }
+    if (Q->ne[1] <= 2) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 2, 8, type_K, type_V>(ctx, dst); return; }
+    ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 4, 8, type_K, type_V>(ctx, dst); // Q->ne[1] in {3,4}
+}
+template <int DKQ, int DV, ggml_type type_K, ggml_type type_V>
+static void ggml_cuda_flash_attn_ext_mma_turbo_dispatch_ncols1_4(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * Q = dst->src[0]; // ncols2 == 4: (2,4),(4,4)
+    if (Q->ne[1] <= 2) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 2, 4, type_K, type_V>(ctx, dst); return; }
+    ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 4, 4, type_K, type_V>(ctx, dst); // Q->ne[1] in {3,4}
+}
+
+template <int DKQ, int DV, ggml_type type_K, ggml_type type_V>
+static void ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * KQV  = dst;
+    const ggml_tensor * Q    = dst->src[0];
+    const ggml_tensor * K    = dst->src[1];
+    const ggml_tensor * V    = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+
+    float max_bias = 0.0f;
+    memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
+
+    // Mirror the f16 use_gqa_opt computation. Quantized tensors are skipped in the nb%16 loop.
+    bool use_gqa_opt = mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    for (const ggml_tensor * t : {Q, K, V, mask}) {
+        if (t == nullptr || ggml_is_quantized(t->type)) {
+            continue;
+        }
+        for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
+            if (t->nb[i] % 16 != 0) {
+                use_gqa_opt = false;
+                break;
+            }
+        }
+    }
+
+    GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
+    const int gqa_ratio = Q->ne[2] / K->ne[2];
+
+    if (use_gqa_opt && gqa_ratio > 4) {                                  // ncols2 = 8
+        ggml_cuda_flash_attn_ext_mma_turbo_dispatch_ncols1_8<DKQ, DV, type_K, type_V>(ctx, dst);
+        return;
+    }
+    if (use_gqa_opt && gqa_ratio > 2) {                                  // ncols2 = 4
+        ggml_cuda_flash_attn_ext_mma_turbo_dispatch_ncols1_4<DKQ, DV, type_K, type_V>(ctx, dst);
+        return;
+    }
+    if (use_gqa_opt && gqa_ratio > 1) {                                  // ncols2 = 2 -> (4,2)
+        ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 4, 2, type_K, type_V>(ctx, dst);
+        return;
+    }
+    ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 8, 1, type_K, type_V>(ctx, dst); // ncols2 = 1 -> (8,1)
+}
+
+// Turbo MMA prefill dispatch: MHA (gqa_ratio == 1) + GQA-packed (gqa_ratio >= 8).
+//
+// Mirrors decode's switch_ncols2: when use_gqa_opt && gqa_ratio >= 8, pack 8 Q heads
+// per K/V row (ncols2 == 8) to keep the K/V tile hot across the GQA group and avoid
+// the f16 conversion fallback that doubles KV bandwidth. Otherwise fall through to
+// the ncols2 == 1 unpacked path (MHA-style), which handles any gqa_ratio via the
+// Q->ne[2] head loop inside the kernel.
+//
+// GQA-packed prefill is capped at ncols1 = 16 (ncols = 128) and DKQ = 128 only:
+// shared_Q = ncols*(DKQ/2+4)*sizeof(half2) stays within Turing's 64 KB limit at
+// DKQ=128 (34 KB) but exceeds it at DKQ=256 (66 KB). Ampere's 100 KB limit would
+// allow DKQ=256 but the instance is not compiled to keep the config matrix simple.
+// Q->ne[1] > 16 or DKQ > 128 falls through to the MHA ladder below. nstages=0
+// (synchronous dequant load) means large-batch throughput should be benchmarked
+// vs the f16 conversion fallback.
+template <int DKQ, int DV, ggml_type type_K, ggml_type type_V>
+static void ggml_cuda_flash_attn_ext_mma_turbo_prefill(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * KQV  = dst;
+    const ggml_tensor * Q    = dst->src[0];
+    const ggml_tensor * K    = dst->src[1];
+    const ggml_tensor * V    = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+
+    float max_bias = 0.0f;
+    memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
+
+    // Mirror decode's use_gqa_opt: skip quantized tensors in the nb%16 loop (their
+    // pitch is the raw byte pitch, not a half-stride). K/V are turbo-quantized here.
+    bool use_gqa_opt = mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    for (const ggml_tensor * t : {Q, V, mask}) {
+        if (t == nullptr || ggml_is_quantized(t->type)) {
+            continue;
+        }
+        for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
+            if (t->nb[i] % 16 != 0) {
+                use_gqa_opt = false;
+                break;
+            }
+        }
+    }
+
+    GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
+    const int gqa_ratio = Q->ne[2] / K->ne[2];
+
+    if constexpr (DKQ <= 128) {
+        if (use_gqa_opt && gqa_ratio >= 8 && Q->ne[1] <= 16) {
+            ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 16, 8, type_K, type_V>(ctx, dst);
+            return;
+        }
+    }
+
+    if (Q->ne[1] <= 8)  { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV,  8, 1, type_K, type_V>(ctx, dst); return; }
+    if (Q->ne[1] <= 16) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 16, 1, type_K, type_V>(ctx, dst); return; }
+    if (Q->ne[1] <= 32) { ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 32, 1, type_K, type_V>(ctx, dst); return; }
+    ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 64, 1, type_K, type_V>(ctx, dst);
+}
+
+// Env latch for the fused turbo MMA path (decode + prefill). DEFAULT ON.
+//
+// The MMA path is correctness-validated (coherent output, KLD == VEC baseline 0.008396)
+// and faster than VEC at every depth (beats rival "buun"), BUT it is NOT bit/token-identical
+// to the VEC reference: MMA and VEC accumulate the P.V (VKQ) reduction in f16 with different
+// reduction trees (tensor-core fragment order vs per-thread VEC order), so a near-tie greedy
+// token can flip (~1 in ~25 tokens on a hard tie). This is the same irreducible f16-order
+// difference that exists between the base f16-MMA and f16-VEC kernels - not a regression - but
+
 static void ggml_cuda_flash_attn_ext_dispatch(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
@@ -874,6 +1014,66 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         }
         return;
     }
+
+    // Decode (Q->ne[1] <= 4): all head dims, GQA-packed via ncols2 selection.
+    // Prefill (Q->ne[1]  > 4): MHA only (gqa_ratio == 1). GQA + turbo + prefill falls
+    //   through to the f16 conversion path (ncols2 > 1 prefill instances not compiled).
+    {
+        const ggml_tensor * Q = dst->src[0];
+        const ggml_tensor * K = dst->src[1];
+        const ggml_tensor * V = dst->src[2];
+        const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+        const bool turbo_matched = (K->type == V->type &&
+            (K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO2_0));
+        if (ggml_cuda_turbo_mma_fused() && turbo_matched
+                && V->ne[0] == Q->ne[0] && turing_mma_available(cc)) {
+            if (Q->ne[1] <= 4) {
+                // Decode: GQA-packed, all head dims.
+                if (Q->ne[0] == 128) {
+                    switch (K->type) {
+                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO2_0: ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0>(ctx, dst); return;
+                        default: break;
+                    }
+                }
+                if (Q->ne[0] == 256) {
+                    switch (K->type) {
+                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
+                        // turbo2 + head_dim 256: intentionally NO fused case (routes to VEC via
+                        // default below). At 2-bit KV the fused path's GQA-pack saving is tiny while the
+                        // dequant/no-pipeline overhead is unchanged, so it is neutral on high-BW GPUs and
+                        // regresses ~1-2.5% on bandwidth-limited ones (tester @everson: Gemma-12B / RTX
+                        // 5060 Ti). VEC == baseline there. turbo2 + hd128 keeps fused (a +6.6..+69% depth
+                        // win on dense models); turbo3/turbo4 stay fused at both head dims.
+                        default: break;
+                    }
+                }
+            } else {
+                // Prefill: unified dispatch covers MHA (gqa_ratio == 1) and GQA-packed
+                // (gqa_ratio >= 8). Intermediate ratios {2,4} fall through to ncols2 == 1
+                // inside prefill(), handled by the kernel's Q->ne[2] head loop.
+                if (Q->ne[0] == 128) {
+                    switch (K->type) {
+                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<128, 128, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO2_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<128, 128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0>(ctx, dst); return;
+                        default: break;
+                    }
+                }
+                if (Q->ne[0] == 256) {
+                    switch (K->type) {
+                        case GGML_TYPE_TURBO4_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst); return;
+                        case GGML_TYPE_TURBO3_0: ggml_cuda_flash_attn_ext_mma_turbo_prefill<256, 256, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0>(ctx, dst); return;
+                        // turbo2 + head_dim 256: same exclusion as decode (see comment above).
+                        default: break;
+                    }
+                }
+            }
+        }
+    }
+
 
     ggml_cuda_flash_attn_ext_dispatch(ctx, dst);
 }
