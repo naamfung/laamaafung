@@ -348,6 +348,15 @@ private:
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;
 
+    // the Hadamard transforms this context's graphs consult: the model's own,
+    // plus the target's when the model borrows its token embeddings or output
+    // head through ctx_other (those tensors keep the target's folding)
+    llama_hadamard_rotations hadamard_rotations;
+    llama_hadamard_rotations hadamard_inverses;
+
+    // one-time Hadamard transform-coverage check on the first built graph
+    bool hadamard_verified = false;
+
     // training
     ggml_opt_context_t opt_ctx = nullptr;
 
