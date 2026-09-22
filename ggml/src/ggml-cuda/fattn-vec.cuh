@@ -86,13 +86,13 @@ static __global__ void flash_attn_ext_vec(
     constexpr int nthreads    = ggml_cuda_fattn_vec_get_nthreads_device();
     // Turbo3 uses the float Q path (like f16/bf16), not q8_1 integer path
     constexpr bool K_is_unquantized = (type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO4_0);
-    constexpr bool V_is_unquantized = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0);
-    constexpr bool K_is_turbo = (type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO4_0);
+    constexpr bool V_is_unquantized = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0 || type_V == GGML_TYPE_TURBO3_TCQ || type_V == GGML_TYPE_TURBO2_TCQ);
+    constexpr bool K_is_turbo = (type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO4_0 || type_K == GGML_TYPE_TURBO3_TCQ || type_K == GGML_TYPE_TURBO2_TCQ);
     // Turbo KQ dot does byte extraction + centroid lookup + scalar mul, not vectorized f16 loads.
     // nthreads_KQ=1: each thread computes a full KQ product alone — eliminates warp_reduce_sum
     // shuffle and halves KQ loop iterations. Each thread holds full Q vector in registers.
     constexpr int nthreads_KQ = K_is_turbo ? 1 : (K_is_unquantized ? 128 / cpy_nb : nthreads_KQ_q);
-    constexpr bool V_is_turbo = (type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0);
+    constexpr bool V_is_turbo = (type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0 || type_V == GGML_TYPE_TURBO3_TCQ || type_V == GGML_TYPE_TURBO2_TCQ);
     // Turbo V dequant is scalar (byte extract + LUT), not vectorized loads.
     // Halve nthreads_V to double V_cols_per_iter (process 2 V rows per loop iteration),
     // reducing loop overhead and improving ILP in the V aggregation phase.
@@ -103,11 +103,14 @@ static __global__ void flash_attn_ext_vec(
     static_assert(WARP_SIZE % nthreads_KQ == 0, "bad nthreads_K");
     static_assert(WARP_SIZE % nthreads_V  == 0, "bad nthreads_V");
 
-    constexpr int V_rows_per_thread = V_is_unquantized ? ((type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0) ? 4 : 2*cpy_ne) : 4;
+    constexpr int V_rows_per_thread = V_is_unquantized ? ((type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0 || type_V == GGML_TYPE_TURBO3_TCQ || type_V == GGML_TYPE_TURBO2_TCQ) ? 4 : 2*cpy_ne) : 4;
     constexpr int V_cols_per_iter   = WARP_SIZE / nthreads_V;
 
     constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, nthreads_KQ>();
-    constexpr bool Q_q8_1 = !K_is_unquantized;
+    // TCQ reads the float Q path (Q_reg) like the other turbo types, but is kept
+    // out of K_is_unquantized so the TCQ smem-codebook dot products are used explicitly.
+    constexpr bool K_is_tcq = (type_K == GGML_TYPE_TURBO3_TCQ || type_K == GGML_TYPE_TURBO2_TCQ);
+    constexpr bool Q_q8_1 = !K_is_unquantized && !K_is_tcq;
 #ifdef V_DOT2_F32_F16_AVAILABLE
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, half,  V_rows_per_thread>();
 #else
@@ -146,10 +149,48 @@ static __global__ void flash_attn_ext_vec(
     // then the hot loop does turbo_lut[d][idx] (shmem read, no multiply).
     // turbo4 excluded: 16 centroids × D exceeds shmem budget.
     // Stride = n_centroids+1 to avoid bank conflicts.
-    constexpr int n_centroids_lut = (D <= 256 && type_K == GGML_TYPE_TURBO3_0) ? 8 :
-                                    (D <= 256 && type_K == GGML_TYPE_TURBO2_0) ? 4 : 0;
+    // D >= 256 LUT disabled (TheTom SM120 finding): the half turbo_lut[256][9]
+    // shared-memory geometry reads back wrong values on Blackwell consumer parts
+    // (tested across CUDA 12.8–13.2, ptxas flags, fences — none helped); D=128 is
+    // unaffected and correct on SM86. The vec_dot fallback path is used instead.
+    constexpr int n_centroids_lut = (D <= 128 && type_K == GGML_TYPE_TURBO3_0) ? 8 :
+                                    (D <= 128 && type_K == GGML_TYPE_TURBO2_0) ? 4 : 0;
     constexpr int lut_stride = n_centroids_lut > 0 ? n_centroids_lut + 1 : 1;
     __shared__ half turbo_lut[n_centroids_lut > 0 ? D : 1][lut_stride];
+
+    // TCQ: stage the codebook(s) in shared memory — every thread hits a handful of
+    // entries per step but the state indices differ across threads, so shmem beats
+    // __constant__ broadcast for random access.
+    constexpr int smem_cb_K_size = (type_K == GGML_TYPE_TURBO3_TCQ) ? 512 :
+                                   (type_K == GGML_TYPE_TURBO2_TCQ) ? 256 : 0;
+    constexpr int smem_cb_V_size = (type_V == GGML_TYPE_TURBO3_TCQ) ? 512 :
+                                   (type_V == GGML_TYPE_TURBO2_TCQ) ? 256 : 0;
+    // Same-type K/V share one buffer (identical codebook data); mixed TCQ K/V get
+    // two disjoint regions (K first, then V).
+    constexpr bool share_cb = smem_cb_K_size > 0 && smem_cb_K_size == smem_cb_V_size;
+    constexpr int smem_cb_total = (smem_cb_K_size == smem_cb_V_size) ?
+                                  smem_cb_K_size : smem_cb_K_size + smem_cb_V_size;
+    __shared__ float smem_codebook_buf[smem_cb_total > 0 ? smem_cb_total : 1];
+    float * const smem_codebook_K = smem_cb_K_size > 0 ? smem_codebook_buf : nullptr;
+    float * const smem_codebook_V = share_cb           ? smem_codebook_buf :
+                                    (smem_cb_V_size > 0 ? smem_codebook_buf + smem_cb_K_size : nullptr);
+    if (smem_cb_total > 0) {
+        const int tid_cb = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
+        const int nth_cb = blockDim.x * blockDim.y * blockDim.z;
+        if (smem_cb_K_size > 0) {
+            const float * src_K = (type_K == GGML_TYPE_TURBO3_TCQ) ? d_turbo3_tcq_codebook : d_turbo2_tcq_codebook;
+            for (int i = tid_cb; i < smem_cb_K_size; i += nth_cb) {
+                smem_codebook_K[i] = src_K[i];
+            }
+        }
+        if (smem_cb_V_size > 0 && !share_cb) {
+            const float * src_V = (type_V == GGML_TYPE_TURBO3_TCQ) ? d_turbo3_tcq_codebook : d_turbo2_tcq_codebook;
+            for (int i = tid_cb; i < smem_cb_V_size; i += nth_cb) {
+                smem_codebook_V[i] = src_V[i];
+            }
+        }
+        __syncthreads();
+    }
 
     // Sparse V: skip V dequant for positions with negligible attention weights.
     // At long context, most V positions contribute < 1e-6 to the output — skipping
@@ -354,6 +395,12 @@ static __global__ void flash_attn_ext_vec(
                                 __half2float(turbo_lut[d0+6][(qs1>>4)&3]) +
                                 __half2float(turbo_lut[d0+7][(qs1>>6)&3])) * norm;
                     }
+                } else if constexpr (type_K == GGML_TYPE_TURBO3_TCQ) {
+                    sum = vec_dot_fattn_vec_KQ_turbo3_tcq_cb<D, nthreads_KQ>(
+                        K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j], smem_codebook_K);
+                } else if constexpr (type_K == GGML_TYPE_TURBO2_TCQ) {
+                    sum = vec_dot_fattn_vec_KQ_turbo2_tcq_cb<D, nthreads_KQ>(
+                        K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j], smem_codebook_K);
                 } else {
                     sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
                     sum = warp_reduce_sum<nthreads_KQ>(sum);
@@ -586,6 +633,36 @@ static __global__ void flash_attn_ext_vec(
                         VKQ[j][i_VKQ_0/nthreads_V + 0].y += sc[idx1]*KQ_k[j];
                         VKQ[j][i_VKQ_0/nthreads_V + 1].x += sc[idx2]*KQ_k[j];
                         VKQ[j][i_VKQ_0/nthreads_V + 1].y += sc[idx3]*KQ_k[j];
+                    }
+                }
+            } else if constexpr (type_V == GGML_TYPE_TURBO3_TCQ) {
+#pragma unroll
+                for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
+                    float2 tmp[V_rows_per_thread/2];
+                    dequantize_V_turbo3_tcq_cb<float, V_rows_per_thread>(V + k*nb21, tmp,
+                        2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread, smem_codebook_V);
+#pragma unroll
+                    for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
+#pragma unroll
+                        for (int j = 0; j < ncols; ++j) {
+                            VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x += tmp[i_VKQ_1].x*KQ_k[j];
+                            VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].y += tmp[i_VKQ_1].y*KQ_k[j];
+                        }
+                    }
+                }
+            } else if constexpr (type_V == GGML_TYPE_TURBO2_TCQ) {
+#pragma unroll
+                for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
+                    float2 tmp[V_rows_per_thread/2];
+                    dequantize_V_turbo2_tcq_cb<float, V_rows_per_thread>(V + k*nb21, tmp,
+                        2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread, smem_codebook_V);
+#pragma unroll
+                    for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
+#pragma unroll
+                        for (int j = 0; j < ncols; ++j) {
+                            VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x += tmp[i_VKQ_1].x*KQ_k[j];
+                            VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].y += tmp[i_VKQ_1].y*KQ_k[j];
+                        }
                     }
                 }
             } else {
@@ -935,3 +1012,17 @@ extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO2_0);
 extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO4_0);
+
+// TCQ types (D=128, 256 only — D=64 excluded because QK block size is 128)
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO3_TCQ, GGML_TYPE_TURBO3_TCQ);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO3_TCQ, GGML_TYPE_TURBO3_TCQ);
+
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO2_TCQ, GGML_TYPE_TURBO2_TCQ);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_TCQ, GGML_TYPE_TURBO2_TCQ);
+
+// TCQ cross-types (turbo3_tcq x turbo2_tcq)
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO3_TCQ, GGML_TYPE_TURBO2_TCQ);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO3_TCQ, GGML_TYPE_TURBO2_TCQ);
+
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO2_TCQ, GGML_TYPE_TURBO3_TCQ);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_TCQ, GGML_TYPE_TURBO3_TCQ);

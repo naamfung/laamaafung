@@ -1,6 +1,7 @@
 #include "convert.cuh"
 #include "dequantize.cuh"
 #include "turbo-quant.cuh"
+#include "turbo-tcq.cuh"
 
 #include <cstdint>
 
@@ -711,6 +712,10 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_block_cont_cuda<QK_TURBO2, QR_TURBO2, dequantize_turbo2_0>;
         case GGML_TYPE_TURBO4_0:
             return dequantize_block_cont_cuda<QK_TURBO4, QR_TURBO4, dequantize_turbo4_0>;
+        case GGML_TYPE_TURBO3_TCQ:
+            return dequantize_block_cont_cuda<QK_TURBO3_TCQ, QR_TURBO3_TCQ, dequantize_turbo3_tcq>;
+        case GGML_TYPE_TURBO2_TCQ:
+            return dequantize_block_cont_cuda<QK_TURBO2_TCQ, QR_TURBO2_TCQ, dequantize_turbo2_tcq>;
         case GGML_TYPE_TQ4_1S:
             return dequantize_tq4_1s_warp_cuda<half>;  // fast warp-cooperative WHT
         case GGML_TYPE_TQ3_1S:
@@ -786,6 +791,10 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_block_cont_cuda<QK_TURBO2, QR_TURBO2, dequantize_turbo2_0>;
         case GGML_TYPE_TURBO4_0:
             return dequantize_block_cont_cuda<QK_TURBO4, QR_TURBO4, dequantize_turbo4_0>;
+        case GGML_TYPE_TURBO3_TCQ:
+            return dequantize_block_cont_cuda<QK_TURBO3_TCQ, QR_TURBO3_TCQ, dequantize_turbo3_tcq>;
+        case GGML_TYPE_TURBO2_TCQ:
+            return dequantize_block_cont_cuda<QK_TURBO2_TCQ, QR_TURBO2_TCQ, dequantize_turbo2_tcq>;
         case GGML_TYPE_TQ4_1S:
             return dequantize_tq4_1s_warp_cuda<float>;  // fast warp-cooperative WHT
         case GGML_TYPE_TQ3_1S:
@@ -827,6 +836,10 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK_TURBO2, QR_TURBO2, dequantize_turbo2_0>;
         case GGML_TYPE_TURBO4_0:
             return dequantize_block_cuda<QK_TURBO4, QR_TURBO4, dequantize_turbo4_0>;
+        case GGML_TYPE_TURBO3_TCQ:
+            return dequantize_block_cuda<QK_TURBO3_TCQ, QR_TURBO3_TCQ, dequantize_turbo3_tcq>;
+        case GGML_TYPE_TURBO2_TCQ:
+            return dequantize_block_cuda<QK_TURBO2_TCQ, QR_TURBO2_TCQ, dequantize_turbo2_tcq>;
         case GGML_TYPE_TQ4_1S:
             return dequantize_block_cuda<QK_TQ4_1S, QR_TQ4_1S, dequantize_tq4_1s>;
         case GGML_TYPE_TQ3_1S:
@@ -895,6 +908,10 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK_TURBO2, QR_TURBO2, dequantize_turbo2_0>;
         case GGML_TYPE_TURBO4_0:
             return dequantize_block_cuda<QK_TURBO4, QR_TURBO4, dequantize_turbo4_0>;
+        case GGML_TYPE_TURBO3_TCQ:
+            return dequantize_block_cuda<QK_TURBO3_TCQ, QR_TURBO3_TCQ, dequantize_turbo3_tcq>;
+        case GGML_TYPE_TURBO2_TCQ:
+            return dequantize_block_cuda<QK_TURBO2_TCQ, QR_TURBO2_TCQ, dequantize_turbo2_tcq>;
         case GGML_TYPE_TQ4_1S:
             return dequantize_block_cuda<QK_TQ4_1S, QR_TQ4_1S, dequantize_tq4_1s>;
         case GGML_TYPE_TQ3_1S:

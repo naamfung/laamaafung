@@ -1024,3 +1024,40 @@ size_t quantize_tq4_1s(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst
     }
     return nrows * row_size;
 }
+
+/* ---------- TURBO3_TCQ: 3-bit Trellis-Coded Quantization (CPU fallback) ---------- */
+
+void dequantize_row_turbo3_tcq(const block_turbo3_tcq * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    GGML_UNUSED(x); GGML_UNUSED(y); GGML_UNUSED(k);
+    GGML_ABORT("TURBO3_TCQ dequantization is only supported on CUDA - CPU fallback not implemented");
+}
+
+void quantize_row_turbo3_tcq_ref(const float * GGML_RESTRICT x, block_turbo3_tcq * GGML_RESTRICT y, int64_t k) {
+    /* CPU greedy fallback - Viterbi encoder runs on GPU only. */
+    assert(k % QK_TURBO3_TCQ == 0);
+    const int nb = k / QK_TURBO3_TCQ;
+    for (int block = 0; block < nb; block++) {
+        memset(&y[block], 0, sizeof(block_turbo3_tcq));
+        float norm_sq = 0.0f;
+        for (int j = 0; j < 128; j++) norm_sq += x[block * 128 + j] * x[block * 128 + j];
+        y[block].norm = GGML_FP32_TO_FP16(sqrtf(norm_sq));
+    }
+}
+
+/* ---------- TURBO2_TCQ: 2-bit Trellis-Coded Quantization (CPU fallback) ---------- */
+
+void dequantize_row_turbo2_tcq(const block_turbo2_tcq * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    GGML_UNUSED(x); GGML_UNUSED(y); GGML_UNUSED(k);
+    GGML_ABORT("TURBO2_TCQ dequantization is only supported on CUDA - CPU fallback not implemented");
+}
+
+void quantize_row_turbo2_tcq_ref(const float * GGML_RESTRICT x, block_turbo2_tcq * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO2_TCQ == 0);
+    const int nb = k / QK_TURBO2_TCQ;
+    for (int block = 0; block < nb; block++) {
+        memset(&y[block], 0, sizeof(block_turbo2_tcq));
+        float norm_sq = 0.0f;
+        for (int j = 0; j < 128; j++) norm_sq += x[block * 128 + j] * x[block * 128 + j];
+        y[block].norm = GGML_FP32_TO_FP16(sqrtf(norm_sq));
+    }
+}

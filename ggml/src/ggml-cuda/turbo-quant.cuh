@@ -13,6 +13,16 @@
 #include <cstdlib>
 #include <cmath>
 
+// V-cache norm alpha: optional scaling applied at encode time.
+// Default 1.0f (no scaling) to preserve backward compatibility.
+// Set TURBO_NORM_ALPHA_V=1.04 for KLD-optimal quality at 2K context (turbo3/turbo2).
+// TCQ types use their own d_tcq_norm_alpha_v (1.04f) in turbo-tcq.cuh.
+static __constant__ float d_norm_alpha_v = 1.0f;
+
+// turbo4 V-alpha: default 1.0f (no scaling) to preserve backward compatibility.
+// Set TURBO4_NORM_ALPHA_V=1.10 for calibrated quality improvement.
+static __constant__ float d_turbo4_norm_alpha_v = 1.0f;
+
 // ---- Quantization ratios for dequantize_block template ----
 #define QR_TURBO3 1  // Each dequantize call produces 2 consecutive elements (like q8_0)
 #define QR_TURBO2 1  // Each dequantize call produces 2 consecutive elements (like q8_0)

@@ -804,6 +804,22 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_turbo2_0,
         .from_float_ref           = (ggml_from_float_t) quantize_row_turbo2_0_ref,
     },
+    [GGML_TYPE_TURBO3_TCQ] = {
+        .type_name                = "turbo3_tcq",
+        .blck_size                = QK_TURBO3_TCQ,
+        .type_size                = sizeof(block_turbo3_tcq),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_turbo3_tcq,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_turbo3_tcq_ref,
+    },
+    [GGML_TYPE_TURBO2_TCQ] = {
+        .type_name                = "turbo2_tcq",
+        .blck_size                = QK_TURBO2_TCQ,
+        .type_size                = sizeof(block_turbo2_tcq),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_turbo2_tcq,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_turbo2_tcq_ref,
+    },
     [GGML_TYPE_TQ3_1S] = {
         .type_name                = "tq3_1s",
         .blck_size                = QK_TQ3_0,

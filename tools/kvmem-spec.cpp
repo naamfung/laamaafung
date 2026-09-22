@@ -55,6 +55,12 @@ ggml_type kvmem_parse_cache_type(const char * s, bool * ok) {
     if (std::strcmp(s, "turbo4") == 0) {
         return GGML_TYPE_TURBO4_0;
     }
+    if (std::strcmp(s, "turbo3_tcq") == 0) {
+        return GGML_TYPE_TURBO3_TCQ;
+    }
+    if (std::strcmp(s, "turbo2_tcq") == 0) {
+        return GGML_TYPE_TURBO2_TCQ;
+    }
     if (ok) {
         *ok = false;
     }
@@ -65,7 +71,8 @@ bool kvmem_cache_types_ok(ggml_type type_k, ggml_type type_v) {
     if (ggml_is_quantized(type_k) || ggml_is_quantized(type_v)) {
         const auto supported_quant = [](ggml_type type) {
             return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q4_0 ||
-                   type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+                   type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ||
+                   type == GGML_TYPE_TURBO3_TCQ || type == GGML_TYPE_TURBO2_TCQ;
         };
         return supported_quant(type_k) && supported_quant(type_v);
     }
