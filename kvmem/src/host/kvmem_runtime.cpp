@@ -240,6 +240,19 @@ void KvMemRuntime::finish_reselect() {
     admit_incoming();
 }
 
+bool KvMemRuntime::evict_block(uint32_t block_id) {
+    if (block_id >= store_.block_count()) return false;
+    if (store_.blocks()[block_id].gpu_slot < 0) return false;
+    wait_prefetch();
+    pending_gpu_frees_.clear();
+    stage_out(block_id);
+    for (int32_t slot : pending_gpu_frees_) {
+        backend_->free_gpu_slot(slot);
+    }
+    pending_gpu_frees_.clear();
+    return true;
+}
+
 void KvMemRuntime::stage_out(uint32_t block_id) {
     if (block_id >= store_.block_count()) return;
     const int32_t gpu_slot = store_.blocks()[block_id].gpu_slot;

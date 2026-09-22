@@ -245,12 +245,44 @@ static void test_selection_preview_and_resident_commit() {
     CHECK(rt.commit_resident_selection(selected));
 }
 
+static void test_evict_block_frees_one_slot() {
+    RecordingBackend be;
+    KvMemRuntime rt(make_cfg(), &be);
+    rt.register_append(32 * 3);
+    for (uint32_t id = 0; id < rt.store().block_count(); ++id) {
+        rt.store().set_block_tier(id, KvTier::GPU);
+        rt.store().set_block_gpu_slot(id, be.alloc_gpu_slot());
+    }
+    const int32_t slot1 = rt.store().blocks()[1].gpu_slot;
+    CHECK(slot1 >= 0);
+
+    be.ops.clear();
+    be.frees.clear();
+    CHECK(rt.evict_block(1));
+    // Exactly one slot is returned, and it is the block's own slot.
+    CHECK(be.frees.size() == 1);
+    CHECK(be.frees[0] == slot1);
+    // The block is off the GPU and no longer tiered GPU.
+    CHECK(rt.store().blocks()[1].gpu_slot < 0);
+    CHECK(rt.store().blocks()[1].tier != KvTier::GPU);
+    // Neighbours are untouched.
+    CHECK(rt.store().blocks()[0].gpu_slot >= 0);
+    CHECK(rt.store().blocks()[2].gpu_slot >= 0);
+    // A second evict of the same block is a no-op.
+    be.frees.clear();
+    CHECK(!rt.evict_block(1));
+    CHECK(be.frees.empty());
+    // Out-of-range is refused.
+    CHECK(!rt.evict_block(9999));
+}
+
 int main() {
     test_selection_preview_and_resident_commit();
     test_stage_out_before_stage_in();
     test_high_overlap_skips_stage_in();
     test_pressure_keeps_sink_and_tail();
     test_maybe_offload_evicts_before_stage_in();
+    test_evict_block_frees_one_slot();
 #if KVMEM_ENABLE_NVME
     test_cpu_full_spills_to_nvme_and_roundtrips();
 #endif

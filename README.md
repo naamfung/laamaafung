@@ -305,7 +305,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | --- | --- | --- |
 | `--kvmem` | 關閉 | 總開關（環境變數 `LLAMA_ARG_KVMEM`） |
 | `--kvmem-budget N` | `0` = `--ctx-size` | 顯存工作集 token 數，**最關鍵的容量參數**，見下方配置建議 |
-| `--kvmem-gpu-ratio R` | `0.90` | KVMem 顯存池上限佔 **VRAM 總量**的比例：`cap_blocks = (VRAM × R) / 塊大小`。預設即最優（讓上限不成為約束，實際工作集由 `--kvmem-budget` 決定）；設**小**反而會把池靜默壓小、削弱 KVMem 的效果，只有在顯存與權重/計算緩衝衝突時才需要調小。核對方法：`KVMEM_TRACE=1` 的 `KVMEM_KV_BYTES` 行看 `cap_blocks` 與實際 `budget`/`pool`。 |
+| `--kvmem-gpu-ratio R` | `0.50` | KVMem 顯存池上限佔 **VRAM 總量**的比例：`cap_blocks = (VRAM × R) / 塊大小`。與官版預設一致（`0.50`），取偏保守的值，以免個別用戶設錯參數時把顯存推爆。它是**上限**而非目標值：若 `budget + gen_reserve` 未超出 `cap_blocks` 就完全不起作用，實際工作集仍由 `--kvmem-budget` 決定；配方確實需要更大池時才調大（官版生產配方用 `0.85`）。核對方法：`KVMEM_TRACE=1` 的 `KVMEM_KV_BYTES` 行看 `cap_blocks` 與實際 `budget`/`pool`。 |
 | `--kvmem-block-tokens N` | `128` | 塊大小。越大檢索粒度越粗、元數據越省 |
 | `--kvmem-gen-reserve N` | `8192` | 生成階段保留在工作集內的 slack token 數（decode 頭寸）。每輪生成先寫進這段頭寸，用完才會觸發重選／換出，所以設太小會在**生成途中把剛檢索回來的內容擠掉**，長回合直接失去召回。**`256` 之類只是測試刻度**（連一段程式碼都不夠寫），官版生產值為 **8192**，上下限由用戶按「單輪可能生成多長」自定。顯存成本 ≈ 該 token 數 × `block_bytes / block_tokens`。 |
 | `--kvmem-query-last N` | `64` | prompt 無 chat 訊息分界（raw `/completion`）時的查詢長度 = 最後 N tokens；有分界時僅作兜底 |
@@ -314,7 +314,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | `--kvmem-harvest-v` | 關閉 | 前填時同時把 V 搬到主機（增加前填開銷，換取更完整的檢索載入） |
 | `--no-kvmem-image-autoscale` | 自動縮放**開啟** | 關閉圖像自動縮放（環境變數 `LLAMA_ARG_NO_KVMEM_IMAGE_AUTOSCALE`）。預設開啟時，超出行數預算的圖像會在 **token 化之前**按比例縮小，而不是讓請求失敗；關閉後回到直接拒絕（HTTP 400，訊息見下文）。見「啟用條件」的多模態說明。 |
 
-**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。`--kvmem-gen-reserve` 單獨看是「**單輪生成頭寸**」：要 ≥ 你預期最長的一輪生成（寫碼／長推理動輒數千 token），官版生產值取 8192、上下限由用戶自定；只給 256 之類的測試刻度，KVMem 的召回會在生成途中被自己的換出邏輯吃掉。`--kvmem-gpu-ratio` 是**上限**而非目標值：它按 VRAM 總量換算可容納的塊數，若 `budget + gen_reserve` 超出就會把池壓小（見上表）。**預設即 `0.90`**，讓上限不成為約束、實際工作集完全由 `--kvmem-budget` 決定，一般不必顯式指定；只有在顯存確實不足時才調小。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gen-reserve 8192 --kvmem-gpu-ratio 0.90` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）。
+**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。`--kvmem-gen-reserve` 單獨看是「**單輪生成頭寸**」：要 ≥ 你預期最長的一輪生成（寫碼／長推理動輒數千 token），官版生產值取 8192、上下限由用戶自定；只給 256 之類的測試刻度，KVMem 的召回會在生成途中被自己的換出邏輯吃掉。`--kvmem-gpu-ratio` 是**上限**而非目標值：它按 VRAM 總量換算可容納的塊數，若 `budget + gen_reserve` 超出就會把池壓小（見上表）。**預設 `0.50`（與官版一致）**，取值保守以免設錯參數時把顯存推爆；只要 `budget + gen_reserve` 未觸及 `cap_blocks`，它就不起作用，實際工作集完全由 `--kvmem-budget` 決定。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gen-reserve 8192` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）；該組合的 `budget + gen_reserve = 40960` tokens，在 8GB + `-ctk turbo4`（量化 KV）下仍低於 `cap_blocks`，故未顯式指定 ratio。**注意**：若改用 F16 KV，8GB 的 `cap_blocks` 僅約 43K tokens，與 40960 已相當接近——此時 `--kvmem-gpu-ratio 0.50` 會開始成為實際約束，需要更大工作集時請一併調大該值。
 
 **日誌排查（`KVMEM_TRACE=1`）**：`KVMEM_KV_BYTES cells=.. budget=.. pool=..`（是否啟用與池大小）、`KVMem query span = [a, b) of N prompt tokens (last user turn|fallback: last tokens)`（本回合查詢區間及來源）、`KVMEM_CAPTURE tag=q/k`（捕獲是否生效）、`KVMEM_TRACE harvest n=.. q=.. k=..`、`KVMEM_TRACE retrieval stage_in=.. skip=.. window=..`、`KVMEM_DECODE_MEAN flush block=.. n=..`。若這些行全部缺失或計數為 0，代表 KVMem 並未真正參與，請先檢查是否被 `--parallel`、SWA 或 recurrent 條件擋下。
 
