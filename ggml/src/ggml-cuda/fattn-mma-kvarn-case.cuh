@@ -111,7 +111,7 @@ static __global__ void ggml_cuda_fattn_kvarn_window_f16_partial_kernel(
          ne01, ne02, gqa_ratio, ne11, nb01 / (int32_t) sizeof(float2), nb02 / (int32_t) sizeof(float2),
          nb11 / (int32_t) sizeof(half2), nb21 / (int32_t) sizeof(half2), nb31 / (int32_t) sizeof(half),
          jt, zt_gqa, 0, iter_k,
-         (ne31 == 1 && mask_ptr == nullptr) ? 1 : 0, ne11 - (int) ne01.x);
+         0, 0);  // causal masking not applicable to the KVarN record path
 #else
     GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, partial_ptr, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
@@ -179,7 +179,7 @@ static __global__ void ggml_cuda_fattn_kvarn_window_f16_direct_kernel(
          ne01, ne02, gqa_ratio, ne11, nb01 / (int32_t) sizeof(float2), nb02 / (int32_t) sizeof(float2),
          nb11 / (int32_t) sizeof(half2), nb21 / (int32_t) sizeof(half2), nb31 / (int32_t) sizeof(half),
          jt, zt_gqa, 0, iter_k,
-         (ne31 == 1 && mask_ptr == nullptr) ? 1 : 0, ne11 - (int) ne01.x);
+         0, 0);  // causal masking not applicable to the KVarN record path
 #else
     GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, dst_ptr, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
