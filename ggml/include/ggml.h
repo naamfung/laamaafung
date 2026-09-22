@@ -471,6 +471,10 @@ extern "C" {
         GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN = 4,
         GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS = 5,
         GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS = 6,
+        // laamaafung: built-in causal masking for pure-causal single-stream prefill
+        // (mask src[3] may stay unused by the kernel). Only the MMA kernel path
+        // honors this flag; VEC/tile kernels ignore it.
+        GGML_FLASH_ATTN_EXT_OP_PARAM_CAUSAL             = 7,
     };
 
     enum ggml_flash_attn_ext_kvarn_domain {
@@ -2526,6 +2530,11 @@ extern "C" {
     GGML_API void ggml_flash_attn_ext_set_prec(
             struct ggml_tensor * a,
             enum ggml_prec       prec);
+
+    // Enable built-in causal masking (mask src[3] must be NULL).
+    // Only the MMA kernel path honors this flag; VEC/tile kernels ignore it.
+    GGML_API void ggml_flash_attn_ext_set_causal(
+            struct ggml_tensor * a);
 
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);

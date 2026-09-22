@@ -2660,15 +2660,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         // Enable built-in causal masking for pure-causal single-stream prefill.
         // Only the MMA kernel path honors this flag; VEC/tile ignore it.
-        // TODO(0.23-rebase): ggml_flash_attn_ext_set_causal used op_params[4],
-        // which the beellama 0.23 baseline allocates to GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN.
-        // Deferred until the causal flag is renumbered; masking still correct via kq_mask.
-        (void) cparams.causal_attn;
-        //if (cparams.causal_attn && n_stream == 1 && !cparams.kv_unified
-        //    && hparams.swa_type == LLAMA_SWA_TYPE_NONE
-        //    && hparams.f_max_alibi_bias == 0.0f) {
-        //    ggml_flash_attn_ext_set_causal(cur);
-        //}
+        // Uses op_params[7] (GGML_FLASH_ATTN_EXT_OP_PARAM_CAUSAL) on the 0.23 baseline.
+        if (cparams.causal_attn && n_stream == 1 && !cparams.kv_unified
+            && hparams.swa_type == LLAMA_SWA_TYPE_NONE
+            && hparams.f_max_alibi_bias == 0.0f) {
+            ggml_flash_attn_ext_set_causal(cur);
+        }
 
         // TurboQuant: inverse WHT on FA output when V values are WHT-rotated.
         // For MLA, V is a view of K with different ne[0] (e.g. V=512, K=576).

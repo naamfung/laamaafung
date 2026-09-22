@@ -5666,6 +5666,13 @@ struct ggml_tensor * ggml_flash_attn_ext(
 }
 
 
+void ggml_flash_attn_ext_set_causal(
+        struct ggml_tensor * a) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_EXT_OP_PARAM_CAUSAL, 1);
+}
+
 void ggml_flash_attn_ext_set_prec(
         struct ggml_tensor * a,
         enum ggml_prec       prec) {
