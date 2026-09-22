@@ -11545,24 +11545,6 @@ static void ggml_compute_forward_turbo_wht_f32(
     }
 }
 
-// ggml_compute_forward_dsv4_hc_comb
-
-static void ggml_dsv4_hc_comb_norm_cols(float * comb, float eps) {
-    constexpr int64_t hc = 4;
-
-    for (int64_t idst = 0; idst < hc; ++idst) {
-        float sum = eps;
-        for (int64_t isrc = 0; isrc < hc; ++isrc) {
-            sum += comb[idst + hc*isrc];
-        }
-
-        const float inv_sum = 1.0f / sum;
-        for (int64_t isrc = 0; isrc < hc; ++isrc) {
-            comb[idst + hc*isrc] *= inv_sum;
-        }
-    }
-}
-
 void ggml_compute_forward_turbo_wht(
         const ggml_compute_params * params,
         ggml_tensor * dst) {

@@ -896,6 +896,16 @@ static void ggml_cuda_flash_attn_ext_mma_turbo_prefill(ggml_backend_cuda_context
 // token can flip (~1 in ~25 tokens on a hard tie). This is the same irreducible f16-order
 // difference that exists between the base f16-MMA and f16-VEC kernels - not a regression - but
 
+// difference that exists between the base f16-MMA and f16-VEC kernels - not a regression - but
+// it fails strict token-identity. GGML_TURBO_MMA_FUSED=0 falls back to the VEC dispatch.
+static bool ggml_cuda_turbo_mma_fused() {
+    static const bool v = []{
+        const char * s = getenv("GGML_TURBO_MMA_FUSED");
+        return !(s && s[0] == '0');  // default ON (faster GQA-packed MMA, quality-neutral); GGML_TURBO_MMA_FUSED=0 = VEC kill-switch
+    }();
+    return v;
+}
+
 static void ggml_cuda_flash_attn_ext_dispatch(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:

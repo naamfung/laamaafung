@@ -1,3 +1,4 @@
+#pragma once
 #include "common.cuh"
 #include "cp-async.cuh"
 #include "mma.cuh"

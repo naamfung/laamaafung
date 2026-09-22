@@ -506,6 +506,7 @@ static void convert_unary_cont_cuda(const void * vx, dst_t * y, const int64_t k,
     convert_unary_cuda<src_t>(vx, y, k, 1, 1, 1, k, k, k, stream);
 }
 
+#if !defined(GGML_USE_HIP)
 template <typename dst_t>
 static __global__ void dequantize_block_ptq1_0(const block_ptq1_0 * __restrict__ x,
                                                dst_t * __restrict__ y,

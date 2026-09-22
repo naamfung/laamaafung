@@ -41,7 +41,7 @@ CUDA_ARCH="${CUDA_ARCH:-native}"
 #   而且该进程会顺势回退到"重新配置"分支, 在本就并行编译时跑一次 configure,
 #   于是日志里出现 Configuring incomplete / 工程文件被改写的隐患。
 #   本脚本每次都是 rm -rf 构建目录后全量配置, 不依赖增量自检, 故直接关闭它。
-cmake -B "$BUILD_DIR" -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_BUILD_TYPE=Release -DLLAMA_KVMEM=ON -DLLAMA_KVMEM_ROOT="$PWD" -DCMAKE_SUPPRESS_REGENERATION=ON
+cmake -B "$BUILD_DIR" -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_BUILD_TYPE=Release -DLLAMA_KVMEM=ON -DLLAMA_KVMEM_ROOT="$(pwd -W)" -DCMAKE_SUPPRESS_REGENERATION=ON
 
 # cmake --build "$BUILD_DIR" --config Release --target llama-server --parallel
 cmake --build "$BUILD_DIR" -j8 --config Release

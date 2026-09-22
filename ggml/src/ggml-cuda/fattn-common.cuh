@@ -3,6 +3,10 @@
 #include "common.cuh"
 #include "convert.cuh"
 #include "vecdotq.cuh"
+#include "turbo-quant.cuh"
+#include "turbo-tcq.cuh"
+
+#include <cstdint>
 
 #include <cstdint>
 
