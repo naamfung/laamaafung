@@ -328,9 +328,9 @@ void quantize_row_q8_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
         const float maxScalar = _mm_cvtss_f32( max4 );
 
         // Quantize these floats
-        const float d = maxScalar / 128.0f;
+        const float d = maxScalar / 127.f;
         y[i].d = GGML_CPU_FP32_TO_FP16(d);
-        const float id = ( maxScalar != 0.0f ) ? 128.0f / maxScalar : 0.0f;
+        const float id = ( maxScalar != 0.0f ) ? 127.f / maxScalar : 0.0f;
         const __m256 mul = _mm256_set1_ps( id );
 
         // Apply the multiplier

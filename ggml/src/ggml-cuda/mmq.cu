@@ -4,7 +4,6 @@
 #include "mmid.cuh"
 
 #include <cstdint>
-#include <cstdlib>
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
@@ -14,14 +13,6 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
         case GGML_TYPE_Q2_0:
             mul_mat_q_case<GGML_TYPE_Q2_0>(ctx, args, stream);
             break;
-        case GGML_TYPE_PQ2_0:
-            mul_mat_q_case<GGML_TYPE_PQ2_0>(ctx, args, stream);
-            break;
-#if !defined(GGML_USE_HIP)
-        case GGML_TYPE_PTQ1_0:
-            mul_mat_q_case<GGML_TYPE_PTQ1_0>(ctx, args, stream);
-            break;
-#endif
         case GGML_TYPE_Q4_0:
             mul_mat_q_case<GGML_TYPE_Q4_0>(ctx, args, stream);
             break;
@@ -33,6 +24,24 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             break;
         case GGML_TYPE_Q5_1:
             mul_mat_q_case<GGML_TYPE_Q5_1>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q6_0:
+            mul_mat_q_case<GGML_TYPE_Q6_0>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q6_1:
+            mul_mat_q_case<GGML_TYPE_Q6_1>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q3_0:
+            mul_mat_q_case<GGML_TYPE_Q3_0>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q3_1:
+            mul_mat_q_case<GGML_TYPE_Q3_1>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q2_0S:
+            mul_mat_q_case<GGML_TYPE_Q2_0S>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q2_1:
+            mul_mat_q_case<GGML_TYPE_Q2_1>(ctx, args, stream);
             break;
         case GGML_TYPE_Q8_0:
             mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, args, stream);
@@ -273,18 +282,18 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     bool mmq_supported;
 
     switch (type) {
-#if !defined(GGML_USE_HIP)
-        case GGML_TYPE_PTQ1_0:
-            mmq_supported = turing_mma_available(cc);
-            break;
-#endif
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
-        case GGML_TYPE_PQ2_0:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q6_0:
+        case GGML_TYPE_Q6_1:
+        case GGML_TYPE_Q3_0:
+        case GGML_TYPE_Q3_1:
+        case GGML_TYPE_Q2_0S:
+        case GGML_TYPE_Q2_1:
         case GGML_TYPE_Q8_0:
 // -------------------------------------------------
         case GGML_TYPE_Q2_K:
@@ -324,25 +333,14 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         }
     }
 
-#if !defined(GGML_USE_HIP)
-    if (type == GGML_TYPE_PTQ1_0) {
-        // the fp16 dequantize + cuBLAS fallback is the source of PTQ1_0's extra error on CUDA, so
-        // the MMQ tile path runs at every batch by default; the env var is the A/B knob for
-        // deployments that prefer cuBLAS's ~7% at pp512 over the accuracy
-        static const int64_t max_batch = [] {
-            const char * s = getenv("GGML_CUDA_PTQ1_0_MMQ_MAX_BATCH");
-            return s ? (int64_t) atoll(s) : (int64_t) MMQ_PTQ1_0_MAX_BATCH_SIZE;
-        }();
-        return ne11 <= max_batch;
-    }
-#endif
-
     if (turing_mma_available(cc)) {
         return true;
     }
 
     if (ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_DP4A) {
-        return false;
+        // for MoE, mmq is faster even without native dp4a
+        // TODO: check if cards older than pascal might benefit from this as well
+        return cc >= GGML_CUDA_CC_PASCAL && n_experts > 0;
     }
 
 #ifdef GGML_CUDA_FORCE_MMQ
@@ -363,7 +361,8 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         if (n_experts > 64 || ne11 <= 128) {
             return true;
         }
-        if (type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q5_1) {
+        if (type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q6_0 ||
+            type == GGML_TYPE_Q6_1 || type == GGML_TYPE_Q3_0 || type == GGML_TYPE_Q3_1 || type == GGML_TYPE_Q2_0S || type == GGML_TYPE_Q2_1) {
             return true;
         }
         if (ne11 <= 256 && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K)) {

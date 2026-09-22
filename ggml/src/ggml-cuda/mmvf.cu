@@ -56,6 +56,7 @@ static __global__ void mul_mat_vec_f(
     bool use_bias = false;
     bool use_gate_bias = false;
     ggml_glu_op glu_op = ggml_glu_op::GGML_GLU_OP_SWIGLU;
+    float glu_limit = 0.0f;
     const T * gate_x = nullptr;
     const float * x_bias = nullptr;
     const float * gate_bias = nullptr;
@@ -65,6 +66,7 @@ static __global__ void mul_mat_vec_f(
         use_bias = fusion.x_bias != nullptr;
         use_gate_bias = fusion.gate_bias != nullptr;
         glu_op = fusion.glu_op;
+        glu_limit = fusion.glu_limit;
 
         if (use_gate) {
             gate_x = static_cast<const T *>(fusion.gate);
@@ -365,6 +367,9 @@ static __global__ void mul_mat_vec_f(
                     value = ggml_cuda_op_swiglu_oai_single(gate_value, value);
                     break;
                 }
+                case GGML_GLU_OP_SWIGLU_CLAMP:
+                    value = ggml_cuda_op_swiglu_clamp_single(gate_value, value, glu_limit);
+                    break;
                 default:
                     break;
             }
@@ -374,7 +379,7 @@ static __global__ void mul_mat_vec_f(
     dst[tid*stride_col_dst + row] = value;
 
     if constexpr (!has_fusion) {
-        GGML_UNUSED_VARS(use_gate, use_bias, use_gate_bias, glu_op, gate_x, x_bias, gate_bias, sumf_gate);
+        GGML_UNUSED_VARS(use_gate, use_bias, use_gate_bias, glu_op, glu_limit, gate_x, x_bias, gate_bias, sumf_gate);
     }
 }
 
@@ -675,6 +680,7 @@ void ggml_cuda_mul_mat_vec_f(ggml_backend_cuda_context & ctx, const ggml_tensor 
             fusion_local.gate_bias = fusion->gate_bias->data;
         }
         fusion_local.glu_op = fusion->glu_op;
+        fusion_local.glu_limit = fusion->glu_limit;
     }
 
     const int64_t s01 = src0->nb[1] / ts_src0;
@@ -783,7 +789,13 @@ void ggml_cuda_op_mul_mat_vec_f(
     GGML_UNUSED_VARS(ctx, src1, dst, src1_ddq_i, src1_ncols, src1_padded_row_size);
 }
 
-bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, const int64_t * src0_ne, const size_t * src0_nb, int64_t ne11) {
+bool ggml_cuda_mmvf_rhs_compatible(const ggml_tensor * src1) {
+    // MMVF casts every reachable RHS row/channel/sample base to float2.
+    return ggml_cuda_is_aligned(src1, 2*sizeof(float));
+}
+
+bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, const int64_t * src0_ne, const size_t * src0_nb,
+        const ggml_tensor * src1, int64_t ne11) {
     if (src0_ne[0] % 2 != 0) {
         return false;
     }
@@ -798,6 +810,9 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, const int64_t * src0
         if (src0_nb[i] % (2*ts) != 0) {
             return false;
         }
+    }
+    if (!ggml_cuda_mmvf_rhs_compatible(src1)) {
+        return false;
     }
 
     switch (type) {

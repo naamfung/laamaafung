@@ -52,6 +52,7 @@
 #define GGML_CUDA_CC_VOLTA           700
 #define GGML_CUDA_CC_TURING          750
 #define GGML_CUDA_CC_AMPERE          800
+#define GGML_CUDA_CC_ORIN            870
 #define GGML_CUDA_CC_ADA_LOVELACE    890
 #define GGML_CUDA_CC_HOPPER          900
 // While BW spans CC 1000, 1100 & 1200, we are integrating Tensor Core instructions available to 1200 family, see
@@ -119,6 +120,12 @@
     (CUDART_VERSION >= 12030 || (!(defined(_MSC_VER) && !defined(__clang__)) && CUDART_VERSION >= 11080))
 #    define GGML_CUDA_USE_PDL
 #endif  // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && (CUDART_VERSION >= 12030 || (!(defined(_MSC_VER) && !defined(__clang__)) && CUDART_VERSION >= 11080))
+
+static __device__ __forceinline__ void ggml_cuda_syncwarp() {
+#ifndef GGML_USE_HIP
+    __syncwarp();
+#endif // GGML_USE_HIP
+}
 
 static __device__ __forceinline__ void ggml_cuda_pdl_sync() {
 #if defined(GGML_CUDA_USE_PDL) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
@@ -442,11 +449,11 @@ struct ggml_cuda_unroll<1> {
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_sum(int x) {
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
-    return __reduce_add_sync(0xffffffff, x);
+    return __reduce_add_sync(0xFFFFFFFFULL, x);
 #else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        x += __shfl_xor_sync(0xFFFFFFFFULL, x, offset, width);
     }
     return x;
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
@@ -456,7 +463,7 @@ template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        x += __shfl_xor_sync(0xFFFFFFFFULL, x, offset, width);
     }
     return x;
 }
@@ -465,8 +472,8 @@ template<int width = WARP_SIZE>
 static __device__ __forceinline__ float2 warp_reduce_sum(float2 a) {
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        a.x += __shfl_xor_sync(0xffffffff, a.x, offset, width);
-        a.y += __shfl_xor_sync(0xffffffff, a.y, offset, width);
+        a.x += __shfl_xor_sync(0xFFFFFFFFULL, a.x, offset, width);
+        a.y += __shfl_xor_sync(0xFFFFFFFFULL, a.y, offset, width);
     }
     return a;
 }
@@ -476,7 +483,7 @@ static __device__ __forceinline__ half2 warp_reduce_sum(half2 a) {
 #ifdef FP16_AVAILABLE
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        a = __hadd2(a, __shfl_xor_sync(0xffffffff, a, offset, width));
+        a = __hadd2(a, __shfl_xor_sync(0xFFFFFFFFULL, a, offset, width));
     }
     return a;
 
@@ -489,11 +496,11 @@ static __device__ __forceinline__ half2 warp_reduce_sum(half2 a) {
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_all(int x) {
     if (width == ggml_cuda_get_physical_warp_size()) {
-        return __all_sync(0xffffffff, x);
+        return __all_sync(0xFFFFFFFFULL, x);
     } else {
 #pragma unroll
         for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = __shfl_xor_sync(0xffffffff, x, offset, width) && x;
+            x = __shfl_xor_sync(0xFFFFFFFFULL, x, offset, width) && x;
         }
         return x;
     }
@@ -502,11 +509,11 @@ static __device__ __forceinline__ int warp_reduce_all(int x) {
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_any(int x) {
     if (width == ggml_cuda_get_physical_warp_size()) {
-        return __any_sync(0xffffffff, x);
+        return __any_sync(0xFFFFFFFFULL, x);
     } else {
 #pragma unroll
         for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = __shfl_xor_sync(0xffffffff, x, offset, width) || x;
+            x = __shfl_xor_sync(0xFFFFFFFFULL, x, offset, width) || x;
         }
         return x;
     }
@@ -516,7 +523,7 @@ template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+        x = fmaxf(x, __shfl_xor_sync(0xFFFFFFFFULL, x, offset, width));
     }
     return x;
 }
@@ -526,7 +533,7 @@ static __device__ __forceinline__ T warp_prefix_inclusive_sum(T x) {
     const int lane_id = threadIdx.x % width;
 #pragma unroll
     for (int offset = 1; offset < width; offset <<= 1) {
-        const T t = __shfl_up_sync(0xffffffff, x, offset, width);
+        const T t = __shfl_up_sync(0xFFFFFFFFULL, x, offset, width);
         if (lane_id >= offset) {
             x += t;
         }
@@ -539,8 +546,8 @@ static __device__ __forceinline__ float2 warp_prefix_inclusive_sum(float2 a) {
     const int lane_id = threadIdx.x % width;
 #pragma unroll
     for (int offset = 1; offset < width; offset <<= 1) {
-        const float t_x = __shfl_up_sync(0xffffffff, a.x, offset, width);
-        const float t_y = __shfl_up_sync(0xffffffff, a.y, offset, width);
+        const float t_x = __shfl_up_sync(0xFFFFFFFFULL, a.x, offset, width);
+        const float t_y = __shfl_up_sync(0xFFFFFFFFULL, a.y, offset, width);
         if (lane_id >= offset) {
             a.x += t_x;
             a.y += t_y;
@@ -555,7 +562,7 @@ static __device__ __forceinline__ half2 warp_prefix_inclusive_sum(half2 a) {
     const int lane_id = threadIdx.x % width;
 #pragma unroll
     for (int offset = 1; offset < width; offset <<= 1) {
-        const half2 t = __shfl_up_sync(0xffffffff, a, offset, width);
+        const half2 t = __shfl_up_sync(0xFFFFFFFFULL, a, offset, width);
         if (lane_id >= offset) {
             a = __hadd2(a, t);
         }
@@ -627,7 +634,8 @@ template <typename T> struct block_reduce_policy<block_reduce_method::MAX, T> {
 };
 
 template <block_reduce_method reduce_method_t, const unsigned int block_size_template = 0, typename T>
-static __device__ T block_reduce(T val, T * shared_vals) {
+static __device__ T block_reduce(T val, [[maybe_unused]] T * shared_vals) {
+    // for multi-warp reductions, callers must not reuse shared_vals until all reads from this invocation have completed
     val                           = block_reduce_policy<reduce_method_t, T>::reduce(val);
     const unsigned int block_size = block_size_template == 0 ? blockDim.x : block_size_template;
     if (block_size > WARP_SIZE) {
@@ -682,7 +690,7 @@ static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL || defined(GGML_USE_HIP)
 #pragma unroll
    for (int offset = width/2; offset > 0; offset >>= 1) {
-       x = ggml_cuda_hmax2(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+       x = ggml_cuda_hmax2(x, __shfl_xor_sync(0xFFFFFFFFULL, x, offset, width));
    }
    return x;
 #else
@@ -839,7 +847,7 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t x) {
 #if defined(GGML_USE_HIP) && defined(CDNA3) && defined(FP8_AVAILABLE) && HIP_VERSION >= 60200000
     // ROCm does not support fp8 in software on devices with fp8 hardware,
-    // but CDNA3 supports only e4m3_fnuz (no inf). CDNA4 (gfx950) uses standard e4m3fn.
+    // but CDNA3 supports only e4m3_fnuz (no inf).
     const uint32_t bits = x * (x != 0x7F && x != 0xFF); // Convert NaN to 0.0f to match CPU implementation.
     const __hip_fp8_e4m3_fnuz xf = *reinterpret_cast<const __hip_fp8_e4m3_fnuz *>(&bits);
     return static_cast<float>(xf) / 2;
@@ -985,47 +993,6 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q2_0> {
 };
 
 template<>
-struct ggml_cuda_type_traits<GGML_TYPE_PQ2_0> {
-    static constexpr int qk = QK_PQ2_0;
-    static constexpr int qr = QR_PQ2_0;
-    static constexpr int qi = QI_PQ2_0;
-};
-
-// PTQ1_0 packs trits base-3, five per byte, so element order is not positional. It
-// follows the CPU codec exactly: a 16-byte chunk of qs, then an 8-byte chunk, then qh
-// at four trits per byte. Trits come out by the base-3 remainder recurrence
-// t = (v*3)>>8 with v = (v*3)&0xFF, two integer ops per step and no table.
-static __device__ __forceinline__ int ptq1_0_trit(const block_ptq1_0 * x, const int e) {
-    uint8_t b;
-    int n;
-    if (e < 80) {                       // qs[0..15], chunk of 16
-        b = x->qs[e & 15];              n = e >> 4;
-    } else if (e < 120) {               // qs[16..23], chunk of 8
-        const int t = e - 80;
-        b = x->qs[16 + (t & 7)];        n = t >> 3;
-    } else {                            // qh[0..1], four trits per byte
-        const int t = e - 120;
-        b = x->qh[t & 1];               n = t >> 1;
-    }
-
-    uint32_t v = b;
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        if (i < n) {
-            v = (v * 3) & 0xFF;
-        }
-    }
-    return (int) ((v * 3) >> 8) - 1;
-}
-
-template<>
-struct ggml_cuda_type_traits<GGML_TYPE_PTQ1_0> {
-    static constexpr int qk = QK_PTQ1_0;
-    static constexpr int qr = QR_PTQ1_0;
-    static constexpr int qi = QI_PTQ1_0;
-};
-
-template<>
 struct ggml_cuda_type_traits<GGML_TYPE_Q4_0> {
     static constexpr int qk = QK4_0;
     static constexpr int qr = QR4_0;
@@ -1051,6 +1018,48 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q5_1> {
     static constexpr int qk = QK5_1;
     static constexpr int qr = QR5_1;
     static constexpr int qi = QI5_1;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q6_0> {
+    static constexpr int qk = QK6_0;
+    static constexpr int qr = QR6_0;
+    static constexpr int qi = QI6_0;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q6_1> {
+    static constexpr int qk = QK6_1;
+    static constexpr int qr = QR6_1;
+    static constexpr int qi = QI6_1;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q3_0> {
+    static constexpr int qk = QK3_0;
+    static constexpr int qr = QR3_0;
+    static constexpr int qi = QI3_0;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q3_1> {
+    static constexpr int qk = QK3_1;
+    static constexpr int qr = QR3_1;
+    static constexpr int qi = QI3_1;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_0S> {
+    static constexpr int qk = QK2_0S;
+    static constexpr int qr = QR2_0S;
+    static constexpr int qi = QI2_0S;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_1> {
+    static constexpr int qk = QK2_1;
+    static constexpr int qr = QR2_1;
+    static constexpr int qi = QI2_1;
 };
 
 template<>
@@ -1188,6 +1197,7 @@ struct ggml_cuda_device_info {
         size_t  vmm_granularity;                // granularity of virtual memory
         size_t  total_vram;
         int     warp_size;                      // Number of threads in a dispatch
+        int     max_threads_per_block;           // Maximum resident threads in one block
         bool    supports_cooperative_launch;    // whether cooperative launch is supported
         int     physical_device;                // backing physical CUDA device for this (virtual) device
         int     physical_share_count;           // number of (virtual) devices sharing this device's physical GPU
@@ -1289,6 +1299,7 @@ struct ggml_cuda_graph {
     struct node_properties {
         ggml_tensor node;
         void *   node_src_data_ptrs[GGML_MAX_SRC];
+        ggml_type node_src_types[GGML_MAX_SRC];
         int64_t  node_src_ne[GGML_MAX_SRC][GGML_MAX_DIMS];
         size_t   node_src_nb[GGML_MAX_SRC][GGML_MAX_DIMS];
     };
@@ -1458,7 +1469,9 @@ struct ggml_backend_cuda_context {
     cudaEvent_t copy_event = nullptr;
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
-    cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
+    cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {nullptr};
+    void * cublas_workspaces[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {nullptr};
+    size_t cublas_workspace_sizes[GGML_CUDA_MAX_DEVICES] = {0};
 
     int curr_stream_no = 0;
 
@@ -1535,17 +1548,22 @@ struct ggml_backend_cuda_context {
 
     ggml_cuda_stream_context & stream_context() { return concurrent_stream_context; }
 
-    cublasHandle_t cublas_handle(int device) {
-        if (cublas_handles[device] == nullptr) {
-            ggml_cuda_set_device(device);
-            CUBLAS_CHECK(cublasCreate(&cublas_handles[device]));
-            CUBLAS_CHECK(cublasSetMathMode(cublas_handles[device], CUBLAS_TF32_TENSOR_OP_MATH));
-        }
-        return cublas_handles[device];
-    }
-
     cublasHandle_t cublas_handle() {
-        return cublas_handle(device);
+        if (cublas_handles[device][curr_stream_no] == nullptr) {
+            ggml_cuda_set_device(device);
+            CUBLAS_CHECK(cublasCreate(&cublas_handles[device][curr_stream_no]));
+            CUBLAS_CHECK(cublasSetMathMode(cublas_handles[device][curr_stream_no], CUBLAS_TF32_TENSOR_OP_MATH));
+            CUBLAS_CHECK(cublasSetStream(cublas_handles[device][curr_stream_no], stream()));
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && (CUBLAS_VER_MAJOR > 11 || (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR >= 2))
+            if (cublas_workspace_sizes[device] == 0) {
+                const int cc = ggml_cuda_info().devices[device].cc;
+                cublas_workspace_sizes[device] = (cc >= GGML_CUDA_CC_HOPPER) ? 32 * 1024 * 1024 : 4 * 1024 * 1024;
+            }
+            CUDA_CHECK(cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+            CUBLAS_CHECK(cublasSetWorkspace(cublas_handles[device][curr_stream_no], cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+#endif
+        }
+        return cublas_handles[device][curr_stream_no];
     }
 
     // pool
@@ -1572,6 +1590,7 @@ struct ggml_cuda_mm_fusion_args_host {
     const ggml_tensor * x_scale = nullptr;
     const ggml_tensor * gate_scale = nullptr;
     ggml_glu_op glu_op;
+    float glu_limit = 0.0f;
 };
 struct ggml_cuda_mm_fusion_args_device {
     const void * x_bias = nullptr;
@@ -1580,6 +1599,7 @@ struct ggml_cuda_mm_fusion_args_device {
     const void * x_scale = nullptr;
     const void * gate_scale = nullptr;
     ggml_glu_op glu_op;
+    float glu_limit = 0.0f;
 };
 
 struct ggml_cuda_kernel_launch_params {
@@ -1706,4 +1726,3 @@ static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_ke
     kernel<<<launch_params.block_nums, launch_params.block_dims, launch_params.shmem, launch_params.stream>>>(std::forward<Args>(args)... );
     CUDA_CHECK(cudaGetLastError());
 }
-

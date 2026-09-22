@@ -6,7 +6,6 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_shader_16bit_storage : require
-#extension GL_EXT_shader_8bit_storage : require
 
 #ifdef USE_OCP_FP4
 #extension GL_EXT_float_e2m1 : require
@@ -172,6 +171,97 @@ struct block_q5_1_packed32
 #define DATA_A_QUANT_LEGACY
 #endif
 
+#define QUANT_K_Q6_0 32
+#define QUANT_R_Q6_0 2
+struct block_q6_0 {
+    float16_t d;
+    uint8_t qh[8];
+    uint8_t qs[16];
+};
+#if defined(DATA_A_Q6_0)
+#define QUANT_K QUANT_K_Q6_0
+#define QUANT_R QUANT_R_Q6_0
+#define QUANT_AUXF 1
+#define A_TYPE block_q6_0
+#define DATA_A_QUANT_LEGACY
+#endif
+
+#define QUANT_K_Q6_1 32
+#define QUANT_R_Q6_1 2
+struct block_q6_1 {
+    float16_t d;
+    float16_t m;
+    uint8_t qh[8];
+    uint8_t qs[16];
+};
+#if defined(DATA_A_Q6_1)
+#define QUANT_K QUANT_K_Q6_1
+#define QUANT_R QUANT_R_Q6_1
+#define QUANT_AUXF 2
+#define A_TYPE block_q6_1
+#define DATA_A_QUANT_LEGACY
+#endif
+
+#define QUANT_K_Q3_0 32
+#define QUANT_R_Q3_0 2
+struct block_q3_0 {
+    float16_t d;
+    uint8_t qh[4];
+    uint8_t qs[8];
+};
+#if defined(DATA_A_Q3_0)
+#define QUANT_K QUANT_K_Q3_0
+#define QUANT_R QUANT_R_Q3_0
+#define QUANT_AUXF 1
+#define A_TYPE block_q3_0
+#define DATA_A_QUANT_LEGACY
+#endif
+
+#define QUANT_K_Q3_1 32
+#define QUANT_R_Q3_1 2
+struct block_q3_1 {
+    float16_t d;
+    float16_t m;
+    uint8_t qh[4];
+    uint8_t qs[8];
+};
+#if defined(DATA_A_Q3_1)
+#define QUANT_K QUANT_K_Q3_1
+#define QUANT_R QUANT_R_Q3_1
+#define QUANT_AUXF 2
+#define A_TYPE block_q3_1
+#define DATA_A_QUANT_LEGACY
+#endif
+
+#define QUANT_K_Q2_0S 32
+#define QUANT_R_Q2_0S 2
+struct block_q2_0s {
+    float16_t d;
+    uint8_t qs[8];
+};
+#if defined(DATA_A_Q2_0S)
+#define QUANT_K QUANT_K_Q2_0S
+#define QUANT_R QUANT_R_Q2_0S
+#define QUANT_AUXF 1
+#define A_TYPE block_q2_0s
+#define DATA_A_QUANT_LEGACY
+#endif
+
+#define QUANT_K_Q2_1 32
+#define QUANT_R_Q2_1 2
+struct block_q2_1 {
+    float16_t d;
+    float16_t m;
+    uint8_t qs[8];
+};
+#if defined(DATA_A_Q2_1)
+#define QUANT_K QUANT_K_Q2_1
+#define QUANT_R QUANT_R_Q2_1
+#define QUANT_AUXF 2
+#define A_TYPE block_q2_1
+#define DATA_A_QUANT_LEGACY
+#endif
+
 #define QUANT_K_Q8_0 32
 #define QUANT_R_Q8_0 1
 
@@ -301,6 +391,30 @@ struct block_q2_K_packed32
 #define A_TYPE_PACKED16 block_q2_K_packed16
 #define A_TYPE_PACKED32 block_q2_K_packed32
 #define SCALES_PER_32 2
+#define DATA_A_QUANT_K
+#endif
+
+#define QUANT_K_TQ2_0 256
+
+// ternary (BitNet): 2-bit codes, w = (q - 1) * d; qs layout matches q2_K's
+// two 32-byte groups with four bit-levels per byte
+struct block_tq2_0
+{
+    uint8_t qs[QUANT_K_TQ2_0/4];
+    float16_t d;
+};
+
+struct block_tq2_0_packed16
+{
+    uint16_t qs[QUANT_K_TQ2_0/4/2];
+    float16_t d;
+};
+
+#if defined(DATA_A_TQ2_0)
+#define QUANT_K QUANT_K_TQ2_0
+#define QUANT_R 1
+#define A_TYPE block_tq2_0
+#define A_TYPE_PACKED16 block_tq2_0_packed16
 #define DATA_A_QUANT_K
 #endif
 
@@ -1779,70 +1893,6 @@ struct block_nvfp4_packed32
 #define A_TYPE block_nvfp4
 #define A_TYPE_PACKED16 block_nvfp4_packed16
 #define A_TYPE_PACKED32 block_nvfp4_packed32
-#endif
-
-#define QUANT_K_TURBO3_0 128
-#define QUANT_R_TURBO3_0 1
-
-struct block_turbo3_0
-{
-    float16_t norm;
-    uint8_t qs[32];     // 2-bit centroid indices (4 per byte), 128/4 = 32 bytes
-    uint8_t signs[16]; // 1-bit high bit of 3-bit index (8 per byte), 128/8 = 16 bytes
-};
-
-#if defined(DATA_A_TURBO3_0)
-#define QUANT_K QUANT_K_TURBO3_0
-#define QUANT_R QUANT_R_TURBO3_0
-#define QUANT_AUXF 1
-#define A_TYPE block_turbo3_0
-#endif
-
-#define QUANT_K_TURBO2_0 128
-#define QUANT_R_TURBO2_0 1
-struct block_turbo2_0
-{
-    float16_t norm;
-    uint8_t qs[32];     // 2-bit centroid indices (4 per byte), 128/4 = 32 bytes
-};
-#if defined(DATA_A_TURBO2_0)
-#define QUANT_K QUANT_K_TURBO2_0
-#define QUANT_R QUANT_R_TURBO2_0
-#define QUANT_AUXF 1
-#define A_TYPE block_turbo2_0
-#endif
-
-#define QUANT_K_TURBO4_0 128
-#define QUANT_R_TURBO4_0 1
-struct block_turbo4_0
-{
-    float16_t norm;
-    float16_t rnorm;    // reserved in 4-bit mode (kept for ABI parity with legacy)
-    uint8_t qs[64];     // 4-bit centroid indices, nibble-packed (2 per byte), 128/2 = 64 bytes
-};
-#if defined(DATA_A_TURBO4_0)
-#define QUANT_K QUANT_K_TURBO4_0
-#define QUANT_R QUANT_R_TURBO4_0
-#define QUANT_AUXF 1
-#define A_TYPE block_turbo4_0
-#endif
-
-
-#define QUANT_K_TQ4_1S 32
-#define QUANT_R_TQ4_1S 1
-
-struct block_tq4_1s
-{
-    float16_t d0;      // scale for elements 0-15
-    float16_t d1;      // scale for elements 16-31
-    uint8_t qs[16];    // 4-bit nibble-packed centroid indices (2 per byte)
-};
-
-#if defined(DATA_A_TQ4_1S)
-#define QUANT_K QUANT_K_TQ4_1S
-#define QUANT_R QUANT_R_TQ4_1S
-#define QUANT_AUXF 1
-#define A_TYPE block_tq4_1s
 #endif
 
 #if defined(DATA_A_IQ4_NL) || defined(DATA_A_IQ4_XS)

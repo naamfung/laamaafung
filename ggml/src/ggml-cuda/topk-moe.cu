@@ -88,15 +88,16 @@ __device__ void sqrt_softplus_warp_inplace(float (&vals)[experts_per_thread], co
     It is intended as fusion of softmax->top-k->get_rows pipeline for MoE models
 */
 template <int n_experts, bool has_bias>
-__launch_bounds__(4 * WARP_SIZE, 1) __global__ void topk_moe_cuda(const float *         logits,
-                                                                  float *               weights,
-                                                                  int32_t *             ids,
-                                                                  float *               bias,
-                                                                  const int             n_rows,
-                                                                  const int             n_expert_used,
-                                                                  const float           clamp_val,
-                                                                  const float           scale_val,
-                                                                  const topk_moe_config config) {
+__launch_bounds__(TOPK_MOE_ROWS_PER_BLOCK * WARP_SIZE, 1)
+__global__ void topk_moe_cuda(const float *         logits,
+                              float *               weights,
+                              int32_t *             ids,
+                              float *               bias,
+                              const int             n_rows,
+                              const int             n_expert_used,
+                              const float           clamp_val,
+                              const float           scale_val,
+                              const topk_moe_config config) {
     const int row = blockIdx.x * blockDim.y + threadIdx.y;
     if (row >= n_rows) {
         return;
@@ -122,6 +123,9 @@ __launch_bounds__(4 * WARP_SIZE, 1) __global__ void topk_moe_cuda(const float * 
         const int expert  = i + threadIdx.x;
         wt[i / WARP_SIZE] = (n_experts % WARP_SIZE == 0 || expert < n_experts) ? logits[expert] : -INFINITY;
     }
+
+    // Weights and IDs can alias logits, so wait until every row in the block reads its logits.
+    __syncthreads();
 
     if (!config.delayed_softmax) {
         if (config.use_sigmoid) {
@@ -195,9 +199,9 @@ __launch_bounds__(4 * WARP_SIZE, 1) __global__ void topk_moe_cuda(const float * 
 
 #pragma unroll
             for (int mask = WARP_SIZE / 2; mask > 0; mask /= 2) {
-                const float val    = __shfl_xor_sync(0xFFFFFFFF, max_val, mask, WARP_SIZE);
-                const float val_s  = __shfl_xor_sync(0xFFFFFFFF, max_val_s, mask, WARP_SIZE);
-                const int   expert = __shfl_xor_sync(0xFFFFFFFF, max_expert, mask, WARP_SIZE);
+                const float val    = __shfl_xor_sync(0xFFFFFFFFULL, max_val, mask, WARP_SIZE);
+                const float val_s  = __shfl_xor_sync(0xFFFFFFFFULL, max_val_s, mask, WARP_SIZE);
+                const int   expert = __shfl_xor_sync(0xFFFFFFFFULL, max_expert, mask, WARP_SIZE);
                 if (val_s > max_val_s || (val_s == max_val_s && expert < max_expert)) {
                     max_val    = val;
                     max_val_s  = val_s;
@@ -220,8 +224,8 @@ __launch_bounds__(4 * WARP_SIZE, 1) __global__ void topk_moe_cuda(const float * 
 
 #pragma unroll
             for (int mask = WARP_SIZE / 2; mask > 0; mask /= 2) {
-                const float val    = __shfl_xor_sync(0xFFFFFFFF, max_val, mask, WARP_SIZE);
-                const int   expert = __shfl_xor_sync(0xFFFFFFFF, max_expert, mask, WARP_SIZE);
+                const float val    = __shfl_xor_sync(0xFFFFFFFFULL, max_val, mask, WARP_SIZE);
+                const int   expert = __shfl_xor_sync(0xFFFFFFFFULL, max_expert, mask, WARP_SIZE);
                 if (val > max_val || (val == max_val && expert < max_expert)) {
                     max_val    = val;
                     max_expert = expert;
@@ -282,7 +286,7 @@ static void launch_topk_moe_cuda(ggml_backend_cuda_context & ctx,
                                  const topk_moe_config       config) {
     GGML_ASSERT(!(config.with_norm && config.delayed_softmax) &&
                 "delayed softmax is not supported with weight normalization");
-    const int    rows_per_block = 4;
+    const int    rows_per_block = TOPK_MOE_ROWS_PER_BLOCK;
     dim3         grid_dims((n_rows + rows_per_block - 1) / rows_per_block, 1, 1);
     dim3         block_dims(WARP_SIZE, rows_per_block, 1);
     cudaStream_t stream = ctx.stream();

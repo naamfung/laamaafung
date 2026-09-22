@@ -181,7 +181,7 @@
 #            define GGML_API __declspec(dllimport) extern
 #        endif
 #    else
-#        define GGML_API __attribute__ ((visibility ("default")))
+#        define GGML_API __attribute__ ((visibility ("default"))) extern
 #    endif
 #else
 #    define GGML_API extern
@@ -221,7 +221,7 @@
 
 #define GGML_MAX_DIMS           4
 #define GGML_MAX_PARAMS         2048
-#define GGML_MAX_SRC            10
+#define GGML_MAX_SRC            12
 #define GGML_MAX_N_THREADS      512
 #define GGML_MAX_OP_PARAMS      64
 
@@ -429,26 +429,38 @@ extern "C" {
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
-        GGML_TYPE_TURBO2_0 = 42, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
-        GGML_TYPE_TURBO3_0 = 43, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
-        GGML_TYPE_TURBO4_0 = 44, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
-        GGML_TYPE_TQ3_1S  = 45, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
-        GGML_TYPE_TQ4_1S  = 46, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
-        GGML_TYPE_Q2_0    = 47,
-        GGML_TYPE_TURBO3_TCQ = 48, // TurboQuant 3-bit TCQ: Viterbi trellis-coded quantization
-        GGML_TYPE_TURBO2_TCQ = 49, // TurboQuant 2-bit TCQ: Viterbi trellis-coded quantization
-        GGML_TYPE_TURBO1_5 = 50, // TurboQuant 1.5: WHT-rotated ternary {-C,0,+C}, 5 trits/byte
-        // Prism-private Q2_0 at group size 128 (upstream Q2_0 is group 64). High id so it
-        // slots above the types laamaafung defines; type_traits is sized to COUNT (144) with 51..141 unused.
-        GGML_TYPE_PQ2_0 = 142, // Prism-private Q2_0 at group size 128
-        GGML_TYPE_PTQ1_0 = 143, // Prism-private ternary, group 128
-        GGML_TYPE_COUNT   = 144,
+        GGML_TYPE_Q2_0    = 42,
+        // BeeLlama KV-only formats.  Q2_0S is deliberately distinct from
+        // upstream Q2_0: it has a 32-element block and different math.
+        GGML_TYPE_Q6_0    = 43,
+        GGML_TYPE_Q6_1    = 44,
+        GGML_TYPE_Q3_0    = 45,
+        GGML_TYPE_Q3_1    = 46,
+        GGML_TYPE_Q2_0S   = 47,
+        GGML_TYPE_Q2_1    = 48,
+        GGML_TYPE_COUNT   = 49,
     };
 
     // precision
     enum ggml_prec {
         GGML_PREC_DEFAULT =  0, // stored as ggml_tensor.op_params, 0 by default
         GGML_PREC_F32     = 10,
+    };
+
+    // FLASH_ATTN_EXT op_params shared by the generic precision hint and KVarN's
+    // descriptor-native domain contract.
+    enum ggml_flash_attn_ext_op_param {
+        GGML_FLASH_ATTN_EXT_OP_PARAM_PREC         = 3,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN = 4,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS = 5,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS = 6,
+    };
+
+    enum ggml_flash_attn_ext_kvarn_domain {
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_AUTO                 = 0,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED              = 1,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ORIGINAL             = 2,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED_K_ORIGINAL_V = 3,
     };
 
     // op hint
@@ -487,8 +499,6 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
-        GGML_FTYPE_MOSTLY_PQ2_0 = 128, // except 1d tensors (Prism-private group-128 Q2_0)
-        GGML_FTYPE_MOSTLY_PTQ1_0 = 129, // except 1d tensors (Prism-private group-128 ternary)
     };
 
     // available tensor operations:
@@ -584,11 +594,17 @@ extern "C" {
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
-        GGML_OP_TURBO_WHT,
         GGML_OP_LIGHTNING_INDEXER,
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+
+        // KVarN record-oriented KV-cache operators.  They are not GGUF
+        // tensor types and are never serialized in model weights.
+        GGML_OP_KVARN_WHT,
+        GGML_OP_KVARN_STORE,
+        GGML_OP_KVARN_VIEW,
+        GGML_OP_KVARN_MATERIALIZE,
 
         GGML_OP_UNARY,
 
@@ -604,8 +620,6 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
-
-        GGML_OP_GATED_DELTA_NET_RECORD,
 
         GGML_OP_COUNT,
     };
@@ -644,6 +658,7 @@ extern "C" {
         GGML_GLU_OP_SWIGLU_OAI,
         GGML_GLU_OP_GEGLU_ERF,
         GGML_GLU_OP_GEGLU_QUICK,
+        GGML_GLU_OP_SWIGLU_CLAMP,
 
         GGML_GLU_OP_COUNT,
     };
@@ -799,7 +814,6 @@ extern "C" {
     GGML_API bool ggml_is_contiguous_0(const struct ggml_tensor * tensor); // same as ggml_is_contiguous()
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
-    GGML_API bool ggml_is_contiguous_to_3(const struct ggml_tensor * tensor); // contiguous for dims < 3
 
     GGML_API bool ggml_is_contiguous_to_1(const struct ggml_tensor * tensor); // contiguous for dims < 1
     GGML_API bool ggml_is_contiguous_to_2(const struct ggml_tensor * tensor); // contiguous for dims < 2
@@ -1385,6 +1399,12 @@ extern "C" {
             float                 alpha,
             float                 limit);
 
+    GGML_API struct ggml_tensor * ggml_swiglu_clamp(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 limit);
+
     // normalize along rows
     GGML_API struct ggml_tensor * ggml_norm(
             struct ggml_context * ctx,
@@ -1691,6 +1711,12 @@ extern "C" {
             struct ggml_tensor  * a,  // data
             struct ggml_tensor  * b); // row indices
 
+    GGML_API struct ggml_tensor * ggml_get_rows_as(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            enum ggml_type        type);
+
     GGML_API struct ggml_tensor * ggml_get_rows_back(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,  // gradients of ggml_get_rows result
@@ -1713,6 +1739,26 @@ extern "C" {
             struct ggml_tensor  * a,  // destination
             struct ggml_tensor  * b,  // source
             struct ggml_tensor  * c); // row indices
+
+    // As ggml_set_rows(), with an explicit graph dependency. Negative row
+    // indices are ignored, allowing ragged updates without persistent sink
+    // rows. The dependency affects ordering only and is not read by backends.
+    GGML_API struct ggml_tensor * ggml_set_rows_ordered(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * c,
+            struct ggml_tensor  * dependency);
+
+    // Stores the same source rows into a body destination and an exact shadow
+    // destination in one backend operation. The result aliases shadow.
+    GGML_API struct ggml_tensor * ggml_set_rows_with_shadow(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body,
+            struct ggml_tensor  * source,
+            struct ggml_tensor  * body_indices,
+            struct ggml_tensor  * shadow,
+            struct ggml_tensor  * shadow_indices);
 
     GGML_API struct ggml_tensor * ggml_diag(
         struct ggml_context     * ctx,
@@ -1741,6 +1787,19 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   n_past);
+
+    GGML_API struct ggml_tensor * ggml_clamp(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            float                 min,
+            float                 max);
+
+    // in-place, returns view(a)
+    GGML_API struct ggml_tensor * ggml_clamp_inplace(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            float                 min,
+            float                 max);
 
     GGML_API struct ggml_tensor * ggml_soft_max(
             struct ggml_context * ctx,
@@ -1999,14 +2058,14 @@ extern "C" {
             float                 beta_fast,
             float                 beta_slow);
 
-
-    // clamp
-    // in-place, returns view(a)
-    GGML_API struct ggml_tensor * ggml_clamp(
-            struct ggml_context * ctx,
+    // set the offset dims for RoPE
+    // a must be GGML_OP_ROPE or GGML_OP_ROPE_BACK
+    // vision RoPE is not supported
+    // example: (marking: x = rotated, 0 = unrotated)
+    //     n_embd = 10, n_dims = 4, offset = 2 --> [00xxxx0000]
+    GGML_API struct ggml_tensor * ggml_rope_set_offset(
             struct ggml_tensor  * a,
-            float                 min,
-            float                 max);
+            int                   n_offs);
 
     // im2col
     // converts data into a format that effectively results in a convolution when combined with matrix multiplication
@@ -2451,14 +2510,62 @@ extern "C" {
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
 
+    // Use finite mask entries as a sparse K/V set. Set 0 to disable.
+    // n_kv_max must bound the number of finite entries in every mask row.
+    GGML_API void ggml_flash_attn_ext_set_n_kv_max(
+            struct ggml_tensor * a,
+            int32_t              n_kv_max);
+
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
-    // Enable built-in causal masking (mask src[3] must be NULL).
-    // Only the MMA kernel path honors this flag; VEC/tile kernels ignore it.
-    GGML_API void ggml_flash_attn_ext_set_causal(
+    // Attach per-sequence exact-KV arenas to an existing body FlashAttention
+    // operation. query_order packs caller queries in sequence-major order and
+    // run_desc records { arena, packed start, query count, consecutive run }.
+    // Backends compute both partials privately and publish one normalized dst.
+    GGML_API void ggml_flash_attn_ext_add_kv_tail(
+            struct ggml_tensor * a,
+            struct ggml_tensor * k_tail,
+            struct ggml_tensor * v_tail,
+            struct ggml_tensor * mask_tail,
+            struct ggml_tensor * query_order,
+            struct ggml_tensor * run_desc);
+
+    // Declare that the attached exact tail is the complete attention source.
+    // Backends may skip the masked dummy body and execute the packed exact
+    // source as one ordinary FlashAttention pass.
+    GGML_API void ggml_flash_attn_ext_set_kv_tail_bodyless(
             struct ggml_tensor * a);
+
+    // Set the logical persistent-history boundary for segmented exact tails.
+    // The physical tensor may include backend execution padding beyond it.
+    GGML_API void ggml_flash_attn_ext_set_kv_tail_history_slots(
+            struct ggml_tensor * a,
+            int32_t              history_slots);
+
+    GGML_API struct ggml_tensor * ggml_kv_tail_attention_merge(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body_attn,
+            struct ggml_tensor  * k_tail,
+            struct ggml_tensor  * v_tail,
+            struct ggml_tensor  * mask_tail,
+            struct ggml_tensor  * query_order,
+            struct ggml_tensor  * run_desc);
+
+    // Attach a compact exact source without materializing history and current
+    // rows into one tensor. Tail indices address history first and then the
+    // graph-local current rows.
+    GGML_API struct ggml_tensor * ggml_kv_tail_attention_merge_segmented(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body_attn,
+            struct ggml_tensor  * k_history,
+            struct ggml_tensor  * v_history,
+            struct ggml_tensor  * k_current,
+            struct ggml_tensor  * v_current,
+            struct ggml_tensor  * mask_tail,
+            struct ggml_tensor  * query_order,
+            struct ggml_tensor  * run_desc);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
@@ -2482,7 +2589,8 @@ extern "C" {
             struct ggml_tensor  * A,
             struct ggml_tensor  * B,
             struct ggml_tensor  * C,
-            struct ggml_tensor  * ids);
+            struct ggml_tensor  * ids,
+            int64_t               K);
 
     // partition into non-overlapping windows with padding if needed
     // example:
@@ -2596,7 +2704,6 @@ extern "C" {
     // the output packs the attention scores [S_v, H_v, n_tokens, n_seqs] followed by K state
     // snapshots, most-recent first (slot 0 = final state, slot s = state s tokens back). K == 1
     // keeps only the final state; when n_tokens < K only slots 0..n_tokens-1 are written.
-    // K == 0 uses the RECORD op: attention output only, without a state output or state mutation.
     GGML_API struct ggml_tensor * ggml_gated_delta_net(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,
@@ -2604,18 +2711,54 @@ extern "C" {
             struct ggml_tensor  * v,
             struct ggml_tensor  * g,
             struct ggml_tensor  * beta,
-            struct ggml_tensor  * state,
-            int64_t               K);
+             struct ggml_tensor  * state,
+             int64_t               K);
 
-    // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
-    // Applies WHT rotation to 128-element groups along ne[0]: sign1 -> butterfly -> sign2 -> normalize
-    // direction: 0 = forward (signs1 -> WHT -> signs2), 1 = inverse (signs2 -> WHT -> signs1)
-    GGML_API struct ggml_tensor * ggml_turbo_wht(
+    // KVarN normalized Sylvester Walsh-Hadamard transform for 128/256/512
+    // head widths.  The transform is self-inverse.
+    GGML_API struct ggml_tensor * ggml_kvarn_wht(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
-            int                   direction,
-            int                   group_size,    // 0 = auto (64 or 128 from ne[0])
-            struct ggml_tensor  * scale);        // NULL = no InnerQ scaling
+            int                   head_width);
+
+    // KVarN structured KV-cache operations.  Records span full 128-token
+    // tiles, so this deliberately remains separate from ggml_type.
+    GGML_API struct ggml_tensor * ggml_kvarn_store(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * current,
+            struct ggml_tensor  * indices,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * records,
+            int                   bits,
+            int                   sinkhorn_iters,
+            bool                  value,
+            int                   stage_groups);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_view(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
+            int                   bits,
+            bool                  value,
+            int                   stage_groups);
+
+    // Reconstructs a standard F16 tensor from KVarN records and staging. The
+    // result can be consumed by any ordinary attention implementation.
+    GGML_API struct ggml_tensor * ggml_kvarn_materialize(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
+            int                   bits,
+            bool                  value,
+            int                   stage_groups);
 
     // DSA lightning indexer
     //
@@ -2819,6 +2962,12 @@ extern "C" {
             int                   idx);
 
     GGML_API void ggml_build_forward_expand(
+            struct ggml_cgraph * cgraph,
+            struct ggml_tensor * tensor);
+
+    // add the tensor and its parents to the graph without marking them for compute
+    // the flag is set later, when the tensor is reached from a node that computes
+    GGML_API void ggml_build_forward_order(
             struct ggml_cgraph * cgraph,
             struct ggml_tensor * tensor);
 
