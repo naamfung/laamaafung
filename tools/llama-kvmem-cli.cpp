@@ -36,7 +36,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
             "  --kvmem-query-last N       last N prompt tokens are the retrieval query (default 64)\n"
             "  --kvmem-force-substr S     force-select the block containing substring S\n"
-            "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.90)\n"
+            "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.50)\n"
             "  --kvmem-gpu-high R         prefill offload high watermark (default 0.95)\n"
             "  --kvmem-gpu-low R          prefill offload low watermark (default 0.85)\n"
             "  --kvmem-cpu-gb GB          CPU spill arena in GiB (0 = off)\n"

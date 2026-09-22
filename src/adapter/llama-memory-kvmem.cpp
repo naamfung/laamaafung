@@ -418,7 +418,7 @@ static kvmem::KvMemRuntimeConfig make_runtime_cfg(
         : std::max(1u, sink_tokens / block_tokens);
     cfg.store.recent_blocks = recent_tokens / block_tokens;
     cfg.store.gen_budget = 0;
-    cfg.store.gpu_memory_ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.90);
+    cfg.store.gpu_memory_ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.50);
     cfg.store.gpu_high_watermark = kvmem_default_ratio(g_kvmem_params.gpu_high_watermark, 0.95);
     cfg.store.gpu_low_watermark = kvmem_default_ratio(g_kvmem_params.gpu_low_watermark, 0.85);
     cfg.store.estimated_block_bytes = block_bytes;
@@ -507,7 +507,7 @@ static kvmem_pool_plan kvmem_compute_pool(
     const uint64_t v_row = ggml_row_size(params.type_v, n_embd_v);
     p.block_bytes = static_cast<uint64_t>(n_attn) * (k_row + v_row) * p.block_tokens;
 
-    const double ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.90);
+    const double ratio = kvmem_default_ratio(g_kvmem_params.gpu_memory_ratio, 0.50);
     p.gpu_total = kvmem_first_gpu_total_bytes();
     if (p.gpu_total > 0 && p.block_bytes > 0 && ratio > 0.0) {
         p.cap_blocks = static_cast<uint32_t>(
@@ -776,6 +776,7 @@ void llama_memory_kvmem::reset_policy() {
     reset_slots();
     retrieval_pinned_ = false;
     keep_selected_ = false;
+    gen_start_pos_ = 0;
     prefill_capture_ = true;
 }
 
@@ -789,6 +790,7 @@ void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
     }
     retrieval_pinned_ = false;
     keep_selected_ = false;
+    gen_start_pos_ = 0;
     prefill_capture_ = true;
 }
 
@@ -843,6 +845,67 @@ void llama_memory_kvmem::free_slot(int32_t slot) {
         return;
     }
     free_slots_.push_back(slot);
+}
+
+// Ring buffer inside gen_reserve (docs/architecture.md follow-up). When the
+// decode pool runs dry, spill the oldest *completed* generation block to the
+// host tiers and hand back its slot. Only this turn's output is eligible:
+// blocks placed before gen_start_pos_ are the pinned retrieval window and must
+// never be evicted. One block per event, grain = block_tokens_.
+int32_t llama_memory_kvmem::reclaim_generation_slot() {
+    if (!runtime_ || !kv_) {
+        return -1;
+    }
+    int32_t victim = -1;
+    {
+        const auto & blocks = runtime_->store().blocks();
+        for (const auto & b : blocks) {
+            if (b.gpu_slot < 0) {
+                continue;
+            }
+            if (b.orig_pos_start < gen_start_pos_) {
+                continue; // pinned retrieval working set
+            }
+            if (b.n_tokens < block_tokens_) {
+                continue; // in-progress tail block: attention still needs it
+            }
+            victim = static_cast<int32_t>(b.block_id);
+            break; // blocks are stored in original-position order
+        }
+    }
+    if (victim < 0) {
+        return -1;
+    }
+    // Copy the metadata out: evict_block() mutates the store's block vector.
+    const kvmem::KvMemBlock v = runtime_->store().blocks()[static_cast<uint32_t>(victim)];
+    ++attention_epoch_;
+
+    // Same order as apply_plan_to_kv: land V on the host store, keep the MTP
+    // follower pool in step, then drop the rows from the KV cache.
+    harvest_gpu_v(victim);
+    if (mtp_) {
+        mtp_->on_stage_out(static_cast<uint32_t>(victim));
+    }
+    harvest_gpu_v_commit();
+    kv_->seq_rm_logical(0, static_cast<llama_pos>(v.orig_pos_start),
+            static_cast<llama_pos>(v.orig_pos_end()));
+
+    // evict_block() frees the GPU slot through backend_ -> free_slot(), so the
+    // slot is back in free_slots_ by the time this returns.
+    if (!runtime_->evict_block(static_cast<uint32_t>(victim))) {
+        return -1;
+    }
+    // Pop it, exactly like alloc_slot(), so the caller owns the slot again.
+    const int32_t slot = alloc_slot();
+    if (slot < 0) {
+        return -1;
+    }
+
+    if (trace_) {
+        kvmem_diag("KVMEM_TRACE ring evict block=%d orig_pos=%u slot=%d free_slots=%zu\n",
+                victim, v.orig_pos_start, slot, free_slots_.size());
+    }
+    return slot;
 }
 
 int32_t llama_memory_kvmem::peek_free_slot() const {
@@ -1457,10 +1520,14 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
             if (store.blocks()[id].gpu_slot >= 0) {
                 continue;
             }
-            const int32_t slot = alloc_slot();
+            int32_t slot = alloc_slot();
+            if (slot < 0 && retrieval_pinned_) {
+                // gen_reserve is dry. Inside a pinned retrieval turn the ring
+                // can still spill this turn's oldest completed output block;
+                // the retrieved working set stays untouched (architecture.md).
+                slot = reclaim_generation_slot();
+            }
             if (slot < 0) {
-                // Pinned retrieval will not evict the working set. gen_reserve
-                // exhaustion is a known v1 limit (see docs/architecture.md).
                 LLAMA_LOG_ERROR("%s: no free GPU slot for block %u\n", __func__, id);
                 rollback_to(t0);
                 return false;

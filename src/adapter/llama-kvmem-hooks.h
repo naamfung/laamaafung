@@ -28,7 +28,7 @@ struct llama_kvmem_params {
     int32_t  query_begin;   // original token pos, -1 = unset
     int32_t  query_end;     // exclusive, -1 = end of prompt
     int32_t  force_pos;     // include block containing this orig pos; -1 = none
-    float    gpu_memory_ratio;     // 0 → 0.90; cap pool vs device VRAM
+    float    gpu_memory_ratio;     // 0 -> 0.50; cap pool vs device VRAM
     float    gpu_high_watermark;   // 0 → 0.95; trigger prefill offload
     float    gpu_low_watermark;    // 0 → 0.85; documented target after offload
     uint64_t cpu_bytes;            // CPU spill arena; 0 = disabled
