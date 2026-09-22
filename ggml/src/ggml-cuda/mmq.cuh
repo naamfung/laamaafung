@@ -435,6 +435,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
 #if !defined(GGML_USE_HIP)
         case GGML_TYPE_PTQ1_0:
             return MMQ_DP4A_TXS_Q8_0;
+#endif
         case GGML_TYPE_Q4_0:    return MMQ_DP4A_TXS_Q4_0;
         case GGML_TYPE_Q4_1:    return MMQ_DP4A_TXS_Q4_1;
         case GGML_TYPE_Q5_0:    return MMQ_DP4A_TXS_Q8_0;

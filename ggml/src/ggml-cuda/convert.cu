@@ -553,6 +553,31 @@ static __global__ void dequantize_block_ptq1_0(const block_ptq1_0 * __restrict__
 }
 
 template <typename dst_t>
+
+#if !defined(GGML_USE_HIP)
+template <typename dst_t>
+static __device__
+__forceinline__ void dequantize_ptq1_0_qs4(uint32_t packed, float d, dst_t * __restrict__ y, int base, int stride) {
+    uint32_t v_lo = __byte_perm(packed, 0, 0x4140);
+    uint32_t v_hi = __byte_perm(packed, 0, 0x4342);
+
+#    pragma unroll
+    for (int t = 0; t < 5; ++t) {
+        const uint32_t w_lo = v_lo * 3;
+        const uint32_t w_hi = v_hi * 3;
+        v_lo                = w_lo & 0x00FF00FF;
+        v_hi                = w_hi & 0x00FF00FF;
+
+        const uint32_t q = __vsub4(__byte_perm(w_lo, w_hi, 0x7531), 0x01010101);
+#    pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            const int trit           = (int8_t) (q >> (8 * b));
+            y[base + t * stride + b] = ggml_cuda_cast<dst_t>(d * trit);
+        }
+    }
+}
+#endif // !defined(GGML_USE_HIP)
+
 static void dequantize_row_ptq1_0_cuda(const void * __restrict__ vx,
                                        dst_t * __restrict__ y,
                                        const int64_t k,

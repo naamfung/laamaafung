@@ -953,6 +953,7 @@ static __device__ __forceinline__ float vec_dot_q2_0_q8_1(
     return d2 * d8 * sumi;
 }
 
+#if defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
 static __device__ __forceinline__ int q2_0_symbols4_hip(const uint32_t b) {
     const uint32_t y = (b & 0x33u) | ((b & 0xCCu) << 6);
     const uint32_t z = (y & 0x0303u) | ((y & 0x3030u) << 12);
