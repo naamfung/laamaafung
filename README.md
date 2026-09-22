@@ -36,6 +36,12 @@
   git clone -b v21 https://github.com/naamfung/laamaafung.git
   ```
 
+- **克隆 KVMem + Prism 三值量化分支（v22，非穩定）**：
+  在 `v21` 的 KVMem 之上加入 **Prism 三值量化**支援（`PTQ1_0`／`PQ2_0` 權重；GGUF 帶 `prism.hadamard.*` 折疊元數據，推理時激活自動做同款旋轉、無需額外參數，見下文「啟動示例」的「Prism 三值量化」與「KVMem + Prism 三值量化」）。需要跑 Prism 三值模型時用此分支：
+  ```sh
+  git clone -b v22 https://github.com/naamfung/laamaafung.git
+  ```
+
 ---
 
 ### 推荐模型
@@ -100,6 +106,59 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 > **多圖**：同一條訊息裡**相鄰且尺寸相同**的圖片，會被 Qwen-VL 按「視頻幀合併」語義兩兩拼成一張畫布（`clip_model_n_temporal_merge`），模型看到的是合併後的圖；要讓每張圖各自獨立，請在兩張圖之間插一個文本 part（哪怕只是一個換行，見下文「啟用條件」的多圖說明）。
 > 注意 KVMem 下**不要**加 `--context-shift` / `--prompt-truncate` / `--cache-reuse`：前兩者會被拒絕或自動禁用，後者依賴 K-shift 亦會自動禁用（見下文「KVMem」一節）。
 > 純 CPU 或小顯存試跑可把 `-ngl 99` 換成 `-ngl 0`，並把 `-c` / `--kvmem-budget` 按比例調小。
+
+Prism 三值量化（Ternary-Bonsai，須 v22 分支，無 KVMem）：
+
+`PTQ1_0`（三值，1.75 bpw）示例；要跑 `PQ2_0`（2.06 bpw）把 `model` 換成對應 gguf 即可，其餘參數不變。權重是 Hadamard 折疊後的（GGUF 帶 `prism.hadamard.*` 元數據），推理時激活自動做同款旋轉，**無需任何額外參數**；與下例的差別只在於不帶任何 `--kvmem*` 參數：
+
+```sh
+llamaServer="G:/Agents/kvmem-works/laamaafung/build-v22/bin/Release/llama-server.exe"
+############################################################
+model="C:/WorkModels/Qwen3.8-27B/Ternary-Bonsai-2-27B-PTQ1_0.gguf"
+# model="C:/WorkModels/Qwen3.8-27B/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+############################################################
+mmproj="C:/WorkModels/Qwen3.8-27B/Ternary-Bonsai-2-27B-mmproj-BF16.gguf"
+############################################################
+template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
+############################################################
+$llamaServer --model $model --host 0.0.0.0 --port 8008 \
+-c 262144 -n 32768 -ub 128 -b 512 -ngl 99 --parallel 1 \
+--cuda-register-host --sched-prefetch-experts 1 \
+-ctk q8_0 -ctv turbo4 \
+--reasoning on --reasoning-budget 2048 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我响应。" \
+--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --frequency-penalty 0.0 --repeat-penalty 1.0 \
+--mmproj $mmproj --no-mmproj-offload --image-min-tokens 1024 \
+--chat-template-file $template --alias Agentic-Turbo-Coder
+```
+
+> 注意：`-c 262144` 的全量量化 KV cache 在 8GB 級顯存（RTX 3060 Ti）上裝不下，會溢出到主存走 PCIe，實測 decode 約 8 t/s（輸出正確，只是慢）；顯存充裕、或把 `-c` 調小到裝得下，即不受此限。要在有限顯存下跑長上下文，請用下例的 KVMem 版本（同一模型、同一 `-c` 實測 decode 約 33 t/s）。
+
+KVMem + Prism 三值量化（Ternary-Bonsai，須 v22 分支）：
+
+`PTQ1_0`（三值，1.75 bpw）示例；要跑 `PQ2_0`（2.06 bpw）把 `model` 換成對應 gguf 即可，其餘參數不變。權重是 Hadamard 折疊後的（GGUF 帶 `prism.hadamard.*` 元數據），推理時激活自動做同款旋轉，**無需任何額外參數**：
+
+```sh
+llamaServer="G:/Agents/kvmem-works/laamaafung/build-v22/bin/Release/llama-server.exe"
+############################################################
+model="C:/WorkModels/Qwen3.8-27B/Ternary-Bonsai-2-27B-PTQ1_0.gguf"
+# model="C:/WorkModels/Qwen3.8-27B/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+############################################################
+mmproj="C:/WorkModels/Qwen3.8-27B/Ternary-Bonsai-2-27B-mmproj-BF16.gguf"
+############################################################
+template="D:/Programs/llama-cpp-repos/laamaafung/tmpl/Qwen-Agentic-HONT.jinja"
+############################################################
+$llamaServer --model $model --host 0.0.0.0 --port 8008 \
+-c 262144 -n 32768 -ub 128 -b 512 -ngl 99 --parallel 1 \
+--cuda-register-host --sched-prefetch-experts 1 \
+--kvmem --kvmem-budget 32768 --kvmem-gen-reserve 16384 --kvmem-gpu-ratio 0.9 --kvmem-block-tokens 128 \
+-ctk q8_0 -ctv turbo4 \
+--reasoning on --reasoning-budget 2048 --reasoning-budget-message "…… 很好，推理经已足矣，现在等我响应。" \
+--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --frequency-penalty 0.0 --repeat-penalty 1.0 \
+--mmproj $mmproj --no-mmproj-offload --image-min-tokens 1024 \
+--chat-template-file $template --alias Agentic-Turbo-Coder
+```
+
+> `--kvmem-gen-reserve 16384` 按單輪生成長度自定，並無固定區間或上限（此處取 16384 是本例長回合生成的取值）；三值模型在 8GB 級顯存（RTX 3060 Ti）實測 decode 約 33 t/s（PTQ1_0，預熱後的正常速度）／10 t/s（PQ2_0）。
 
 文本 + 视觉：
 
