@@ -43,6 +43,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +107,73 @@ func run(repoRoot, name string, args ...string) error {
 		return err
 	}
 	printInfo(fmt.Sprintf("%s 完成（耗时 %s）", name, time.Since(start).Round(time.Second)))
+	return nil
+}
+
+// transientPatterns 是并行编译时的环境瞬时竞争特征串：
+//   - nvcc 在 %TEMP% 下生成的 tmpxft_*_cudafe1.cpp 被抢/丢失 →
+//     "c1xx: fatal error C1083: 无法打开源文件 ... tmpxft_..."
+//   - VS 生成器的构建系统自检戳文件被防病毒/索引器瞬时占住 → MSB8066
+// 两类都是重跑即过，不应让人工介入。
+var transientPatterns = []string{"tmpxft_", "MSB8066", "Cannot restore timestamp", "MSB6001"}
+
+// logHasTransient 检查编译日志尾部是否含瞬时竞争特征。
+func logHasTransient(logPath string) bool {
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		return false
+	}
+	// 只看尾部 256KB，避免大日志全量扫描
+	if len(b) > 256*1024 {
+		b = b[len(b)-256*1024:]
+	}
+	s := string(b)
+	for _, p := range transientPatterns {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// runLogged 执行命令并把输出同时写到控制台与日志文件（tee）。
+func runLogged(repoRoot, logPath, name string, args ...string) error {
+	f, err := os.Create(logPath)
+	if err != nil {
+		printWarning("无法创建日志文件（仅输出到控制台）: " + err.Error())
+		return run(repoRoot, name, args...)
+	}
+	defer f.Close()
+
+	cmd := exec.Command(name, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = cleanEnv()
+	w := io.MultiWriter(os.Stdout, f)
+	cmd.Stdout, cmd.Stderr = w, w
+	printInfo("$ " + name + " " + strings.Join(args, " ") + "   (日志: " + logPath + ")")
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		printError(fmt.Sprintf("%s 失败（耗时 %s）: %v", name, time.Since(start).Round(time.Second), err))
+		return err
+	}
+	printInfo(fmt.Sprintf("%s 完成（耗时 %s）", name, time.Since(start).Round(time.Second)))
+	return nil
+}
+
+// runWithRetry 在遇到瞬时竞争（见 transientPatterns）时自动重跑，最多 attempts 次。
+// 有了 ccache，重跑只会重做失败的那几个编译单元，代价很小。
+func runWithRetry(repoRoot, logPath, name string, attempts int, args ...string) error {
+	for i := 1; i <= attempts; i++ {
+		err := runLogged(repoRoot, logPath, name, args...)
+		if err == nil {
+			return nil
+		}
+		if i < attempts && logHasTransient(logPath) {
+			printWarning(fmt.Sprintf("检测到并行编译的瞬时竞争（nvcc 临时文件 / 构建戳文件），自动重试 %d/%d", i, attempts-1))
+			continue
+		}
+		return err
+	}
 	return nil
 }
 
@@ -287,17 +355,23 @@ func detectGenerator(buildDir string) string {
 }
 
 // cleanArtifacts 删除构建目录与跨分支共享的预构建前端资源。
-// keep=true 时仅清 CMake 缓存（增量重配置用），保留已编译对象。
-func cleanArtifacts(repoRoot, buildDir string, keep bool) {
-	if !keep {
+// keep=true 时做增量重配置：**Ninja（单配置）的对象文件就落在 buildDir/CMakeFiles/ 下，
+// 删掉等于全量重编，所以 Ninja 的 -keep 不做任何删除**；VS（多配置）对象在
+// <target>.dir/Release/ 下，清缓存不影响对象。
+func cleanArtifacts(repoRoot, buildDir, generator string, keep bool) {
+	if keep {
+		if strings.Contains(generator, "Ninja") {
+			printInfo("-keep 模式（Ninja）: 保留全部构建状态，仅重跑 configure + build（真正增量）")
+		} else {
+			printInfo("-keep 模式: 仅清 CMake 缓存（保留构建目录增量）")
+			os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeCache.txt"))
+			os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeFiles"))
+		}
+	} else {
 		printInfo("删除构建目录 " + buildDir)
 		if err := os.RemoveAll(filepath.Join(repoRoot, buildDir)); err != nil {
 			printWarning("删除构建目录失败（继续）: " + err.Error())
 		}
-	} else {
-		printInfo("-keep 模式: 仅清 CMake 缓存（保留构建目录增量）")
-		os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeCache.txt"))
-		os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeFiles"))
 	}
 	// 清理跨分支共享残留的预构建前端资源, 避免误用不匹配版本的静态页面
 	uiDist := filepath.Join(repoRoot, "tools", "ui", "dist")
@@ -308,7 +382,7 @@ func cleanArtifacts(repoRoot, buildDir string, keep bool) {
 }
 
 // configure 组装并执行 CMake 配置。
-func configure(repoRoot, buildDir, cudaArch, generator, ccachePath string, ccacheAll bool, forceCcache bool, extra []string) error {
+func configure(repoRoot, buildDir, cudaArch, generator, ccachePath, logPath string, ccacheAll bool, forceCcache bool, extra []string) error {
 	args := []string{"-B", buildDir}
 	if generator != "" {
 		args = append(args, "-G", generator)
@@ -352,13 +426,13 @@ func configure(repoRoot, buildDir, cudaArch, generator, ccachePath string, ccach
 	}
 
 	args = append(args, extra...)
-	return run(repoRoot, "cmake", args...)
+	return runWithRetry(repoRoot, logPath, "cmake", 2, args...)
 }
 
-// build 执行编译。
-func build(repoRoot, buildDir string, jobs int) error {
-	return run(repoRoot, "cmake", "--build", buildDir,
-		fmt.Sprintf("-j%d", jobs), "--config", "Release")
+// build 执行编译。瞬时竞争（nvcc 临时文件等）允许再重试两次。
+func build(repoRoot, buildDir, logPath string, jobs int) error {
+	return runWithRetry(repoRoot, logPath, "cmake", 3,
+		"--build", buildDir, fmt.Sprintf("-j%d", jobs), "--config", "Release")
 }
 
 // verifyArtifacts 收尾自检: MSB8066 只会中断单个工程，不会让 --build 整体
@@ -540,19 +614,23 @@ func main() {
 		}
 	}
 
-	cleanArtifacts(repoRoot, buildDir, *keep)
+	cleanArtifacts(repoRoot, buildDir, chosenGen, *keep)
 	if *clean {
 		printSuccess("清理完成")
 		return
 	}
 
+	os.MkdirAll(filepath.Join(repoRoot, buildDir), 0o755)
+	cfgLog := filepath.Join(repoRoot, buildDir, "builder-configure.log")
+	buildLog := filepath.Join(repoRoot, buildDir, "builder-build.log")
+
 	start := time.Now()
-	if err := configure(repoRoot, buildDir, *arch, passGen, ccachePath, *ccacheAll, !*noCcache, flag.Args()); err != nil {
-		printError("configure 失败，详见上方 CMake 输出")
+	if err := configure(repoRoot, buildDir, *arch, passGen, ccachePath, cfgLog, *ccacheAll, !*noCcache, flag.Args()); err != nil {
+		printError("configure 失败，详见 " + cfgLog)
 		os.Exit(1)
 	}
-	if err := build(repoRoot, buildDir, *jobs); err != nil {
-		printError("编译失败，详见上方编译输出")
+	if err := build(repoRoot, buildDir, buildLog, *jobs); err != nil {
+		printError("编译失败，详见 " + buildLog)
 		os.Exit(1)
 	}
 	if err := verifyArtifacts(repoRoot, buildDir); err != nil {
