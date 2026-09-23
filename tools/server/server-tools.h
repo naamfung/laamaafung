@@ -30,6 +30,8 @@ struct server_tool {
     json to_json() const;
 };
 
+struct server_tools_runtime; // impl detail, defined in server-tools.cpp
+
 struct server_tools {
     std::vector<std::unique_ptr<server_tool>> tools;
 
@@ -42,4 +44,7 @@ struct server_tools {
 
     server_http_context::handler_t handle_get;
     server_http_context::handler_t handle_post;
+
+    server_tools();
+    ~server_tools();
 };

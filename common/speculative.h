@@ -14,6 +14,9 @@ const char * common_speculative_all_types_str();
 // parse user provided types
 std::vector<enum common_speculative_type> common_speculative_types_from_names(const std::vector<std::string> & names);
 
+// infer the spec types from the GGUF metadata of a draft model; empty if unknown
+std::vector<enum common_speculative_type> common_speculative_types_from_gguf(const std::string & path);
+
 // convert string to type
 enum common_speculative_type common_speculative_type_from_name(const std::string & name);
 
@@ -24,6 +27,40 @@ std::string common_speculative_type_to_str(enum common_speculative_type type);
 int32_t common_speculative_n_max(const common_params_speculative * spec);
 
 common_params common_base_params_to_speculative(const common_params & params);
+
+// return the max number of draft tokens from the initialized implementations
+int32_t common_speculative_n_max(const common_speculative * spec);
+
+// Resolve the model-declared DFlash block-attention policy. DFlash defaults to
+// non-causal when the optional metadata key is absent.
+bool common_speculative_dflash_causal_attn(const llama_model * model);
+
+// Bee's variable-depth adaptive draft-max is limited to the original DFlash path.
+bool common_speculative_dflash_adaptive_dm_supported(int32_t selector_top_k);
+bool common_speculative_dflash_backend_sampling_allowed(
+        bool requested, int32_t target_device_count, bool is_dflash2);
+bool common_speculative_adaptive_dm_supported(const common_speculative * spec);
+
+// True when a model-backed draft context is a non-owning view of target KV state.
+bool common_speculative_draft_memory_is_shared(const common_speculative * spec);
+
+// validate and resolve the unconditional synthetic acceptance rates
+std::vector<double> common_speculative_synth_rates_resolve(const common_params_speculative * spec, int32_t n_max);
+
+// return the conditional synthetic acceptance probabilities
+const std::vector<double> & common_speculative_get_synth_probs(const common_speculative * spec);
+
+void common_validate_draft_kvarn_mode(const common_params_speculative & params);
+common_params common_base_params_to_speculative(const common_params & params);
+
+struct common_speculative_output_limits {
+    int32_t total;
+    int32_t per_seq;
+};
+
+// return the output limits needed for speculative decoding
+common_speculative_output_limits common_speculative_get_output_limits(
+        int32_t n_batch, int32_t n_parallel, int32_t n_draft);
 
 common_speculative * common_speculative_init(common_params_speculative & params, uint32_t n_seq);
 
@@ -59,12 +96,6 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch);
 
-// true if any implementation requires target post-norm embeddings to be extracted
-bool common_speculative_need_embd(common_speculative * spec);
-
-// true if any implementation requires target nextn embeddings to be extracted
-bool common_speculative_need_embd_nextn(common_speculative * spec);
-
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 
@@ -73,7 +104,19 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t
 
 // (optional) get/set internal state
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
-void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+bool common_speculative_validate_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+
+// Prepare validates and owns the decoded implementation payload. Commit has no
+// remaining parsing or allocation and cannot fail.
+struct common_speculative_state_restore_plan;
+common_speculative_state_restore_plan * common_speculative_prepare_state(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        const uint8_t * data,
+        size_t size);
+void common_speculative_state_restore_plan_commit(common_speculative_state_restore_plan * plan);
+void common_speculative_state_restore_plan_free(common_speculative_state_restore_plan * plan);
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);

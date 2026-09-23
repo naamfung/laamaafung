@@ -11,8 +11,9 @@
 #include <memory>
 
 // pseudo-env variable to identify preset-only arguments
-#define COMMON_ARG_PRESET_LOAD_ON_STARTUP "__PRESET_LOAD_ON_STARTUP"
-#define COMMON_ARG_PRESET_STOP_TIMEOUT    "__PRESET_STOP_TIMEOUT"
+#define COMMON_ARG_PRESET_LOAD_ON_STARTUP    "__PRESET_LOAD_ON_STARTUP"
+#define COMMON_ARG_PRESET_STOP_TIMEOUT       "__PRESET_STOP_TIMEOUT"
+#define COMMON_ARG_PRESET_DEDUP_CACHE_MODELS "__PRESET_DEDUP_CACHE_MODELS"
 
 //
 // CLI argument parsing
@@ -30,6 +31,7 @@ struct common_arg {
     bool is_sampling = false; // is current arg a sampling param?
     bool is_spec = false; // is current arg a speculative decoding param?
     bool is_preset_only = false; // is current arg preset-only (not treated as CLI arg)
+    bool is_sensitive = false; // option value must never be serialized or rendered into argv
     void (*handler_void)   (common_params & params) = nullptr;
     void (*handler_string) (common_params & params, const std::string &) = nullptr;
     void (*handler_str_str)(common_params & params, const std::string &, const std::string &) = nullptr;
@@ -80,6 +82,7 @@ struct common_arg {
     common_arg & set_sampling();
     common_arg & set_spec();
     common_arg & set_preset_only();
+    common_arg & set_sensitive();
     bool in_example(enum llama_example ex);
     bool is_exclude(enum llama_example ex);
     bool get_value_from_env(std::string & output) const;
@@ -111,6 +114,10 @@ namespace common_arg_utils {
     bool is_autoy(const std::string & value);
 }
 
+// Canonical cache-type registry shared by CLI validation and backend coverage
+// tests. Callers should filter this list by the operation contract they need.
+const std::vector<ggml_type> & common_kv_cache_types();
+
 struct common_params_context {
     enum llama_example ex = LLAMA_EXAMPLE_COMMON;
     common_params & params;
@@ -137,7 +144,6 @@ void common_params_add_preset_options(std::vector<common_arg> & args);
 struct common_models_handler {
     common_download_hf_plan plan;
     common_download_hf_plan plan_spec;
-    common_download_hf_plan plan_voc;
     common_download_opts opts;
 };
 

@@ -1,0 +1,1416 @@
+/**
+ * AgenticStore - Multi-turn agentic loop orchestration
+ *
+ * Drives the agentic loop over MCP tools: streams each LLM turn, detects
+ * tool calls, executes them via mcpStore, and enforces the turn limit. Each
+ * turn produces one assistant message (with tool_calls) and one tool result
+ * message per executed call, persisted as separate DB rows.
+ *
+ * Uses ChatService for streaming and mcpStore for tool execution; waits on
+ * the permission/continue/steering gates owned by {@link AgenticGates}.
+ */
+
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+import { ChatService } from '$lib/services';
+import { config } from '$lib/stores/settings.svelte';
+import { mcpStore } from '$lib/stores/mcp.svelte';
+import { modelsStore } from '$lib/stores/models.svelte';
+import { toolsStore } from '$lib/stores/tools.svelte';
+import { permissionsStore } from '$lib/stores/permissions.svelte';
+import { serverStore } from '$lib/stores/server.svelte';
+import { BuiltInTool, ToolSource, ToolPermissionDecision } from '$lib/enums';
+import { SvelteMap } from 'svelte/reactivity';
+import { ToolsService } from '$lib/services/tools.service';
+import { SandboxService } from '$lib/services/sandbox.service';
+import { isAbortError } from '$lib/utils';
+=======
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+import { DEFAULT_AGENTIC_CONFIG, NEWLINE } from '$lib/constants';
+import {
+	AUDIO_MIME_TO_EXTENSION,
+	DATA_URI_BASE64_REGEX,
+	DEFAULT_AUDIO_EXTENSION,
+	DEFAULT_IMAGE_EXTENSION,
+	IMAGE_MIME_TO_EXTENSION,
+	MCP_ATTACHMENT_NAME_PREFIX,
+	MIME_TYPE_PREFIXES
+} from '$lib/constants';
+import { BuiltInTool, ToolPermissionDecision, ToolSource } from '$lib/enums';
+import {
+	AttachmentType,
+	ContentPartType,
+	MessageRole,
+	MimeTypePrefix,
+	ToolCallType
+} from '$lib/enums';
+import { ChatService } from '$lib/services';
+import { ReadMediaService } from '$lib/services/read-media.service';
+import { SandboxService } from '$lib/services/sandbox.service';
+import { ToolsService } from '$lib/services/tools.service';
+// direct imports between stores, not via the barrel, to avoid circular deps
+import { AgenticGates } from '$lib/stores/agentic/gates.svelte';
+import { conversationsStore } from '$lib/stores/conversations/index.svelte';
+import { mcpStore } from '$lib/stores/mcp/index.svelte';
+import { modelsStore } from '$lib/stores/models/index.svelte';
+import { settingsStore } from '$lib/stores/settings/index.svelte';
+import { toolsStore } from '$lib/stores/tools.svelte';
+import type {
+	AgenticConfig,
+	AgenticFlowParams,
+	AgenticFlowResult,
+	AgenticSession,
+	MCPToolCall,
+	SettingsConfigType,
+	ToolExecutionResult
+} from '$lib/types';
+import type {
+	AgenticFlowCallbacks,
+	AgenticFlowOptions,
+	AgenticMessage,
+	AgenticToolCallList,
+	SteeringMessage
+} from '$lib/types/agentic';
+import type {
+	ApiChatCompletionToolCall,
+	ApiChatMessageContentPart,
+	ApiChatMessageData
+} from '$lib/types/api';
+import type {
+	ChatMessageAgenticTimings,
+	ChatMessageAgenticTurnStats,
+	ChatMessagePromptProgress,
+	ChatMessageTimings,
+	ChatMessageToolCallTiming
+} from '$lib/types/chat';
+import type {
+	DatabaseMessage,
+	DatabaseMessageExtra,
+	DatabaseMessageExtraAudioFile,
+	DatabaseMessageExtraImageFile
+} from '$lib/types/database';
+import {
+	executeBrowserInfoTool,
+	executeGetDatetimeTool,
+	getAudioInputFormat,
+	isAbortError
+} from '$lib/utils';
+import { SvelteMap } from 'svelte/reactivity';
+
+function createDefaultSession(): AgenticSession {
+	return {
+		currentTurn: 0,
+		executingToolCallId: null,
+		flowRootMessageId: null,
+		isRunning: false,
+		lastError: null,
+		liveLlm: null,
+		pendingPermissionRequest: null,
+		streamingToolCall: null,
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+		pendingPermissionRequest: null,
+		executingToolCallId: null
+=======
+		totalToolCalls: 0
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+	};
+}
+
+function toAgenticMessages(messages: ApiChatMessageData[]): AgenticMessage[] {
+	return messages.map((message) => {
+		if (
+			message.role === MessageRole.ASSISTANT &&
+			message.tool_calls &&
+			message.tool_calls.length > 0
+		) {
+			return {
+				content: message.content,
+				reasoning_content: message.reasoning_content,
+				role: MessageRole.ASSISTANT,
+				tool_calls: message.tool_calls.map((call, index) => ({
+					function: {
+						arguments: call.function?.arguments ?? '',
+						name: call.function?.name ?? ''
+					},
+					id: call.id ?? `call_${index}`,
+					type: (call.type as ToolCallType.FUNCTION) ?? ToolCallType.FUNCTION
+				}))
+			} satisfies AgenticMessage;
+		}
+
+		if (message.role === MessageRole.ASSISTANT) {
+			return {
+				content: message.content,
+				reasoning_content: message.reasoning_content,
+				role: MessageRole.ASSISTANT
+			} satisfies AgenticMessage;
+		}
+
+		if (message.role === MessageRole.TOOL && message.tool_call_id) {
+			return {
+				content: typeof message.content === 'string' ? message.content : '',
+				role: MessageRole.TOOL,
+				tool_call_id: message.tool_call_id
+			} satisfies AgenticMessage;
+		}
+
+		return {
+			content: message.content,
+			role: message.role as MessageRole.SYSTEM | MessageRole.USER
+		} satisfies AgenticMessage;
+	});
+}
+
+class AgenticStore {
+	// permission, continue and steering gates the loop waits on between turns
+	private gates = new AgenticGates();
+	private sessions = new SvelteMap<string, AgenticSession>();
+
+	get isAnyRunning(): boolean {
+		for (const session of this.sessions.values()) {
+			if (session.isRunning) return true;
+		}
+
+		return false;
+	}
+
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+	getSession(conversationId: string): AgenticSession {
+		let session = this._sessions.get(conversationId);
+		if (!session) {
+			session = createDefaultSession();
+			this._sessions.set(conversationId, session);
+		}
+		return session;
+	}
+
+	private updateSession(conversationId: string, update: Partial<AgenticSession>): void {
+		const session = this.getSession(conversationId);
+		this._sessions.set(conversationId, { ...session, ...update });
+	}
+
+	clearSession(conversationId: string): void {
+		this._sessions.delete(conversationId);
+	}
+
+	getActiveSessions(): Array<{ conversationId: string; session: AgenticSession }> {
+		const active: Array<{ conversationId: string; session: AgenticSession }> = [];
+		for (const [conversationId, session] of this._sessions.entries()) {
+			if (session.isRunning) active.push({ conversationId, session });
+		}
+		return active;
+	}
+
+	isRunning(conversationId: string): boolean {
+		return this._sessions.get(conversationId)?.isRunning ?? false;
+	}
+
+	currentTurn(conversationId: string): number {
+		return this._sessions.get(conversationId)?.currentTurn ?? 0;
+	}
+
+	totalToolCalls(conversationId: string): number {
+		return this._sessions.get(conversationId)?.totalToolCalls ?? 0;
+	}
+
+	lastError(conversationId: string): Error | null {
+		return this._sessions.get(conversationId)?.lastError ?? null;
+	}
+
+	streamingToolCall(conversationId: string): { name: string; arguments: string } | null {
+		return this._sessions.get(conversationId)?.streamingToolCall ?? null;
+	}
+
+	executingToolCallId(conversationId: string): string | null {
+		return this._sessions.get(conversationId)?.executingToolCallId ?? null;
+	}
+
+	pendingPermissionRequest(
+		conversationId: string
+	): { toolName: string; serverLabel: string } | null {
+		return this._pendingPermissions.get(conversationId) ?? null;
+	}
+
+	pendingContinueRequest(conversationId: string): boolean {
+		return this._pendingContinueRequests.get(conversationId) ?? false;
+	}
+
+	resolveContinue(conversationId: string, shouldContinue: boolean): void {
+		const resolver = this._continueResolvers.get(conversationId);
+		if (resolver) {
+			this._continueResolvers.delete(conversationId);
+			resolver(shouldContinue);
+		}
+	}
+
+	resolvePermission(conversationId: string, decision: ToolPermissionDecision): void {
+		const resolver = this._permissionResolvers.get(conversationId);
+		if (resolver) {
+			this._permissionResolvers.delete(conversationId);
+			resolver(decision);
+		}
+=======
+	get isReady(): boolean {
+		return true;
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+	}
+
+	clearError(conversationId: string): void {
+		this.updateSession(conversationId, { lastError: null });
+	}
+
+	clearSession(conversationId: string): void {
+		this.sessions.delete(conversationId);
+	}
+
+	/**
+	 * Clear the pending steering message without consuming it.
+	 */
+	clearSteeringMessage(conversationId: string): void {
+		this.gates.clearSteeringMessage(conversationId);
+	}
+
+	constructor() {
+		// drop per-conversation session state when the conversation is deleted,
+		// otherwise every conversation that ever ran a flow leaks a session here
+		conversationsStore.onConversationsDeleted((convIds) => {
+			for (const convId of convIds) {
+				this.sessions.delete(convId);
+			}
+		});
+	}
+
+	/**
+	 * Consume and return the pending steering message for re-sending.
+	 * Called by chatStore after the agentic flow exits.
+	 */
+	consumePendingSteeringMessage(conversationId: string): SteeringMessage | null {
+		return this.gates.consumePendingSteeringMessage(conversationId);
+	}
+
+	getActiveSessions(): Array<{ conversationId: string; session: AgenticSession }> {
+		const active: Array<{ conversationId: string; session: AgenticSession }> = [];
+
+		for (const [conversationId, session] of this.sessions.entries()) {
+			if (session.isRunning) active.push({ conversationId, session });
+		}
+
+		return active;
+	}
+
+	getConfig(settings: SettingsConfigType): AgenticConfig {
+		const maxTurns = Number(settings.agenticMaxTurns) || DEFAULT_AGENTIC_CONFIG.maxTurns;
+		const hasTools =
+			mcpStore.hasEnabledServers() ||
+			toolsStore.serverTools.length > 0 ||
+			toolsStore.browserTools.length > 0 ||
+			toolsStore.customTools.length > 0;
+
+		return {
+			enabled: hasTools && DEFAULT_AGENTIC_CONFIG.enabled,
+			maxTurns
+		};
+	}
+
+	getCurrentTurn(conversationId: string): number {
+		return this.sessions.get(conversationId)?.currentTurn ?? 0;
+	}
+
+	getExecutingToolCallId(conversationId: string): string | null {
+		return this.sessions.get(conversationId)?.executingToolCallId ?? null;
+	}
+
+	// read-only: safe to call from derivations, unlike getSession
+	getFlowRootMessageId(conversationId: string): string | null {
+		return this.sessions.get(conversationId)?.flowRootMessageId ?? null;
+	}
+
+	getLastError(conversationId: string): Error | null {
+		return this.sessions.get(conversationId)?.lastError ?? null;
+	}
+
+	// read-only: safe to call from derivations, unlike getSession
+	getLiveLlmTotals(conversationId: string): AgenticSession['liveLlm'] {
+		return this.sessions.get(conversationId)?.liveLlm ?? null;
+	}
+
+	getPendingContinueRequest(conversationId: string): boolean {
+		return this.gates.getPendingContinueRequest(conversationId);
+	}
+
+	getPendingPermissionRequest(
+		conversationId: string
+	): { toolName: string; serverLabel: string } | null {
+		return this.gates.getPendingPermissionRequest(conversationId);
+	}
+
+	getPendingSteeringMessageContent(conversationId: string): string | null {
+		return this.gates.getPendingSteeringMessageContent(conversationId);
+	}
+
+	getPendingSteeringMessageExtras(conversationId: string): DatabaseMessageExtra[] | undefined {
+		return this.gates.getPendingSteeringMessageExtras(conversationId);
+	}
+
+	getSession(conversationId: string): AgenticSession {
+		let session = this.sessions.get(conversationId);
+
+		if (!session) {
+			session = createDefaultSession();
+			this.sessions.set(conversationId, session);
+		}
+
+		return session;
+	}
+
+	getStreamingToolCall(conversationId: string): { name: string; arguments: string } | null {
+		return this.sessions.get(conversationId)?.streamingToolCall ?? null;
+	}
+
+	getTotalToolCalls(conversationId: string): number {
+		return this.sessions.get(conversationId)?.totalToolCalls ?? 0;
+	}
+
+	hasPendingSteeringMessage(conversationId: string): boolean {
+		return this.gates.hasPendingSteeringMessage(conversationId);
+	}
+
+	/**
+	 * Queue a steering message. When the current agentic turn completes,
+	 * the flow exits and the caller re-sends the message as a normal chat message.
+	 */
+	injectSteeringMessage(
+		conversationId: string,
+		content: string,
+		extras?: DatabaseMessageExtra[]
+	): void {
+		this.gates.injectSteeringMessage(conversationId, content, extras);
+	}
+
+	isRunning(conversationId: string): boolean {
+		return this.sessions.get(conversationId)?.isRunning ?? false;
+	}
+
+	resolveContinue(conversationId: string, shouldContinue: boolean): void {
+		this.gates.resolveContinue(conversationId, shouldContinue);
+	}
+
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+	getConfig(settings: SettingsConfigType, perChatOverrides?: McpServerOverride[]): AgenticConfig {
+		const maxTurns = Number(settings.agenticMaxTurns) || DEFAULT_AGENTIC_CONFIG.maxTurns;
+		const hasTools =
+			mcpStore.hasEnabledServers(perChatOverrides) ||
+			toolsStore.builtinTools.length > 0 ||
+			toolsStore.frontendTools.length > 0 ||
+			toolsStore.customTools.length > 0;
+		return {
+			enabled: hasTools && DEFAULT_AGENTIC_CONFIG.enabled,
+			maxTurns
+		};
+	}
+
+	private parseToolArguments(args: string | Record<string, unknown>): Record<string, unknown> {
+		if (typeof args === 'object') return args;
+		const trimmed = args.trim();
+		if (trimmed === '') return {};
+		return JSON.parse(trimmed) as Record<string, unknown>;
+	}
+
+	private async requestPermission(
+		conversationId: string,
+		toolName: string,
+		serverLabel: string,
+		signal?: AbortSignal
+	): Promise<ToolPermissionDecision> {
+		const permissionKey = toolsStore.getPermissionKey(toolName);
+		if (permissionKey && permissionsStore.hasTool(permissionKey)) {
+			return ToolPermissionDecision.ONCE;
+		}
+
+		this._pendingPermissions.set(conversationId, { toolName, serverLabel });
+
+		return new Promise<ToolPermissionDecision>((resolve) => {
+			if (signal?.aborted) {
+				this._pendingPermissions.set(conversationId, null);
+				resolve(ToolPermissionDecision.DENY);
+				return;
+			}
+
+			this._permissionResolvers.set(conversationId, (decision) => {
+				this._pendingPermissions.set(conversationId, null);
+				if (decision === ToolPermissionDecision.ALWAYS && permissionKey) {
+					permissionsStore.allowTool(permissionKey);
+				} else if (decision === ToolPermissionDecision.ALWAYS_SERVER) {
+					const serverToolKeys = toolsStore.allTools
+						.filter((t) =>
+							t.serverName
+								? t.serverName === serverLabel
+								: toolsStore.getToolServerLabel(t.definition.function.name) === serverLabel
+						)
+						.map((t) => toolsStore.getPermissionKey(t.definition.function.name)!)
+						.filter((k): k is string => k !== null);
+					permissionsStore.allowTools(serverToolKeys);
+				}
+				resolve(decision);
+			});
+
+			signal?.addEventListener(
+				'abort',
+				() => {
+					const resolver = this._permissionResolvers.get(conversationId);
+					if (resolver) {
+						this._permissionResolvers.delete(conversationId);
+						this._pendingPermissions.set(conversationId, null);
+						resolve(ToolPermissionDecision.DENY);
+					}
+				},
+				{ once: true }
+			);
+		});
+	}
+
+	private async requestContinue(conversationId: string, signal?: AbortSignal): Promise<boolean> {
+		this._pendingContinueRequests.set(conversationId, true);
+
+		return new Promise<boolean>((resolve) => {
+			if (signal?.aborted) {
+				this._pendingContinueRequests.set(conversationId, false);
+				resolve(false);
+				return;
+			}
+
+			this._continueResolvers.set(conversationId, (shouldContinue) => {
+				this._pendingContinueRequests.set(conversationId, false);
+				resolve(shouldContinue);
+			});
+
+			signal?.addEventListener(
+				'abort',
+				() => {
+					const resolver = this._continueResolvers.get(conversationId);
+					if (resolver) {
+						this._continueResolvers.delete(conversationId);
+						this._pendingContinueRequests.set(conversationId, false);
+						resolve(false);
+					}
+				},
+				{ once: true }
+			);
+		});
+=======
+	resolvePermission(conversationId: string, decision: ToolPermissionDecision): void {
+		this.gates.resolvePermission(conversationId, decision);
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+	}
+
+	async runAgenticFlow(params: AgenticFlowParams): Promise<AgenticFlowResult> {
+		const {
+			callbacks,
+			conversationId,
+			flowRootMessageId,
+			messages,
+			options = {},
+			signal,
+			toolPolicy
+		} = params;
+
+		// Clear any pending permissions/continue requests for this conversation when starting a new flow
+		this.gates.clear(conversationId);
+
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+		// Ensure built-in tools are fetched before checking if agentic is enabled
+		// Only fetch if the server has built-in tools enabled to avoid 403 errors in MODEL mode
+		const builtinToolsEnabled = serverStore.props?.builtin_tools_enabled;
+		if (toolsStore.builtinTools.length === 0 && !toolsStore.loading) {
+			await toolsStore.fetchBuiltinTools(builtinToolsEnabled);
+=======
+		// Ensure server tools are fetched before checking if agentic is enabled
+		if (toolsStore.serverTools.length === 0 && !toolsStore.loading) {
+			await toolsStore.fetchServerTools();
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+		}
+
+		const agenticConfig = this.getConfig(settingsStore.config);
+
+		if (!agenticConfig.enabled) return { handled: false };
+
+		// callers without an explicit policy fall back to the global defaults
+		const disabledTools = new Set(toolPolicy?.disabledTools ?? toolsStore.disabledTools);
+		const disabledToolCategories = new Set(
+			toolPolicy?.disabledToolCategories ?? toolsStore.disabledToolCategories
+		);
+		// initialize every settings-enabled server; tool collection filters by this
+		// flow's policy, so switching policies never re-initializes connections
+		const hasMcpServers = conversationsStore.preferences.policyEnabledServerIds().length > 0;
+
+		if (hasMcpServers) {
+			const initialized = await mcpStore.ensureInitialized();
+
+			if (!initialized) {
+				console.log('[AgenticStore] MCP not initialized');
+			}
+		}
+
+		const tools = toolsStore.getEnabledToolsForLLM(disabledTools, disabledToolCategories);
+
+		if (tools.length === 0) {
+			return { handled: false };
+		}
+
+		console.log(`[AgenticStore] Starting agentic flow with ${tools.length} tools`);
+
+		const normalizedMessages: ApiChatMessageData[] =
+			await ChatService.normalizeMessagesForApi(messages);
+
+		this.updateSession(conversationId, {
+			currentTurn: 0,
+			flowRootMessageId: flowRootMessageId ?? null,
+			isRunning: true,
+			lastError: null,
+			liveLlm: null,
+			totalToolCalls: 0
+		});
+
+		if (hasMcpServers) mcpStore.acquireConnection();
+
+		try {
+			await this.executeAgenticLoop({
+				agenticConfig,
+				callbacks,
+				conversationId,
+				messages: normalizedMessages,
+				options,
+				signal,
+				tools
+			});
+
+			return { handled: true };
+		} catch (error) {
+			const normalizedError = error instanceof Error ? error : new Error(String(error));
+
+			this.updateSession(conversationId, { lastError: normalizedError });
+			callbacks.onError?.(normalizedError);
+
+			return { error: normalizedError, handled: true };
+		} finally {
+			this.updateSession(conversationId, {
+				flowRootMessageId: null,
+				isRunning: false,
+				liveLlm: null
+			});
+
+			if (hasMcpServers) {
+				await mcpStore
+					.releaseConnection()
+					.catch((err: unknown) =>
+						console.warn('[AgenticStore] Failed to release MCP connection:', err)
+					);
+			}
+		}
+	}
+
+	private buildAttachmentName(mimeType: string, index: number): string {
+		const extension = mimeType.startsWith(MimeTypePrefix.AUDIO)
+			? (AUDIO_MIME_TO_EXTENSION[mimeType] ?? DEFAULT_AUDIO_EXTENSION)
+			: (IMAGE_MIME_TO_EXTENSION[mimeType] ?? DEFAULT_IMAGE_EXTENSION);
+
+		return `${MCP_ATTACHMENT_NAME_PREFIX}-${Date.now()}-${index}.${extension}`;
+	}
+
+	private buildFinalTimings(
+		capturedTimings: ChatMessageTimings | undefined,
+		agenticTimings: ChatMessageAgenticTimings
+	): ChatMessageTimings | undefined {
+		if (agenticTimings.toolCallsCount === 0) return capturedTimings;
+
+		return {
+			agentic: agenticTimings,
+			cache_n: capturedTimings?.cache_n,
+			predicted_ms: capturedTimings?.predicted_ms,
+			predicted_n: capturedTimings?.predicted_n,
+			prompt_ms: capturedTimings?.prompt_ms,
+			prompt_n: capturedTimings?.prompt_n
+		};
+	}
+
+	private async executeAgenticLoop(params: {
+		conversationId: string;
+		messages: ApiChatMessageData[];
+		options: AgenticFlowOptions;
+		tools: ReturnType<typeof toolsStore.getEnabledToolsForLLM>;
+		agenticConfig: AgenticConfig;
+		callbacks: AgenticFlowCallbacks;
+		signal?: AbortSignal;
+	}): Promise<void> {
+		const { agenticConfig, callbacks, conversationId, messages, options, signal, tools } = params;
+		const {
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+			onChunk,
+			onReasoningChunk,
+			onToolCallsStreaming,
+			onAttachments,
+			onModel,
+			onCompletionId,
+			onAssistantTurnComplete,
+			createToolResultMessage,
+			updateToolResultMessage,
+=======
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+			createAssistantMessage,
+			createToolResultMessage,
+			onAssistantTurnComplete,
+			onAttachments,
+			onChunk,
+			onCompletionId,
+			onFlowComplete,
+			onModel,
+			onReasoningChunk,
+			onTimings,
+			onToolCallsStreaming,
+			onTurnComplete,
+			updateToolResultMessage
+		} = callbacks;
+		const sessionMessages: AgenticMessage[] = toAgenticMessages(messages);
+
+		let capturedTimings: ChatMessageTimings | undefined;
+		let totalToolCallCount = 0;
+
+		const agenticTimings: ChatMessageAgenticTimings = {
+			llm: { predicted_ms: 0, predicted_n: 0, prompt_ms: 0, prompt_n: 0 },
+			perTurn: [],
+			toolCalls: [],
+			toolCallsCount: 0,
+			toolsMs: 0,
+			turns: 0
+		};
+		const maxTurns = agenticConfig.maxTurns;
+		const effectiveModel = options.model || modelsStore.models[0]?.model || '';
+
+		let turn = 0;
+
+		while (true) {
+			if (turn >= maxTurns) {
+				// Turn limit reached - ask user whether to continue
+				const shouldContinue = await this.gates.requestContinue(conversationId, signal);
+
+				// Yield to allow Svelte to flush the UI update
+				await new Promise((r) => setTimeout(r, 0));
+
+				if (!shouldContinue || signal?.aborted) {
+					onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+					return;
+				}
+
+				// User chose to continue - extend the limit
+				turn = 0;
+			}
+
+			this.updateSession(conversationId, { currentTurn: turn + 1 });
+			agenticTimings.turns = turn + 1;
+
+			if (signal?.aborted) {
+				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+				return;
+			}
+
+			// For turns > 0, create a new assistant message via callback
+			if (turn > 0 && createAssistantMessage) {
+				await createAssistantMessage();
+			}
+
+			let turnContent = '';
+			let turnReasoningContent = '';
+			let turnToolCalls: ApiChatCompletionToolCall[] = [];
+			let lastStreamingToolCallName = '';
+			let lastStreamingToolCallArgsLength = 0;
+			let turnTimings: ChatMessageTimings | undefined;
+
+			const turnStats: ChatMessageAgenticTurnStats = {
+				llm: { predicted_ms: 0, predicted_n: 0, prompt_ms: 0, prompt_n: 0 },
+				toolCalls: [],
+				toolsMs: 0,
+				turn: turn + 1
+			};
+
+			try {
+				await ChatService.sendMessage(
+					sessionMessages as ApiChatMessageData[],
+					{
+						...options,
+						onChunk: (chunk: string) => {
+							turnContent += chunk;
+							onChunk?.(chunk);
+						},
+						onComplete: () => {
+							/* Completion handled after sendMessage resolves */
+						},
+						onCompletionId,
+						onError: (error: Error) => {
+							throw error;
+						},
+						onModel,
+						onReasoningChunk: (chunk: string) => {
+							turnReasoningContent += chunk;
+							onReasoningChunk?.(chunk);
+						},
+						onTimings: (timings?: ChatMessageTimings, progress?: ChatMessagePromptProgress) => {
+							onTimings?.(timings, progress);
+
+							if (timings) {
+								capturedTimings = timings;
+								turnTimings = timings;
+
+								// completed turns + in-flight turn live counts
+								this.updateSession(conversationId, {
+									liveLlm: {
+										predicted_ms: agenticTimings.llm.predicted_ms + (timings.predicted_ms ?? 0),
+										predicted_n: agenticTimings.llm.predicted_n + (timings.predicted_n ?? 0),
+										prompt_ms: agenticTimings.llm.prompt_ms + (timings.prompt_ms ?? 0),
+										prompt_n: agenticTimings.llm.prompt_n + (timings.prompt_n ?? 0)
+									}
+								});
+							}
+						},
+						onToolCallChunk: (serialized: string) => {
+							try {
+								turnToolCalls = JSON.parse(serialized) as ApiChatCompletionToolCall[];
+
+								onToolCallsStreaming?.(turnToolCalls);
+
+								if (turnToolCalls.length > 0 && turnToolCalls[0]?.function) {
+									const name = turnToolCalls[0].function.name || '';
+									const args = turnToolCalls[0].function.arguments || '';
+									const argsLengthBucket = Math.floor(args.length / 100);
+
+									if (
+										name !== lastStreamingToolCallName ||
+										argsLengthBucket !== lastStreamingToolCallArgsLength
+									) {
+										lastStreamingToolCallName = name;
+										lastStreamingToolCallArgsLength = argsLengthBucket;
+										this.updateSession(conversationId, {
+											streamingToolCall: { arguments: args, name }
+										});
+									}
+								}
+							} catch {
+								/* Ignore parse errors during streaming */
+							}
+						},
+						stream: true,
+						tools: tools.length > 0 ? tools : undefined
+					},
+					conversationId,
+					signal
+				);
+
+				this.updateSession(conversationId, { streamingToolCall: null });
+
+				if (turnTimings) {
+					agenticTimings.llm.predicted_n += turnTimings.predicted_n || 0;
+					agenticTimings.llm.predicted_ms += turnTimings.predicted_ms || 0;
+					agenticTimings.llm.prompt_n += turnTimings.prompt_n || 0;
+					agenticTimings.llm.prompt_ms += turnTimings.prompt_ms || 0;
+					turnStats.llm.predicted_n = turnTimings.predicted_n || 0;
+					turnStats.llm.predicted_ms = turnTimings.predicted_ms || 0;
+					turnStats.llm.prompt_n = turnTimings.prompt_n || 0;
+					turnStats.llm.prompt_ms = turnTimings.prompt_ms || 0;
+				}
+			} catch (error) {
+				if (signal?.aborted) {
+					// Save whatever we have for this turn before exiting
+					await onAssistantTurnComplete?.(
+						turnContent,
+						turnReasoningContent || undefined,
+						this.buildFinalTimings(capturedTimings, agenticTimings),
+						undefined
+					);
+					onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+					return;
+				}
+
+				const normalizedError = error instanceof Error ? error : new Error('LLM stream error');
+
+				// preserve partial output as is, the outer error dialog informs the user separately
+				await onAssistantTurnComplete?.(
+					turnContent,
+					turnReasoningContent || undefined,
+					this.buildFinalTimings(capturedTimings, agenticTimings),
+					undefined
+				);
+				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+				throw normalizedError;
+			}
+
+			// If the abort landed while ChatService.sendMessage was still resolving, the
+			// outer catch above never fires because ChatService swallows the AbortError
+			// and returns normally. Bail out here so a half-received tool_call (truncated
+			// arguments JSON) is not persisted as if it were complete.
+			if (signal?.aborted) {
+				await onAssistantTurnComplete?.(
+					turnContent,
+					turnReasoningContent || undefined,
+					this.buildFinalTimings(capturedTimings, agenticTimings),
+					undefined
+				);
+				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+=======
+
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+				return;
+			}
+
+			// === Steering check: if a user message was queued during this turn, exit the flow.
+			// The caller (chatStore) will consume the pending message and re-send it normally.
+			if (this.gates.hasPendingSteeringMessage(conversationId)) {
+				console.log('[AgenticStore] Steering message detected after turn, exiting agentic flow');
+				await onAssistantTurnComplete?.(
+					turnContent,
+					turnReasoningContent || undefined,
+					this.buildFinalTimings(capturedTimings, agenticTimings),
+					turnToolCalls.length > 0 ? this.normalizeToolCalls(turnToolCalls) : undefined
+				);
+				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+				return;
+			}
+
+			// No tool calls = final turn, save and complete
+			if (turnToolCalls.length === 0) {
+				agenticTimings.perTurn!.push(turnStats);
+
+				const finalTimings = this.buildFinalTimings(capturedTimings, agenticTimings);
+
+				await onAssistantTurnComplete?.(
+					turnContent,
+					turnReasoningContent || undefined,
+					finalTimings,
+					undefined
+				);
+
+				if (finalTimings) onTurnComplete?.(finalTimings);
+
+				onFlowComplete?.(finalTimings);
+
+				return;
+			}
+
+			// Normalize and save assistant turn with tool calls
+			const normalizedCalls = this.normalizeToolCalls(turnToolCalls);
+
+			if (normalizedCalls.length === 0) {
+				await onAssistantTurnComplete?.(
+					turnContent,
+					turnReasoningContent || undefined,
+					this.buildFinalTimings(capturedTimings, agenticTimings),
+					undefined
+				);
+				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+				return;
+			}
+
+			totalToolCallCount += normalizedCalls.length;
+			this.updateSession(conversationId, { totalToolCalls: totalToolCallCount });
+
+			// Save the assistant message with its tool calls
+			await onAssistantTurnComplete?.(
+				turnContent,
+				turnReasoningContent || undefined,
+				turnTimings,
+				normalizedCalls
+			);
+
+			// Add assistant message to session history
+			sessionMessages.push({
+				content: turnContent || undefined,
+				reasoning_content: turnReasoningContent || undefined,
+				role: MessageRole.ASSISTANT,
+				tool_calls: normalizedCalls
+			});
+
+			// Execute each tool call and create result messages
+			for (let i = 0; i < normalizedCalls.length; i++) {
+				const toolCall = normalizedCalls[i];
+
+				if (signal?.aborted) {
+					onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+					return;
+				}
+
+				// Check for pending steering message - skip remaining tool calls
+				if (this.gates.hasPendingSteeringMessage(conversationId)) {
+					console.log(
+						`[AgenticStore] Steering message detected, skipping ${normalizedCalls.length - i} remaining tool call(s)`
+					);
+					for (let j = i; j < normalizedCalls.length; j++) {
+						const remainingCall = normalizedCalls[j];
+						const interruptedContent = 'Tool execution was interrupted by a new user message.';
+
+						if (createToolResultMessage) {
+							await createToolResultMessage(remainingCall.id, interruptedContent);
+						}
+
+						sessionMessages.push({
+							content: interruptedContent,
+							role: MessageRole.TOOL,
+							tool_call_id: remainingCall.id
+						});
+					}
+
+					break;
+				}
+
+				const toolName = toolCall.function.name;
+				const serverLabel = toolsStore.getToolServerLabel(toolName);
+				// Ask for permission before executing the tool
+				const permission = await this.gates.requestPermission(
+					conversationId,
+					toolName,
+					serverLabel,
+					signal
+				);
+
+				// Yield to allow Svelte to flush the UI update (hide permission dialog)
+				await new Promise((r) => setTimeout(r, 0));
+
+				if (signal?.aborted) {
+					onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+					return;
+				}
+
+				const toolStartTime = performance.now();
+				const toolSource = toolsStore.getToolSource(toolName);
+
+				let result = '';
+				let toolSuccess = true;
+				let createdToolResultMessageId: string | null = null;
+
+				// Streaming tools (currently only exec_shell_command): mark
+				// the session so the matching renderer can switch to live mode.
+				// Cleared unconditionally below.
+				this.updateSession(conversationId, { executingToolCallId: toolCall.id });
+
+				if (permission === ToolPermissionDecision.DENY) {
+					result = 'Tool execution was denied by the user.';
+					toolSuccess = false;
+				} else {
+					try {
+						if (
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+							toolSource === ToolSource.BUILTIN &&
+							toolName === BuiltInTool.EXEC_SHELL_COMMAND &&
+							createToolResultMessage &&
+							updateToolResultMessage
+						) {
+							const args = this.parseToolArguments(toolCall.function.arguments);
+							const msg = await createToolResultMessage(toolCall.id, '');
+							createdToolResultMessageId = msg.id;
+
+							let accumulated = '';
+							for await (const ev of ToolsService.streamTool(toolName, args, signal)) {
+								if (ev.chunk !== null) {
+									accumulated += ev.chunk;
+									await updateToolResultMessage(msg.id, accumulated);
+								}
+								if (ev.done) {
+									if (ev.error) {
+										accumulated = accumulated
+											? `${accumulated}\nError: ${ev.error}`
+											: `Error: ${ev.error}`;
+										await updateToolResultMessage(msg.id, accumulated);
+										toolSuccess = false;
+									}
+									break;
+								}
+							}
+							result = accumulated;
+						} else if (toolSource === ToolSource.BUILTIN) {
+=======
+							toolSource === ToolSource.SERVER &&
+							toolName === BuiltInTool.SERVER_EXEC_SHELL_COMMAND &&
+							createToolResultMessage &&
+							updateToolResultMessage
+						) {
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+							const args = this.parseToolArguments(toolCall.function.arguments);
+							const cwd = conversationsStore.activeConversation?.cwd;
+							const msg = await createToolResultMessage(toolCall.id, '', undefined, cwd);
+
+							createdToolResultMessageId = msg.id;
+
+							let accumulated = '';
+
+							for await (const ev of ToolsService.streamTool(toolName, args, signal, cwd)) {
+								if (ev.chunk !== null) {
+									accumulated += ev.chunk;
+									await updateToolResultMessage(msg.id, accumulated);
+								}
+
+								if (ev.done) {
+									if (ev.error) {
+										accumulated = accumulated
+											? `${accumulated}\nError: ${ev.error}`
+											: `Error: ${ev.error}`;
+										await updateToolResultMessage(msg.id, accumulated);
+										toolSuccess = false;
+									}
+
+									break;
+								}
+							}
+							result = accumulated;
+						} else if (toolSource === ToolSource.SERVER) {
+							const args = this.parseToolArguments(toolCall.function.arguments);
+							const cwd = conversationsStore.activeConversation?.cwd;
+							const executionResult = await ToolsService.executeTool(toolName, args, signal, cwd);
+
+							result = executionResult.content;
+
+							if (executionResult.isError) toolSuccess = false;
+						} else if (toolSource === ToolSource.BROWSER) {
+							const args = this.parseToolArguments(toolCall.function.arguments);
+
+							let executionResult: ToolExecutionResult;
+
+							if (toolName === BuiltInTool.BROWSER_GET_DATETIME) {
+								executionResult = executeGetDatetimeTool();
+							} else if (toolName === BuiltInTool.SERVER_GET_INFO) {
+								executionResult = executeBrowserInfoTool();
+							} else if (toolName === BuiltInTool.BROWSER_READ_MEDIA) {
+								executionResult = await ReadMediaService.executeTool(
+									args,
+									{
+										audio: modelsStore.props.modelSupportsAudio(effectiveModel),
+										vision: modelsStore.props.modelSupportsVision(effectiveModel)
+									},
+									signal,
+									conversationsStore.activeConversation?.cwd
+								);
+							} else {
+								executionResult = await SandboxService.executeTool(toolName, args, signal);
+							}
+
+							result = executionResult.content;
+
+							if (executionResult.isError) toolSuccess = false;
+						} else {
+							const mcpCall: MCPToolCall = {
+								function: { arguments: toolCall.function.arguments, name: toolName },
+								id: toolCall.id
+							};
+							const executionResult = await mcpStore.executeTool(mcpCall, signal);
+
+							result = executionResult.content;
+						}
+					} catch (error) {
+						if (isAbortError(error)) {
+							this.updateSession(conversationId, { executingToolCallId: null });
+							onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+							return;
+						}
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+=======
+
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+						// Carry the partial stream contents already mirrored to the UI -
+						// they show up as live output even if the stream broke off mid-run.
+						result = result
+							? `${result}\nError: ${error instanceof Error ? error.message : String(error)}`
+							: `Error: ${error instanceof Error ? error.message : String(error)}`;
+						toolSuccess = false;
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+=======
+
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+						if (createdToolResultMessageId && updateToolResultMessage) {
+							await updateToolResultMessage(createdToolResultMessageId, result);
+						}
+					}
+				}
+
+				this.updateSession(conversationId, { executingToolCallId: null });
+
+				const toolDurationMs = performance.now() - toolStartTime;
+				const toolTiming: ChatMessageToolCallTiming = {
+					duration_ms: Math.round(toolDurationMs),
+					name: toolCall.function.name,
+					success: toolSuccess
+				};
+
+				agenticTimings.toolCalls!.push(toolTiming);
+				agenticTimings.toolCallsCount++;
+				agenticTimings.toolsMs += Math.round(toolDurationMs);
+				turnStats.toolCalls.push(toolTiming);
+				turnStats.toolsMs += Math.round(toolDurationMs);
+
+				if (signal?.aborted) {
+					onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+					return;
+				}
+
+				const { attachments, cleanedResult } = this.extractBase64Attachments(result);
+
+				// For streaming tools the result message was created empty
+				// at the start of execution and updated in place as chunks
+				// arrived via updateToolResultMessage. Skip the second
+				// create call - just attach any base64 attachments found in
+				// the final accumulator (rare, since chunks usually don't
+				// carry image data URIs) and emit the attachments callback.
+				let toolResultMessage: DatabaseMessage | undefined;
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+				if (createdToolResultMessageId) {
+					toolResultMessage = { id: createdToolResultMessageId } as DatabaseMessage;
+=======
+
+				if (createdToolResultMessageId) {
+					toolResultMessage = { id: createdToolResultMessageId } as DatabaseMessage;
+
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+					if (attachments.length > 0 && updateToolResultMessage) {
+						await updateToolResultMessage(createdToolResultMessageId, cleanedResult, attachments);
+					}
+				} else if (createToolResultMessage) {
+					toolResultMessage = await createToolResultMessage(
+						toolCall.id,
+						cleanedResult,
+						attachments.length > 0 ? attachments : undefined
+					);
+				}
+
+				if (attachments.length > 0 && toolResultMessage) {
+					onAttachments?.(toolResultMessage.id, attachments);
+				}
+
+				// Build content parts for session history (including images for vision models)
+				const contentParts: ApiChatMessageContentPart[] = [
+					{ text: cleanedResult, type: ContentPartType.TEXT }
+				];
+
+				for (const attachment of attachments) {
+					if (attachment.type === AttachmentType.AUDIO) {
+						if (modelsStore.props.modelSupportsAudio(effectiveModel)) {
+							contentParts.push({
+								input_audio: {
+									data: (attachment as DatabaseMessageExtraAudioFile).base64Data,
+									format: getAudioInputFormat(
+										(attachment as DatabaseMessageExtraAudioFile).mimeType
+									)
+								},
+								type: ContentPartType.INPUT_AUDIO
+							});
+						}
+					} else if (attachment.type === AttachmentType.IMAGE) {
+						if (modelsStore.props.modelSupportsVision(effectiveModel)) {
+							contentParts.push({
+								image_url: {
+									url: (attachment as DatabaseMessageExtraImageFile).base64Url
+								},
+								type: ContentPartType.IMAGE_URL
+							});
+						} else {
+							console.info(
+								`[AgenticStore] Skipping image attachment (model "${effectiveModel}" does not support vision)`
+							);
+						}
+					}
+				}
+
+				sessionMessages.push({
+					content: contentParts.length === 1 ? cleanedResult : contentParts,
+					role: MessageRole.TOOL,
+					tool_call_id: toolCall.id
+				});
+			}
+
+			if (turnStats.toolCalls.length > 0) {
+				agenticTimings.perTurn!.push(turnStats);
+
+				const intermediateTimings = this.buildFinalTimings(capturedTimings, agenticTimings);
+
+				if (intermediateTimings) onTurnComplete?.(intermediateTimings);
+			}
+
+			// If tools were interrupted by a steering message, exit now instead of starting another LLM turn
+			if (this.gates.hasPendingSteeringMessage(conversationId)) {
+				console.log(
+					'[AgenticStore] Steering message detected after tool execution, exiting agentic flow'
+				);
+				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+
+				return;
+			}
+
+			turn++;
+		}
+	}
+
+	private extractBase64Attachments(result: string): {
+		cleanedResult: string;
+		attachments: DatabaseMessageExtra[];
+	} {
+		if (!result.trim()) {
+			return { attachments: [], cleanedResult: result };
+		}
+
+		const lines = result.split(NEWLINE);
+		const attachments: DatabaseMessageExtra[] = [];
+
+		let attachmentIndex = 0;
+
+		const cleanedLines = lines.map((line) => {
+			const trimmedLine = line.trim();
+			const match = trimmedLine.match(DATA_URI_BASE64_REGEX);
+
+			if (!match) {
+				return line;
+			}
+
+			const mimeType = match[1].toLowerCase();
+			const base64Data = match[2];
+
+			if (!base64Data) {
+				return line;
+			}
+
+			attachmentIndex += 1;
+			const name = this.buildAttachmentName(mimeType, attachmentIndex);
+
+			if (mimeType.startsWith(MIME_TYPE_PREFIXES.IMAGE)) {
+				attachments.push({ base64Url: trimmedLine, name, type: AttachmentType.IMAGE });
+
+				return `[Attachment saved: ${name}]`;
+			}
+
+			if (mimeType.startsWith(MimeTypePrefix.AUDIO)) {
+				// audio extras hold the bare base64, the input_audio part has no room for a data URI
+				attachments.push({
+					base64Data,
+					mimeType,
+					name,
+					type: AttachmentType.AUDIO
+				});
+
+				return `[Attachment saved: ${name}]`;
+			}
+
+			return line;
+		});
+
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+		return { cleanedResult: cleanedLines.join(NEWLINE), attachments };
+=======
+		return { attachments, cleanedResult: cleanedLines.join(NEWLINE) };
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts
+	}
+
+	private normalizeToolCalls(toolCalls: ApiChatCompletionToolCall[]): AgenticToolCallList {
+		if (!toolCalls) return [];
+
+		return toolCalls.map((call, index) => ({
+			function: {
+				arguments: call?.function?.arguments ?? '',
+				name: call?.function?.name ?? ''
+			},
+			id: call?.id ?? `tool_${index}`,
+			type: (call?.type as ToolCallType.FUNCTION) ?? ToolCallType.FUNCTION
+		}));
+	}
+
+	private parseToolArguments(args: string | Record<string, unknown>): Record<string, unknown> {
+		if (typeof args === 'object') return args;
+
+		const trimmed = args.trim();
+
+		if (trimmed === '') return {};
+
+		return JSON.parse(trimmed) as Record<string, unknown>;
+	}
+
+	private updateSession(conversationId: string, update: Partial<AgenticSession>): void {
+		const session = this.getSession(conversationId);
+
+		this.sessions.set(conversationId, { ...session, ...update });
+	}
+}
+
+export const agenticStore = new AgenticStore();
+<<<<<<< HEAD:tools/ui/src/lib/stores/agentic.svelte.ts
+
+export function agenticIsRunning(conversationId: string) {
+	return agenticStore.isRunning(conversationId);
+}
+
+export function agenticCurrentTurn(conversationId: string) {
+	return agenticStore.currentTurn(conversationId);
+}
+
+export function agenticTotalToolCalls(conversationId: string) {
+	return agenticStore.totalToolCalls(conversationId);
+}
+
+export function agenticLastError(conversationId: string) {
+	return agenticStore.lastError(conversationId);
+}
+
+export function agenticStreamingToolCall(conversationId: string) {
+	return agenticStore.streamingToolCall(conversationId);
+}
+
+export function agenticPendingPermissionRequest(conversationId: string) {
+	return agenticStore.pendingPermissionRequest(conversationId);
+}
+
+export function agenticResolvePermission(conversationId: string, decision: ToolPermissionDecision) {
+	agenticStore.resolvePermission(conversationId, decision);
+}
+
+export function agenticPendingContinueRequest(conversationId: string) {
+	return agenticStore.pendingContinueRequest(conversationId);
+}
+
+export function agenticResolveContinue(conversationId: string, shouldContinue: boolean) {
+	agenticStore.resolveContinue(conversationId, shouldContinue);
+}
+
+export function agenticHasPendingSteeringMessage(conversationId: string) {
+	return agenticStore.hasPendingSteeringMessage(conversationId);
+}
+
+export function agenticInjectSteeringMessage(
+	conversationId: string,
+	content: string,
+	extras?: DatabaseMessageExtra[]
+) {
+	agenticStore.injectSteeringMessage(conversationId, content, extras);
+}
+
+export function agenticPendingSteeringMessageContent(conversationId: string) {
+	return agenticStore.pendingSteeringMessageContent(conversationId);
+}
+
+export function agenticPendingSteeringMessageExtras(conversationId: string) {
+	return agenticStore.pendingSteeringMessageExtras(conversationId);
+}
+
+export function agenticClearSteeringMessage(conversationId: string) {
+	agenticStore.clearSteeringMessage(conversationId);
+}
+
+export function agenticIsAnyRunning() {
+	return agenticStore.isAnyRunning;
+}
+
+export function agenticExecutingToolCallId(conversationId: string) {
+	return agenticStore.executingToolCallId(conversationId);
+}
+=======
+>>>>>>> beellama/main:tools/ui/src/lib/stores/agentic/index.svelte.ts

@@ -36,6 +36,9 @@ struct common_preset {
     // unset option by its env variable
     void unset_option(const std::string & env);
 
+    // erase every option classified as secret-bearing by its common_arg definition
+    void remove_sensitive_options();
+
     // get option value by its env variable, return false if not found
     bool get_option(const std::string & env, std::string & value) const;
 
@@ -58,6 +61,10 @@ struct common_preset_context {
 
     bool filter_allowed_keys = false;
     std::set<std::string> allowed_keys;
+
+    // if true, options unknown to the current example are skipped instead of being an error
+    // used for config files shared by all binaries, where each binary only knows a subset of options
+    bool ignore_unknown_keys = false;
 
     // if only_remote_allowed is true, only accept whitelisted keys
     common_preset_context(llama_example ex);

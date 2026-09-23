@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <algorithm>
+#include <iterator>
 #include <unordered_set>
 #include <functional>
 #include <memory>
@@ -264,11 +265,13 @@ static bool path_glob_match(const std::string & pattern, const std::string & rel
 //
 
 static constexpr size_t SERVER_TOOL_READ_FILE_MAX_SIZE = 16 * 1024; // 16 KB
+static constexpr size_t SERVER_TOOL_READ_FILE_MAX_SIZE_BASE64 = 32 * 1024 * 1024; // 32 MB
 
 struct server_tool_read_file : server_tool {
     server_tool_read_file() {
         name = "read_file";
         display_name = "Read file";
+        uses_cwd = true;
         permission_write = false;
     }
 
@@ -298,6 +301,8 @@ struct server_tool_read_file : server_tool {
         int  start_line   = json_value(params, "start_line", 1);
         int  end_line     = json_value(params, "end_line",  -1); // -1 = no limit
         bool append_loc   = json_value(params, "append_loc", false);
+        // comes from the x-resp-type header, the model cannot ask for it
+        bool as_base64    = json_value(params, "resp_type", std::string()) == "base64";
 
         auto io = make_tools_io(params);
 
@@ -305,6 +310,23 @@ struct server_tool_read_file : server_tool {
         if (!io->file_size(path, file_size)) {
             return {{"error", "cannot stat file: " + path}};
         }
+
+        if (as_base64) {
+            if (file_size > SERVER_TOOL_READ_FILE_MAX_SIZE_BASE64) {
+                return {{"error", string_format(
+                    "file too large (%zu bytes, max %zu)",
+                    (size_t)file_size, SERVER_TOOL_READ_FILE_MAX_SIZE_BASE64)}};
+            }
+            std::string content;
+            if (!io->read_file(path, content)) {
+                return {{"error", "failed to open file: " + path}};
+            }
+            return {
+                {"base64",     base64::encode(content.data(), content.size())},
+                {"size_bytes", (size_t) content.size()},
+            };
+        }
+
         if (file_size > SERVER_TOOL_READ_FILE_MAX_SIZE && end_line == -1) {
             return {{"error", string_format(
                 "file too large (%zu bytes, max %zu). Use start_line/end_line to read a portion.",
@@ -348,12 +370,16 @@ struct server_tool_read_file : server_tool {
 // file_glob_search: find files matching a glob pattern under a base directory
 //
 
-static constexpr size_t SERVER_TOOL_FILE_SEARCH_MAX_RESULTS = 100;
+static constexpr int SERVER_TOOL_FILE_SEARCH_MAX_RESULTS = 100;
+static constexpr const char * SERVER_TOOL_FILE_SEARCH_TYPE_FILE = "file";
+static constexpr const char * SERVER_TOOL_FILE_SEARCH_TYPE_DIR  = "dir";
+static constexpr const char * SERVER_TOOL_FILE_SEARCH_TYPE_ALL  = "all";
 
 struct server_tool_file_glob_search : server_tool {
     server_tool_file_glob_search() {
         name = "file_glob_search";
         display_name = "File search";
+        uses_cwd = true;
         permission_write = false;
     }
 
@@ -416,7 +442,42 @@ struct server_tool_file_glob_search : server_tool {
                 shown, total);
         }
 
-        return {{"plain_text_response", output_text.str()}};
+        std::vector<tools_io::list_entry> matches;
+        for (const auto & entry : listing.entries) {
+            if (!path_glob_match(include, entry.rel)) continue;
+            if (!exclude.empty() && path_glob_match(exclude, entry.rel)) continue;
+            matches.push_back(entry);
+        }
+
+        size_t total = matches.size();
+        size_t shown = std::min(total, (size_t) limit);
+
+        std::ostringstream output_text;
+        json entries_json = json::array();
+        for (size_t i = 0; i < shown; i++) {
+            output_text << matches[i].rel << (matches[i].is_dir ? "/" : "") << "\n";
+            entries_json.push_back({
+                {"path", matches[i].rel},
+                {"type", matches[i].is_dir ? "dir" : "file"},
+            });
+        }
+
+        output_text << "\n---\nTotal matches: " << total << "\n";
+        if (total > shown) {
+            output_text << string_format(
+                "[%zu results limit reached (%zu total matches). Refine the glob pattern to narrow the search.]\n",
+                shown, total);
+        }
+        if (listing.truncated) {
+            output_text << "[results truncated: time budget or unreadable directory]\n";
+        }
+
+        // `base` is always absolute (resolve falls back to the server cwd), so
+        // API clients (e.g. the web UI picker) can join the relative entries
+        // into absolute paths. `plain_text_response` is what the model sees;
+        // `entries` is the same data as structured JSON for the UI picker,
+        // which reads `entries`/`base` instead of re-parsing the text.
+        return {{"plain_text_response", output_text.str()}, {"entries", entries_json}, {"base", base}};
     }
 };
 
@@ -430,6 +491,7 @@ struct server_tool_grep_search : server_tool {
     server_tool_grep_search() {
         name = "grep_search";
         display_name = "Grep search";
+        uses_cwd = true;
         permission_write = false;
     }
 
@@ -582,6 +644,7 @@ struct server_tool_exec_shell_command : server_tool {
     server_tool_exec_shell_command() {
         name = "exec_shell_command";
         display_name = "Execute shell command";
+        uses_cwd = true;
         permission_write = true;
         support_stream = true;
     }
@@ -613,8 +676,11 @@ struct server_tool_exec_shell_command : server_tool {
         timeout    = std::min(timeout,    SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_TIMEOUT);
         max_output = std::min(max_output, SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_OUTPUT_SIZE);
 
+        // an isolate is always POSIX regardless of host OS, so it always gets `sh -c`
 #ifdef _WIN32
-        std::vector<std::string> args = {"cmd", "/c", command};
+        std::vector<std::string> args = !json_value(params, "runtime", std::string()).empty()
+            ? std::vector<std::string>{"sh", "-c", command}
+            : std::vector<std::string>{"cmd", "/c", command};
 #else
         std::vector<std::string> args = {"sh", "-c", command};
 #endif
@@ -657,6 +723,7 @@ struct server_tool_write_file : server_tool {
     server_tool_write_file() {
         name = "write_file";
         display_name = "Write file";
+        uses_cwd = true;
         permission_write = true;
     }
 
@@ -699,6 +766,7 @@ struct server_tool_edit_file : server_tool {
     server_tool_edit_file() {
         name = "edit_file";
         display_name = "Edit file";
+        uses_cwd = true;
         permission_write = true;
     }
 
@@ -1022,14 +1090,24 @@ private:
 };
 
 //
-// get_datetime: returns the current date and time
+// server_mcp_tool: exposes one tool from a running MCP server as a server_tool.
 //
+struct server_mcp_tool : server_tool {
+    std::string server_name;
+    std::string tool_name;
+    server_mcp_tool_def def;
+    server_mcp & mcp_mgr;
 
-struct server_tool_get_datetime : server_tool {
-    server_tool_get_datetime() {
-        name = "get_datetime";
-        display_name = "Get Date & Time";
+    server_mcp_tool(server_mcp_tool_def d, server_mcp & mgr)
+        : server_name(d.server_name)
+        , tool_name(d.name)
+        , def(std::move(d))
+        , mcp_mgr(mgr)
+    {
+        name = server_name + "_" + tool_name;
+        display_name = name;
         permission_write = false;
+        support_stream = false;
     }
 
     json get_definition() const override {
@@ -1177,6 +1255,10 @@ static server_tool & find_tool(std::vector<std::unique_ptr<server_tool>> & tools
 //
 
 static std::vector<std::unique_ptr<server_tool>> build_tools() {
+    // IMPORTANT: for contributors, please keep this array of tools as minimal as possible
+    //            we only accept minimal i/o and shell command tools here
+    //            for example, do not add: web search, get date time, etc.
+    //            high-level functionality should be added either via MCP or web UI
     std::vector<std::unique_ptr<server_tool>> tools;
     tools.push_back(std::make_unique<server_tool_read_file>());
     tools.push_back(std::make_unique<server_tool_file_glob_search>());

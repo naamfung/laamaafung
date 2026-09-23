@@ -43,10 +43,10 @@
 #define LLAMA_FILE_MAGIC_GGSQ 0x67677371u // 'ggsq'
 
 #define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
-#define LLAMA_SESSION_VERSION 9
+#define LLAMA_SESSION_VERSION 10
 
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
-#define LLAMA_STATE_SEQ_VERSION 2
+#define LLAMA_STATE_SEQ_VERSION 3
 
 #ifdef __cplusplus
 extern "C" {
@@ -200,6 +200,46 @@ extern "C" {
 
     LLAMA_API const char * llama_flash_attn_type_name(enum llama_flash_attn_type flash_attn_type);
 
+    // Experimental BeeLlama structured K/V cache.  Unlike a conventional
+    // ggml cache type, KVarN stores joint 128-token tiles and therefore has a
+    // separate context parameter object.
+    enum llama_kvarn_type {
+        LLAMA_KVARN_TYPE_INVALID  = -1,
+        LLAMA_KVARN_TYPE_DISABLED = 0,
+
+        LLAMA_KVARN_K2V2_G128, LLAMA_KVARN_K2V3_G128, LLAMA_KVARN_K2V4_G128,
+        LLAMA_KVARN_K3V2_G128, LLAMA_KVARN_K3V3_G128, LLAMA_KVARN_K3V4_G128,
+        LLAMA_KVARN_K4V2_G128, LLAMA_KVARN_K4V3_G128, LLAMA_KVARN_K4V4_G128,
+        LLAMA_KVARN_K2V5_G128, LLAMA_KVARN_K2V6_G128, LLAMA_KVARN_K2V8_G128,
+        LLAMA_KVARN_K3V5_G128, LLAMA_KVARN_K3V6_G128, LLAMA_KVARN_K3V8_G128,
+        LLAMA_KVARN_K4V5_G128, LLAMA_KVARN_K4V6_G128, LLAMA_KVARN_K4V8_G128,
+        LLAMA_KVARN_K5V2_G128, LLAMA_KVARN_K5V3_G128, LLAMA_KVARN_K5V4_G128,
+        LLAMA_KVARN_K5V5_G128, LLAMA_KVARN_K5V6_G128, LLAMA_KVARN_K5V8_G128,
+        LLAMA_KVARN_K6V2_G128, LLAMA_KVARN_K6V3_G128, LLAMA_KVARN_K6V4_G128,
+        LLAMA_KVARN_K6V5_G128, LLAMA_KVARN_K6V6_G128, LLAMA_KVARN_K6V8_G128,
+        LLAMA_KVARN_K8V2_G128, LLAMA_KVARN_K8V3_G128, LLAMA_KVARN_K8V4_G128,
+        LLAMA_KVARN_K8V5_G128, LLAMA_KVARN_K8V6_G128, LLAMA_KVARN_K8V8_G128,
+
+        LLAMA_KVARN_TYPE_COUNT,
+    };
+
+    struct llama_kvarn_params {
+        enum llama_kvarn_type type;
+        int32_t key_bits;
+        int32_t value_bits;
+        int32_t swa_key_bits;
+        int32_t swa_value_bits;
+        int32_t group;
+        int32_t sinkhorn_iters;
+        int32_t sink_tokens;
+        bool    fail_if_unsupported;
+    };
+
+    LLAMA_API const char *              llama_kvarn_type_name       (enum llama_kvarn_type type);
+    LLAMA_API enum llama_kvarn_type     llama_kvarn_type_from_name  (const char * name);
+    LLAMA_API struct llama_kvarn_params llama_kvarn_default_params  (void);
+    LLAMA_API struct llama_kvarn_params llama_kvarn_params_for_type (enum llama_kvarn_type type);
+
     enum llama_split_mode {
         LLAMA_SPLIT_MODE_NONE   = 0, // single GPU
         LLAMA_SPLIT_MODE_LAYER  = 1, // split layers and KV across GPUs
@@ -214,10 +254,17 @@ extern "C" {
         LLAMA_LOAD_MODE_MMAP_MLOCK = 3, // mmap + force system to keep model in RAM rather than swapping or compressing
         LLAMA_LOAD_MODE_DIRECT_IO  = 4, // use direct I/O if available
         LLAMA_LOAD_MODE_MLOCK_RAM  = 5, // read model into RAM + mlock (no mmap); avoids mmap page-fault stalls during inference
+        LLAMA_LOAD_MODE_AUTO       = -1, // auto-detect based on device capabilities
     };
 
     LLAMA_API const char * llama_load_mode_name(enum llama_load_mode load_mode);
     LLAMA_API enum llama_load_mode llama_load_mode_from_str(const char * str);
+
+    enum llama_lazy_mode {
+        LLAMA_LAZY_MODE_OFF  = 0, // always read the whole tensor up front
+        LLAMA_LAZY_MODE_AUTO = 1, // lazy only for marked tensors larger than 4 GiB (requires mmap)
+        LLAMA_LAZY_MODE_ON   = 2, // read the rows of tensors marked by the arch on demand (requires mmap)
+    };
 
     enum llama_context_type {
         LLAMA_CONTEXT_TYPE_DEFAULT = 0,
@@ -324,6 +371,8 @@ extern "C" {
         enum llama_split_mode split_mode; // how to split the model across multiple GPUs
         enum llama_load_mode  load_mode;  // how to load the model
 
+        enum llama_lazy_mode lazy_mode; // on-demand reading of tensors marked by the arch
+
         // the GPU that is used for the entire model when split_mode is LLAMA_SPLIT_MODE_NONE
         int32_t main_gpu;
 
@@ -350,6 +399,7 @@ extern "C" {
         bool use_extra_bufts; // use extra buffer types (used for weight repacking)
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
+        bool load_mtp;        // whether to load MTP layers
     };
 
     struct llama_sampler_seq_config {
@@ -357,17 +407,60 @@ extern "C" {
         struct llama_sampler * sampler;
     };
 
+    typedef struct llama_kv_tail_config llama_kv_tail_config;
+    typedef struct llama_kv_tail_request llama_kv_tail_request;
+
+    struct llama_kv_tail_group_info {
+        const char * id;
+        const char * role;
+        uint32_t lowest_layer;
+        uint32_t n_layers;
+        uint32_t effective_window;
+    };
+
+    enum llama_kv_tail_coverage_state {
+        LLAMA_KV_TAIL_COVERAGE_NONE,
+        LLAMA_KV_TAIL_COVERAGE_PARTIAL,
+        LLAMA_KV_TAIL_COVERAGE_COMPLETE,
+    };
+
+    enum llama_kv_tail_degradation_flags {
+        LLAMA_KV_TAIL_DEGRADED_NONE            = 0,
+        LLAMA_KV_TAIL_DEGRADED_BODY_ONLY_STATE = 1 << 0,
+        LLAMA_KV_TAIL_DEGRADED_HISTORICAL_OP   = 1 << 1,
+        LLAMA_KV_TAIL_DEGRADED_STATE_RESTORE   = 1 << 2,
+        LLAMA_KV_TAIL_DEGRADED_PAYLOAD_INVALID = 1 << 3,
+    };
+
+    struct llama_kv_tail_coverage_info {
+        enum llama_kv_tail_coverage_state state;
+        uint32_t requested;
+        uint32_t exact;
+        uint32_t degradation_flags;
+    };
+
+    struct llama_kv_tail_coverage_aggregate {
+        uint32_t groups;
+        uint32_t complete_groups;
+        uint32_t partial_groups;
+        uint32_t none_groups;
+        uint64_t requested;
+        uint64_t exact;
+        uint32_t degradation_flags;
+    };
+
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
     //       https://github.com/ggml-org/llama.cpp/pull/7544
     struct llama_context_params {
-        uint32_t n_ctx;             // text context, 0 = from model
-        uint32_t n_batch;           // logical maximum batch size that can be submitted to llama_decode
-        uint32_t n_ubatch;          // physical maximum batch size
-        uint32_t n_seq_max;         // max number of sequences (i.e. distinct states for recurrent models)
-        uint32_t n_rs_seq;          // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
-        uint32_t n_outputs_max;     // max outputs in a ubatch (0 = n_batch)
-        int32_t  n_threads;         // number of threads to use for generation
-        int32_t  n_threads_batch;   // number of threads to use for batch processing
+        uint32_t n_ctx;                 // text context, 0 = from model
+        uint32_t n_batch;               // logical maximum batch size that can be submitted to llama_decode
+        uint32_t n_ubatch;              // physical maximum batch size
+        uint32_t n_seq_max;             // max number of sequences (i.e. distinct states for recurrent models)
+        uint32_t n_rs_seq;              // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
+        uint32_t n_outputs_max;         // max outputs in a ubatch (0 = n_batch)
+        uint32_t n_outputs_max_per_seq; // max outputs per sequence (0 = n_outputs_max)
+        int32_t  n_threads;             // number of threads to use for generation
+        int32_t  n_threads_batch;       // number of threads to use for batch processing
 
         enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
         enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
@@ -390,6 +483,7 @@ extern "C" {
 
         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
+        struct llama_kvarn_params kvarn; // experimental structured K/V cache
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
@@ -418,6 +512,14 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+
+        // Optional high-precision shadow for recent entries in quantized KV caches.
+        // A value of 0 preserves the ordinary standard-cache path. F16 and BF16 are explicit tail
+        // types; GGML_TYPE_COUNT selects BF16 for standard caches and F16 for KVarN.
+        uint32_t       kv_tail_tokens;
+        enum ggml_type kv_tail_type;
+        const struct llama_kv_tail_config * kv_tail_config; // borrowed only during context creation
+        const struct llama_kv_tail_request * kv_tail_request; // model-independent; borrowed during context creation
     };
 
     struct llama_model_tensor_override {
@@ -447,6 +549,7 @@ extern "C" {
         const struct llama_model_kv_override * kv_overrides;        // pointer to kv overrides
         const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
         const int32_t * prune_layers;                               // pointer to layer indices to prune
+        size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
     } llama_model_quantize_params;
 
     typedef struct llama_logit_bias {
@@ -467,10 +570,47 @@ extern "C" {
     // lora adapter
     struct llama_adapter_lora;
 
+    LLAMA_API const char * llama_version(void);
+
     // Helpers for getting default parameters
     // TODO: update API to start accepting pointers to params structs (https://github.com/ggml-org/llama.cpp/discussions/9172)
     LLAMA_API struct llama_model_params          llama_model_default_params(void);
     LLAMA_API struct llama_context_params        llama_context_default_params(void);
+    LLAMA_API struct llama_kv_tail_config * llama_kv_tail_config_init(const struct llama_model * model);
+    LLAMA_API void llama_kv_tail_config_free(struct llama_kv_tail_config * config);
+    LLAMA_API int32_t llama_kv_tail_config_group_count(const struct llama_kv_tail_config * config);
+    LLAMA_API bool llama_kv_tail_config_get_group_info(
+            const struct llama_kv_tail_config * config,
+            int32_t group_index,
+            struct llama_kv_tail_group_info * out);
+    LLAMA_API int32_t llama_kv_tail_config_group_layer(
+            const struct llama_kv_tail_config * config,
+            int32_t group_index,
+            int32_t layer_index);
+    LLAMA_API bool llama_kv_tail_config_set_auto(struct llama_kv_tail_config * config);
+    LLAMA_API bool llama_kv_tail_config_set_group(
+            struct llama_kv_tail_config * config,
+            const char * group_id,
+            uint32_t n_tokens);
+    LLAMA_API const char * llama_kv_tail_config_last_error(const struct llama_kv_tail_config * config);
+    LLAMA_API struct llama_kv_tail_request * llama_kv_tail_request_init(
+            const char * specification,
+            enum ggml_type exact_type);
+    LLAMA_API void llama_kv_tail_request_free(struct llama_kv_tail_request * request);
+    LLAMA_API const char * llama_kv_tail_request_last_error(const struct llama_kv_tail_request * request);
+    LLAMA_API bool llama_kv_tail_get_coverage(
+            const struct llama_context * ctx,
+                         llama_seq_id   seq_id,
+                              uint32_t   group_index,
+            struct llama_kv_tail_coverage_info * out);
+    LLAMA_API bool llama_kv_tail_get_coverage_aggregate(
+            const struct llama_context * ctx,
+                         llama_seq_id   seq_id,
+            struct llama_kv_tail_coverage_aggregate * out);
+    // Host time spent planning, committing, and materializing standard-KV
+    // tail metadata. Accumulation is enabled by LLAMA_KV_TAIL_PLANNER_TIMING=1.
+    LLAMA_API void     llama_kv_tail_planner_timing_reset(struct llama_context * ctx);
+    LLAMA_API uint64_t llama_kv_tail_planner_timing_ns(const struct llama_context * ctx);
     LLAMA_API struct llama_sampler_chain_params  llama_sampler_chain_default_params(void);
     LLAMA_API struct llama_model_quantize_params llama_model_quantize_default_params(void);
 
@@ -741,9 +881,43 @@ extern "C" {
 
     // Removes all tokens that belong to the specified sequence and have positions in [p0, p1)
     // Returns false if a partial sequence cannot be removed. Removing a whole sequence never fails
-    // seq_id < 0 : match any sequence
+    // seq_id < 0 : match any sequence [TAG_LLAMA_SEQ_ID_NEG]
     // p0 < 0     : [0,  p1]
     // p1 < 0     : [p0, inf)
+    LLAMA_API bool llama_memory_can_seq_rm(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+                 llama_pos p0,
+                 llama_pos p1);
+
+    typedef struct llama_memory_seq_rm_capability {
+        bool     full_clear;
+        bool     arbitrary_ranges;
+        uint32_t suffix_rollback_tokens;
+    } llama_memory_seq_rm_capability;
+
+    LLAMA_API llama_memory_seq_rm_capability llama_memory_get_seq_rm_capability(
+            llama_memory_t mem);
+
+    // Computes a side-effect-free removable range. The returned range may be a
+    // broader suffix than requested, but is accepted by the complete memory.
+    LLAMA_API bool llama_memory_seq_rm_plan(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+                 llama_pos p0,
+                 llama_pos p1,
+                 llama_pos * planned_p0,
+                 llama_pos * planned_p1);
+
+    // Read-only safety preflights for per-sequence state operations.
+    LLAMA_API bool llama_memory_state_seq_can_save(
+            llama_memory_t mem,
+              llama_seq_id seq_id);
+
+    LLAMA_API bool llama_memory_state_seq_can_restore(
+            llama_memory_t mem,
+              llama_seq_id seq_id);
+
     LLAMA_API bool llama_memory_seq_rm(
             llama_memory_t mem,
               llama_seq_id seq_id,
@@ -807,10 +981,15 @@ extern "C" {
     // State / sessions
     //
 
+    typedef uint32_t llama_state_seq_flags;
+
     // Returns the *actual* size in bytes of the state
     // (logits, embedding and memory)
     // Only use when saving the state, not when restoring it, otherwise the size may be too small.
     LLAMA_API size_t llama_state_get_size(struct llama_context * ctx);
+    LLAMA_API size_t llama_state_get_size_ext(
+            struct llama_context * ctx,
+           llama_state_seq_flags   flags);
     LLAMA_API DEPRECATED(size_t llama_get_state_size(struct llama_context * ctx),
         "use llama_state_get_size instead");
 
@@ -821,6 +1000,11 @@ extern "C" {
             struct llama_context * ctx,
                          uint8_t * dst,
                           size_t   size);
+    LLAMA_API size_t llama_state_get_data_ext(
+            struct llama_context * ctx,
+                         uint8_t * dst,
+                          size_t   size,
+           llama_state_seq_flags   flags);
     LLAMA_API DEPRECATED(size_t llama_copy_state_data(
             struct llama_context * ctx,
                          uint8_t * dst),
@@ -832,6 +1016,11 @@ extern "C" {
             struct llama_context * ctx,
                    const uint8_t * src,
                           size_t   size);
+    LLAMA_API size_t llama_state_set_data_ext(
+            struct llama_context * ctx,
+                   const uint8_t * src,
+                          size_t   size,
+           llama_state_seq_flags   flags);
     LLAMA_API DEPRECATED(size_t llama_set_state_data(
             struct llama_context * ctx,
                    const uint8_t * src),
@@ -893,6 +1082,7 @@ extern "C" {
                const llama_token * tokens,
                           size_t   n_token_count);
 
+    // If tokens_out is NULL, only the token count is reported through n_token_count_out and no state is loaded
     LLAMA_API size_t llama_state_seq_load_file(
             struct llama_context * ctx,
                       const char * filepath,
@@ -913,7 +1103,24 @@ extern "C" {
 // Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
 #define LLAMA_STATE_SEQ_FLAGS_ON_DEVICE 2
 
-    typedef uint32_t llama_state_seq_flags;
+// Deliberately export only the complete ordinary cache body. Loading into a
+// tail-enabled context starts with degraded exact-tail coverage.
+#define LLAMA_STATE_SEQ_FLAGS_BODY_ONLY 4
+
+// Export a self-contained logical sequence from a shared physical cache.
+// Unlike PARTIAL_ONLY, this representation owns every payload required after
+// the source sequence is removed and may remap physical cells on restore.
+#define LLAMA_STATE_SEQ_FLAGS_SELF_CONTAINED 8
+
+    LLAMA_API bool llama_memory_state_seq_can_save_ext(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+     llama_state_seq_flags flags);
+
+    LLAMA_API bool llama_memory_state_seq_can_restore_ext(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+     llama_state_seq_flags flags);
 
     LLAMA_API size_t llama_state_seq_get_size_ext(
             struct llama_context * ctx,
@@ -933,6 +1140,26 @@ extern "C" {
                           size_t   size,
                     llama_seq_id   dest_seq_id,
            llama_state_seq_flags   flags);
+
+    // Prepare a sequence-state restore without mutating the destination. The
+    // source buffer must remain valid until the plan is committed or freed.
+    // Commit performs only already-validated backend writes and metadata
+    // publication; it has no remaining allocation or parsing step.
+    struct llama_state_seq_restore_plan;
+
+    LLAMA_API struct llama_state_seq_restore_plan * llama_state_seq_prepare_data_ext(
+            struct llama_context * ctx,
+                   const uint8_t * src,
+                          size_t   size,
+                    llama_seq_id   dest_seq_id,
+           llama_state_seq_flags   flags);
+
+    // Returns the committed byte count, or zero for an invalid/consumed plan.
+    LLAMA_API size_t llama_state_seq_restore_plan_commit(
+            struct llama_state_seq_restore_plan * plan);
+
+    LLAMA_API void llama_state_seq_restore_plan_free(
+            struct llama_state_seq_restore_plan * plan);
 
     //
     // Decoding
@@ -1066,6 +1293,9 @@ extern "C" {
     //
 
     // Get the backend sampled token for the ith token.
+    // With multiple outputs, sampler state advances when the token is accepted,
+    // not when it is read through this function.
+    // When accepting multiple outputs, accept a contiguous prefix in output order.
     // Returns LLAMA_TOKEN_NULL if no token was sampled.
     LLAMA_API llama_token llama_get_sampled_token_ith(struct llama_context * ctx, int32_t i);
 
@@ -1282,9 +1512,12 @@ extern "C" {
         // [EXPERIMENTAL]
         // backend sampling interface:
 
-        // return true if the backend supports all ops needed by the sampler
+        // return true if the backend supports all ops needed by the sampler and can handle up to n_outputs_max_per_seq outputs per sequence
         // note: call once per sampler
-        bool (*backend_init)(struct llama_sampler * smpl, ggml_backend_buffer_type_t buft);
+        bool (*backend_init)(
+                struct llama_sampler       * smpl,
+                ggml_backend_buffer_type_t   buft,
+                uint32_t                     n_outputs_max_per_seq);
 
         // call after .backend_apply()
         void (*backend_accept)(
@@ -1302,6 +1535,13 @@ extern "C" {
 
         // called before graph execution to set inputs for the current ubatch
         void (*backend_set_input)(struct llama_sampler * smpl);
+
+        // called before rebuilding a sampling graph to clear any internal sampler state
+        void (*backend_reset)(struct llama_sampler * smpl);
+
+        // copy mutable state from src into dst while keeping dst's references to the current sampling graph
+        // src and dst must have the same type and configuration
+        void (*copy_state)(const struct llama_sampler * src, struct llama_sampler * dst);
     };
 
     struct llama_sampler {
@@ -1322,6 +1562,7 @@ extern "C" {
     LLAMA_API void                   llama_sampler_apply (      struct llama_sampler * smpl, llama_token_data_array * cur_p);
     LLAMA_API void                   llama_sampler_reset (      struct llama_sampler * smpl);
     LLAMA_API struct llama_sampler * llama_sampler_clone (const struct llama_sampler * smpl);
+    LLAMA_API void                   llama_sampler_copy  (const struct llama_sampler * src, struct llama_sampler * dst);
     // important: do not free if the sampler has been added to a llama_sampler_chain (via llama_sampler_chain_add)
     LLAMA_API void                   llama_sampler_free  (      struct llama_sampler * smpl);
 
@@ -1433,22 +1674,21 @@ extern "C" {
                const llama_token * trigger_tokens,
                             size_t num_trigger_tokens);
 
-
     /// NOTE: Avoid using on the full vocabulary as searching for repeated tokens can become slow. For example, apply top-k or top-p sampling first.
     LLAMA_API struct llama_sampler * llama_sampler_init_penalties(
-                             int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty, -1 = context size)
-                               float   penalty_repeat,   // 1.0 = disabled
-                               float   penalty_freq,     // 0.0 = disabled
-                               float   penalty_present); // 0.0 = disabled
+                             int32_t   n_vocab,
+                             int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty)
+                               float   penalty_repeat,   // must be > 0.0, 1.0 = disabled
+                               float   penalty_freq,     // must be finite, 0.0 = disabled
+                               float   penalty_present); // must be finite, 0.0 = disabled
 
     ///  @details DRY sampler, designed by p-e-w, as described in: https://github.com/oobabooga/text-generation-webui/pull/5677, porting Koboldcpp implementation authored by pi6am: https://github.com/LostRuins/koboldcpp/pull/982
     LLAMA_API struct llama_sampler * llama_sampler_init_dry(
             const struct llama_vocab *  vocab,
-                             int32_t    n_ctx_train,
                                float    dry_multiplier,
                                float    dry_base,
                              int32_t    dry_allowed_length,
-                             int32_t    dry_penalty_last_n,
+                             int32_t    dry_penalty_last_n, // last n tokens to penalize (0 = disable penalty)
                           const char ** seq_breakers,
                               size_t    num_breakers);
 
@@ -1548,6 +1788,7 @@ extern "C" {
     LLAMA_API uint32_t llama_sampler_get_seed(const struct llama_sampler * smpl);
 
     /// @details Sample and accept a token from the idx-th output of the last evaluation
+    // For multiple outputs from one sampler, call this function in output order without gaps.
     //
     // Shorthand for:
     //    const auto * logits = llama_get_logits_ith(ctx, idx);

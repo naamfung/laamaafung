@@ -77,7 +77,7 @@ llama_memory_context_ptr llama_memory_kvmem_hybrid::init_batch(
             } else {
                 // Keep GDN rollback snapshots valid: trailing (1 + n_rs_seq)
                 // tokens of each seq stay in one ubatch.
-                const bool unified = (get_mem_attn()->get_n_stream() == 1);
+                const bool unified = (get_mem_attn()->get_kv_n_stream() == 1);
                 const uint32_t n_rs_seq = get_mem_recr()->n_rs_seq;
                 ubatch = balloc.split_equal(n_ubatch, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
             }
