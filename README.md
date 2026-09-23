@@ -38,6 +38,16 @@
 
 ---
 
+### 编译指南（builder —— 标准生产构建流程）
+
+构建统一使用 **builder**（Go 实现，自 v25 起随仓库根目录附带）。**本分支不含 builder**：请克隆 v25 或 v26 后，用其 `builder.exe -C <本分支工作区路径>` 指向构建——构建目录自动按分支命名（`build-<分支名>`），各分支互不干扰。builder 内置：代理变量自动剥离（防 MSB6001）、MSVC 环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache、Web UI 依赖兜底、产物齐全性自检。本分支保留的旧 `build*.sh` 脚本已被 builder 取代，仅为兼容保留。
+
+**工具链依赖**：Go 编译器 1.21+（编译 builder 本身，`go build -o builder.exe builder.go`）；Visual Studio 2022（MSVC + Windows SDK 10，自动探测安装路径）；CUDA Toolkit 12.x（默认 native 架构，`-arch` 覆盖）；Ninja（默认生成器）；ccache 4.13+（可选，仅包装 nvcc，须保持 `-DGGML_CCACHE=OFF`）；bun（可选，UI 源码构建，缺失时自动回退预构建 UI 资源）。
+
+**基本用法**：`builder.exe`（增量构建）、`-fresh`（全量重建）、`-j N`（并行度）、`-list`（查看工具链探测）、`clean`（清理）。常用参数：`-target T1,T2`、`-keep`、`-arch 86`、`-gen ninja|vs`、`-ui auto|archive|off`、`-no-configure`、`-C <dir>`。产物在 `<构建目录>/bin`，编译日志为 `builder-build.log` / `builder-configure.log`。
+
+---
+
 ### 推荐模型
 
 unsloth/Qwen-AgentWorld-35B-A3B 二零二六年六月廿五 / 原版 / 推荐IQ4及以上质量：
