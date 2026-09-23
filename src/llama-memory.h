@@ -158,12 +158,14 @@ struct llama_memory_i {
     }
 
     virtual bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) = 0;
-    virtual bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) = 0;
+    // Defaulted so that non-kv-cache backends (e.g. KVMem) need not implement these;
+    // llama_kv_cache overrides both.
+    virtual bool seq_rm_cell(llama_seq_id /* seq_id */, uint32_t /* cell_idx */) { return false; }
 
     // Return the number of KV cells at a given position for a seq_id.
     // If cell_indices is not NULL and n_max > 0, fill cell_indices with up to n_max cell indices.
     // Returns the total number of cells at the position (may exceed n_max).
-    virtual int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) = 0;
+    virtual int cells_at_pos(llama_seq_id /* seq_id */, llama_pos /* pos */, uint32_t * /* cell_indices */, int /* n_max */) { return 0; }
 
     virtual void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) = 0;
 

@@ -25,14 +25,17 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   mem_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
-    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    const layer_filter_cb & filter,
+                     bool   replay) : hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
     size = mem_size;
     used = 0;
 
-    this->n_rs_seq = n_rs_seq;
+    this->n_rs_seq = n_rs_seq = replay ? 0 : n_rs_seq;
+    replay_capacity = replay ? n_rs_seq + 1 : 0;
+    GGML_ASSERT(!replay || (mem_size == 1 && n_seq_max == 1 && n_rs_seq > 0 && n_rs_seq <= 5));
     rs_idx.assign(n_seq_max, 0);
 
     cells.clear();
@@ -52,7 +55,7 @@ llama_memory_recurrent::llama_memory_recurrent(
         if (it == ctx_map.end()) {
             ggml_init_params params = {
                 // r and s per layer, plus the separate PLE conv row where the model has one
-                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t(((hparams.ple_conv_state() > 0 ? 3u : 2u) + (replay_capacity ? 5u : 0u))*n_layer*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -98,6 +101,8 @@ llama_memory_recurrent::llama_memory_recurrent(
             throw std::runtime_error("failed to create ggml context for rs cache");
         }
 
+    replay_l.resize(n_layer, {});
+
         const uint32_t n_rows = mem_size * (1 + n_rs_seq);
         ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
         ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
@@ -111,6 +116,15 @@ llama_memory_recurrent::llama_memory_recurrent(
             ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
             ggml_format_name(p, "cache_ple_r_l%d", i);
             p_l[i] = p;
+        }
+
+        if (replay_capacity) {
+            const int64_t widths[5] = {2048, 6144, 48, 48, 10240};
+            for (int j = 0; j < 5; ++j) {
+                auto * record = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, widths[j], replay_capacity);
+                ggml_format_name(record, "gdn_record_%d_l%d", j, i);
+                replay_l[i][j] = record;
+            }
         }
     }
 
@@ -1453,4 +1467,36 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
         }
     }
     return (int32_t)(idx * mem->size) + src0;
+}
+
+bool llama_memory_recurrent::replay_begin(llama_pos start, uint32_t width) {
+    if (!replay_capacity || replay_recording || replay_poisoned || !width || width > replay_capacity ||
+            start < 0 || seq_pos_max(0) != start - 1) {
+        return false;
+    }
+    replay_cells = cells;
+    replay_head  = head;
+    replay_used  = used;
+    replay_n     = n;
+    replay_rs_z  = rs_z;
+    replay_start = start;
+    replay_width = width;
+    replay_recording = true;
+    return true;
+}
+
+void llama_memory_recurrent::replay_finish(uint32_t n_keep) {
+    GGML_ASSERT(replay_recording && n_keep <= replay_width);
+    if (n_keep == 0) {
+        cells = replay_cells;
+        head  = replay_head;
+        used  = replay_used;
+        n     = replay_n;
+        rs_z  = replay_rs_z;
+    } else {
+        GGML_ASSERT(cells.size() == 1 && cells[0].has_seq_id(0));
+        cells[0].pos = replay_start + n_keep - 1;
+    }
+    replay_recording = false;
+    replay_cells.clear();
 }

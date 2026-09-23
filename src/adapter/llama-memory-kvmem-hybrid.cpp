@@ -54,9 +54,12 @@ llama_memory_kvmem_hybrid::llama_memory_kvmem_hybrid(
             },
             [&](int32_t il) {
                 return il < (int32_t) model.hparams.n_layer() && model.hparams.is_recr(il);
-            }, use_gdn_replay(model, cparams)) {
+            },
+            /* n_ubatch */ 0, /* tail_tokens */ 0, /* tail_type */ GGML_TYPE_F16,
+            /* tail_tokens_requested */ UINT32_MAX, /* tail_rollback_tokens */ 0,
+            use_gdn_replay(model, cparams)) {
     attn_kvmem_ = std::make_unique<llama_memory_kvmem>(
-            model, params, cparams, get_mem_attn());
+            model, params, cparams, dynamic_cast<llama_kv_cache *>(get_mem_attn()));
     attn_kvmem_->set_recurrent(get_mem_recr());
     LLAMA_LOG_INFO("%s: KVMem hybrid (attn=slot-pool recr=stock) n_rs_seq=%u\n",
             __func__, cparams.n_rs_seq);

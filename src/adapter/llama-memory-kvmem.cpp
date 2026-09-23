@@ -806,6 +806,9 @@ llama_memory_kvmem::llama_memory_kvmem(
                 nullptr,
                 nullptr,
                 nullptr,
+                /* n_ubatch */ 0, /* tail_tokens */ 0, /* tail_type */ GGML_TYPE_F16,
+                /* tail_tokens_requested */ UINT32_MAX, /* tail_metadata_only */ false,
+                /* tail_rollback_tokens */ 0, /* tail_visibility_window */ 0,
                 "kvmem");
         kv_ = kv_owned_.get();
     }
@@ -4217,7 +4220,7 @@ bool llama_kvmem_remove_logical(llama_context * ctx, llama_pos begin, llama_pos 
     if (mem) return mem->remove_logical(ctx, begin, end);
     auto * native = llama_get_memory(ctx);
     auto * hybrid = dynamic_cast<llama_memory_hybrid *>(native);
-    auto * kv = hybrid ? hybrid->get_mem_attn() : dynamic_cast<llama_kv_cache *>(native);
+    auto * kv = hybrid ? dynamic_cast<llama_kv_cache *>(hybrid->get_mem_attn()) : dynamic_cast<llama_kv_cache *>(native);
     if (!kv) return llama_memory_seq_rm(native, 0, begin, end);
     if (hybrid && end < 0) {
         const auto & cells = kv->get_cells(0);

@@ -34,7 +34,8 @@ llama_memory_hybrid::llama_memory_hybrid(
                  uint32_t   tail_tokens,
                 ggml_type   tail_type,
                  uint32_t   tail_tokens_requested,
-                 uint32_t   tail_rollback_tokens) :
+                 uint32_t   tail_rollback_tokens,
+                         bool   replay) :
     hparams(model.hparams),
     mem_attn(new llama_kv_cache(
         model,
@@ -72,7 +73,8 @@ llama_memory_hybrid::llama_memory_hybrid(
         n_rs_seq,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recr(il); }
-            : filter_recr
+            : filter_recr,
+        replay
     )) {}
 
 llama_memory_hybrid::llama_memory_hybrid(
@@ -336,6 +338,17 @@ llama_memory_hybrid_context::llama_memory_hybrid_context(
         std::vector<llama_ubatch>   ubatches) :
     ubatches(std::move(ubatches)),
     ctx_attn(std::move(ctx_attn_in)),
+    ctx_recr(new llama_memory_recurrent_context(mem->get_mem_recr(), this->ubatches)),
+    status(llama_memory_status_combine(ctx_attn->get_status(), ctx_recr->get_status())) {
+}
+
+llama_memory_hybrid_context::llama_memory_hybrid_context(
+              llama_memory_hybrid * mem,
+                  slot_info_vec_t   sinfos_attn,
+        std::vector<llama_ubatch>   ubatches) :
+    ubatches(std::move(ubatches)),
+    // note: here we copy the ubatches, matching the KVMem adapter's expectations
+    ctx_attn(new llama_kv_cache_context(dynamic_cast<llama_kv_cache *>(mem->get_mem_attn()), std::move(sinfos_attn), this->ubatches)),
     ctx_recr(new llama_memory_recurrent_context(mem->get_mem_recr(), this->ubatches)),
     status(llama_memory_status_combine(ctx_attn->get_status(), ctx_recr->get_status())) {
 }

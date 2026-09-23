@@ -44,7 +44,8 @@ public:
                  uint32_t   tail_tokens = 0,
                 ggml_type   tail_type = GGML_TYPE_F16,
                  uint32_t   tail_tokens_requested = UINT32_MAX,
-                 uint32_t   tail_rollback_tokens = 0);
+                 uint32_t   tail_rollback_tokens = 0,
+                         bool   replay = false);
 
     llama_memory_hybrid(
         const llama_model & model,
@@ -142,6 +143,12 @@ public:
     llama_memory_hybrid_context(
               llama_memory_hybrid * mem,
         llama_memory_context_ptr   ctx_attn_in,
+        std::vector<llama_ubatch>   ubatches);
+
+    // init success (from prepared attn slot infos) -- used by the KVMem hybrid adapter
+    llama_memory_hybrid_context(
+              llama_memory_hybrid * mem,
+                  slot_info_vec_t   sinfos_attn,
         std::vector<llama_ubatch>   ubatches);
 
     ~llama_memory_hybrid_context() = default;

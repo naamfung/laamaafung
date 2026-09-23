@@ -82,6 +82,9 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
             filter,
             nullptr,
             nullptr,
+            /* n_ubatch */ 0, /* tail_tokens */ 0, /* tail_type */ GGML_TYPE_F16,
+            /* tail_tokens_requested */ UINT32_MAX, /* tail_metadata_only */ false,
+            /* tail_rollback_tokens */ 0, /* tail_visibility_window */ 0,
             "kvmem-mtp");
 
     const size_t krow = ggml_row_size(type_k_, n_embd_k_);

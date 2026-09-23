@@ -6,6 +6,7 @@
 
 #include <map>
 #include <set>
+#include <array>
 #include <vector>
 
 //
@@ -24,7 +25,8 @@ public:
                      uint32_t   mem_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
-        const layer_filter_cb & filter);
+        const layer_filter_cb & filter,
+                         bool   replay = false);
 
     ~llama_memory_recurrent() = default;
 
@@ -66,6 +68,16 @@ public:
 
     bool get_can_shift() const override;
     seq_rm_capability get_seq_rm_capability() const override;
+
+    // GDN replay (KVMem): record the K/V/G/B/conv rows of a verification batch so
+    // they can be folded back on commit. Active only when replay_capacity > 0.
+    enum replay_kind { REPLAY_K, REPLAY_V, REPLAY_G, REPLAY_B, REPLAY_CONV, REPLAY_COUNT };
+    uint32_t replay_capacity = 0;
+    bool replay_recording = false;
+    bool replay_poisoned = false;
+    std::vector<std::array<ggml_tensor *, REPLAY_COUNT>> replay_l;
+    bool replay_begin(llama_pos start, uint32_t width);
+    void replay_finish(uint32_t n_keep);
 
     // state write/load
 
@@ -113,6 +125,12 @@ public:
     };
 
     std::vector<mem_cell> cells;
+
+    // GDN replay bookkeeping
+    std::vector<mem_cell> replay_cells;
+    uint32_t replay_head = 0, replay_used = 0, replay_n = 0, replay_width = 0;
+    int32_t replay_rs_z = -1;
+    llama_pos replay_start = -1;
 
     // per layer
     std::vector<ggml_tensor *> r_l;

@@ -45,7 +45,6 @@ struct llama_ubatch {
     llama_token  *  token;      // [n_tokens]         | i   | id, token
     float        *  embd;       // [n_embd, n_tokens] | i   | embd
     llama_pos    *  pos;        // [n_tokens*n_pos]   | i   | pos
-    llama_pos    *  logical_pos;// [n_tokens]         | i   | KVMem logical cache-row position (M-RoPE independent)
     int32_t      *  n_seq_id;   // [n_tokens]         | i   | -
     llama_seq_id ** seq_id;     // [n_tokens]         | s   | s0, s1, seq_id
     llama_seq_id *  seq_id_unq; // [n_seqs_unq]       | s   | seq_id
