@@ -50,6 +50,46 @@
 
 ---
 
+### 编译指南（builder —— 标准生产构建流程）
+
+自 v26 起，构建统一走仓库根目录的 **builder**（Go 实现，原 `build*.sh` 脚本已移除，不再维护）。builder 内置了旧脚本踩过的全部坑的处理：代理变量自动剥离（防 MSB6001）、MSVC 开发环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache 加速、Web UI 依赖兜底、产物齐全性自检。
+
+**工具链依赖**：
+
+| 组件 | 用途 | 说明 |
+|---|---|---|
+| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`（仓库已附带预编译的 builder.exe 时可跳过） |
+| Visual Studio 2022 | MSVC C/C++ 编译器 + Windows SDK 10 | builder 自动探测安装路径并自建编译环境；`-list` 可查看探测结果 |
+| CUDA Toolkit 12.x | GPU 后端（nvcc） | 默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖 |
+| Ninja | 构建生成器 | builder 默认使用；换回 VS 生成器用 `-gen vs`（ccache 自动停用） |
+| ccache 4.13+（可选） | CUDA 编译缓存 | 仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃 |
+| bun（可选） | Web UI 源码构建 | 缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server |
+
+**基本用法**（在仓库根目录执行）：
+
+```sh
+builder.exe              # 增量构建（默认；无构建目录时即全新构建）
+builder.exe -fresh       # 先删构建目录再全量重建
+builder.exe -j 12        # 指定并行度
+builder.exe -list        # 打印探测到的工具链/环境后退出
+builder.exe clean        # 仅清理构建目录与 ui/dist
+```
+
+**常用参数**：
+
+- `-target T1,T2` —— 只构建指定目标（如 `llama-ui-assets`）；跳过产物自检
+- `-keep` —— 仅重置 CMake 状态、保留已编译对象
+- `-arch 86` —— 覆盖 CUDA 架构（默认 native）
+- `-gen ninja|vs` —— 强制生成器（换生成器需先 clean）
+- `-no-ccache` / `-ccache-all` —— 关闭 ccache / 也给 C/CXX 挂 ccache（后者在本机本地化 MSVC 下会崩，仅调试用）
+- `-ui auto|archive|off` —— UI 方案：`auto`（默认）优先复用跨 worktree 共享的依赖缓存 `<仓库父目录>/.ui-deps`（NTFS 目录联接，零拷贝）做源码构建，回退到本地归档 `files/llama-b*-ui.tar.gz`，都拿不到则报错退出——**绝不静默产出无 UI 的二进制**
+- `-no-configure` —— 确认没改过 CMakeLists 时跳过 configure
+- `-C <dir>` —— 指定仓库根（用于 worktree，如 `builder.exe -C ..\wt-v23`）
+
+**构建目录与产物**：构建目录按分支命名（`build-<分支名>`，如 kvarn-align 分支 → `build-kvarn-align`）；产物在 `<构建目录>/bin`（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次构建结束自检产物齐全性 + 内嵌 UI 体积。编译日志落在 `<构建目录>/builder-build.log` 与 `builder-configure.log`；瞬时竞争错误（nvcc C1083 / MSB8066 / MSB6001）会自动重跑。
+
+---
+
 ### 推荐模型
 
 unsloth/Qwen-AgentWorld-35B-A3B 二零二六年六月廿五 / 原版 / 推荐IQ4及以上质量：
