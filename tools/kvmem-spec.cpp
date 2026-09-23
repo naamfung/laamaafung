@@ -316,7 +316,6 @@ kvmem_spec_gen_stats kvmem_spec_generate(
             ckpt.update_pos(
                     (int64_t) prompt_tgt.size(),
                     mem_tgt ? llama_memory_seq_pos_min(mem_tgt, seq_id) : 0,
-                    mem_tgt ? llama_memory_seq_pos_max(mem_tgt, seq_id) : 0,
                     mem_tgt ? llama_memory_seq_pos_max(mem_tgt, seq_id) : 0);
 
             if (sess.use_ckpt_dft && ctx_dft) {
@@ -334,7 +333,6 @@ kvmem_spec_gen_stats kvmem_spec_generate(
                 /* .id_last    = */ id_last,
                 /* .prompt     = */ &prompt_tgt,
                 /* .result     = */ &draft,
-                /* .n_past_logical = */ n_past,
             };
             common_speculative_draft(spec);
 

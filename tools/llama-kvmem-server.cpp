@@ -1415,7 +1415,8 @@ static bool parse_chat_request(const json & body, ChatRequest & out, std::string
         return false;
     }
     try {
-        out.msgs = common_chat_msgs_parse_oaicompat(body.at("messages"));
+        // body is nlohmann json; common_* parsers take common_json — convert explicitly
+        out.msgs = common_chat_msgs_parse_oaicompat(common_json::parse(body.at("messages").dump()));
     } catch (const std::exception & e) {
         err = e.what();
         return false;
@@ -1432,7 +1433,7 @@ static bool parse_chat_request(const json & body, ChatRequest & out, std::string
     }
     if (body.contains("tools") && !body["tools"].is_null()) {
         try {
-            out.tools = common_chat_tools_parse_oaicompat(body.at("tools"));
+            out.tools = common_chat_tools_parse_oaicompat(common_json::parse(body.at("tools").dump()));
         } catch (const std::exception & e) {
             err = e.what();
             return false;

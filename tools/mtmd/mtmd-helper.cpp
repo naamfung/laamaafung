@@ -199,6 +199,94 @@ int32_t mtmd_helper_decode_image_chunk(
     return 0;
 }
 
+// Restored from v22 for KVMem: identical to mtmd_helper_decode_image_chunk but
+// allows the caller to replace the llama_decode dispatch itself (the custom
+// decoder sets llama_batch::logical_pos before each llama_decode call).
+int32_t mtmd_helper_decode_image_chunk_with_decoder(
+        mtmd_context * ctx,
+        struct llama_context * lctx,
+        const mtmd_input_chunk * chunk,
+        float * encoded_embd,
+        llama_pos n_past,
+        llama_seq_id seq_id,
+        int32_t n_batch,
+        llama_pos * new_n_past,
+        mtmd_helper_post_decode_callback callback,
+        void * user_data,
+        mtmd_helper_decode_callback decoder) {
+    GGML_ASSERT(n_batch > 0);
+    auto chunk_type = mtmd_input_chunk_get_type(chunk);
+    const char * name = chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "image" : "audio";
+    if (chunk_type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        LOG_ERR("failed to decode chunk: input chunk not of image/audio type\n");
+        return -1;
+    }
+
+    const llama_model * model = llama_get_model(lctx);
+    int n_mmproj_embd = llama_model_n_embd_inp(model);
+    int n_pos_per_embd = mtmd_decode_use_mrope(ctx) ? 4 : 1;
+
+    int32_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+    int32_t i_batch = 0;
+    int32_t n_img_batches = (n_tokens + n_batch - 1) / n_batch;
+    decode_embd_batch batch_embd(encoded_embd, n_tokens, n_pos_per_embd, n_mmproj_embd);
+
+    if (mtmd_decode_use_mrope(ctx)) {
+        if (chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+            const auto image_tokens = mtmd_input_chunk_get_tokens_image(chunk);
+            if (!image_tokens) {
+                LOG_ERR("failed to decode chunk: image tokens are null\n");
+                return -1;
+            }
+            const auto n_tokens = mtmd_image_tokens_get_n_tokens(image_tokens);
+            std::vector<mtmd_decoder_pos> rel_pos(n_tokens);
+            mtmd_helper_image_get_decoder_pos(image_tokens, n_past, rel_pos.data());
+            batch_embd.set_position_mrope_2d(rel_pos, seq_id);
+        } else if (chunk_type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
+            batch_embd.set_position_mrope_1d(n_past, seq_id);
+        } else {
+            GGML_ABORT("invalid chunk type for M-RoPE");
+        }
+    } else {
+        batch_embd.set_position_normal(n_past, seq_id);
+    }
+
+    const bool use_non_causal = mtmd_decode_use_non_causal(ctx, chunk);
+    const scope_non_causal non_causal(lctx, use_non_causal);
+
+    while (i_batch < n_img_batches) { // split into batches
+        int pos_offset = i_batch*n_batch;
+        int n_tokens_batch = std::min(n_batch, n_tokens - pos_offset);
+        llama_batch batch_embd_view = batch_embd.get_view(pos_offset, n_tokens_batch);
+
+        LOG_INF("decoding %s batch %d/%d, n_tokens_batch = %d\n", name, i_batch+1, n_img_batches, n_tokens_batch);
+
+        int64_t t1 = ggml_time_ms();
+        int32_t ret = decoder ? decoder(lctx, batch_embd_view, user_data) : llama_decode(lctx, batch_embd_view);
+        if (ret != 0) {
+            LOG_ERR("failed to decode %s\n", name);
+            return ret;
+        }
+
+        if (callback != nullptr) {
+            ret = callback(batch_embd_view, user_data);
+            if (ret != 0) {
+                LOG_ERR("post-decode callback failed\n");
+                return ret;
+            }
+        }
+
+        LOG_INF("%s decoded (batch %d/%d) in %" PRId64 " ms\n", name, i_batch+1, n_img_batches, ggml_time_ms() - t1);
+
+        i_batch++;
+    }
+
+    n_past += mtmd_input_chunk_get_n_pos(chunk);
+    *new_n_past = n_past;
+
+    return 0;
+}
+
 int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
         struct llama_context * lctx,
         const mtmd_input_chunk * chunk,
