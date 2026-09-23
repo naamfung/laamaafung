@@ -400,6 +400,20 @@ static uint64_t kvmem_first_gpu_total_bytes() {
     return 0;
 }
 
+static uint64_t kvmem_first_gpu_free_bytes() {
+    const size_t n = ggml_backend_dev_count();
+    for (size_t i = 0; i < n; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            size_t free_m = 0;
+            size_t total_m = 0;
+            ggml_backend_dev_memory(dev, &free_m, &total_m);
+            return static_cast<uint64_t>(free_m);
+        }
+    }
+    return 0;
+}
+
 static kvmem::KvMemRuntimeConfig make_runtime_cfg(
         uint32_t block_tokens,
         uint32_t budget,
@@ -479,6 +493,14 @@ struct kvmem_pool_plan {
     uint64_t block_bytes = 0;
     uint32_t cap_blocks = 0;
     uint64_t gpu_total = 0;
+    // pre-flight / 诊断用
+    uint32_t demand_tokens = 0;     // 用户意图的工作集（budget + gen_reserve，对齐前）
+    uint32_t cap_tokens = 0;        // gpu-ratio 上限折算的 token 数
+    bool     clamped_by_cap = false;// 工作集被 gpu-ratio 上限压小
+    uint32_t n_attn = 0;            // 参与池的 attention 层数
+    uint64_t k_row = 0;             // 单层单 token 的 K 行字节数
+    uint64_t v_row = 0;             // 单层单 token 的 V 行字节数
+    uint64_t kv_bytes_total = 0;    // 池的显存需求估算（含 FA 关闭时的 V 转置副本）
 };
 
 static kvmem_pool_plan kvmem_compute_pool(
@@ -513,6 +535,7 @@ static kvmem_pool_plan kvmem_compute_pool(
         p.cap_blocks = static_cast<uint32_t>(
                 (p.gpu_total * ratio) / std::max(p.block_bytes, uint64_t{1}));
     }
+    const uint32_t demand_tokens = budget + gen_reserve;
 
     // The slot pool can never usefully exceed the context: a sequence can never hold more
     // than n_ctx_seq tokens, so cells above that could never be filled. Clamp unconditionally
@@ -532,6 +555,7 @@ static kvmem_pool_plan kvmem_compute_pool(
     if (p.cap_blocks > 0) {
         const uint32_t cap_tokens = p.cap_blocks * p.block_tokens;
         if (pool > cap_tokens) {
+            p.clamped_by_cap = true;
             pool = cap_tokens;
             if (budget >= pool) {
                 gen_reserve = std::min(gen_reserve, p.block_tokens);
@@ -554,6 +578,18 @@ static kvmem_pool_plan kvmem_compute_pool(
     if (p.n_slots * p.block_tokens < p.kv_size) {
         p.n_slots += 1;
     }
+    // pre-flight / 诊断信息
+    p.demand_tokens = demand_tokens;
+    p.cap_tokens    = p.cap_blocks * p.block_tokens;
+    p.n_attn        = n_attn;
+    p.k_row         = k_row;
+    p.v_row         = v_row;
+    {
+        // V 在非 FA 时会另存一份转置副本（llama_kv_cache 内部），显存估算要计入
+        const uint64_t v_trans_extra = cparams.flash_attn
+            ? 0 : static_cast<uint64_t>(n_attn) * v_row * p.block_tokens;
+        p.kv_bytes_total = static_cast<uint64_t>(p.n_slots) * (p.block_bytes + v_trans_extra);
+    }
     return p;
 }
 
@@ -563,6 +599,112 @@ uint32_t llama_kvmem_pool_cells(
         const llama_cparams & cparams) {
     return kvmem_compute_pool(model, params, cparams).kv_size;
 }
+
+namespace {
+
+constexpr uint64_t mib(uint64_t bytes) { return bytes / (1024ull * 1024ull); }
+
+// ---------------------------------------------------------------------------
+// 启动前检（pre-flight）：在分配 KVMem 池之前核对空闲显存，把"运行中 OOM"提前成
+// "启动阶段、带参数建议的显式报错"。
+//
+// 为什么在这里能算准：池的实际显存就是紧接着急切创建的 llama_kv_cache
+// （kv_size_ tokens，"kvmem" 标签），此刻模型权重已经驻留显存，所以
+// ggml_backend_dev_memory 的 free 值就是"扣完权重后还能给 KV 池多少"。
+// 计算缓冲在此之后才分配、无法精确预知，因此：
+//   - free < 池需求        → 必然失败，直接抛错终止启动（可用环境变量豁免）
+//   - free - 池需求 余量小 → 仅 WARN（计算缓冲可能挤爆）
+//   - 工作集被 gpu-ratio 上限压小 → WARN 并给出能容纳工作集的 ratio
+// ---------------------------------------------------------------------------
+void kvmem_preflight_check(const kvmem_pool_plan & pool, const llama_cparams & cparams) {
+    const bool trace = getenv("KVMEM_TRACE") != nullptr;
+    if (getenv("LLAMA_KVMEM_NO_PREFLIGHT")) {
+        if (trace) {
+            LLAMA_LOG_WARN("%s: preflight skipped by LLAMA_KVMEM_NO_PREFLIGHT\n", __func__);
+        }
+        return;
+    }
+    if (!cparams.offload_kqv) {
+        if (trace) {
+            LLAMA_LOG_WARN("%s: preflight skip: offload_kqv=false（池在主机侧）\n", __func__);
+        }
+        return; // 池在主机侧，GPU 空闲量与它无关
+    }
+    const uint64_t free_bytes = kvmem_first_gpu_free_bytes();
+    if (free_bytes == 0 || pool.kv_bytes_total == 0) {
+        if (trace) {
+            LLAMA_LOG_WARN("%s: preflight skip: free=%llu MiB kv_bytes=%llu MiB（无 GPU 信息）\n",
+                    __func__, (unsigned long long) mib(free_bytes),
+                    (unsigned long long) mib(pool.kv_bytes_total));
+        }
+        return; // 拿不到 GPU 信息（纯 CPU 等）就不拦
+    }
+    const uint64_t need = pool.kv_bytes_total;
+
+    if (pool.clamped_by_cap) {
+        const double ratio_needed = pool.gpu_total > 0
+            ? (double) pool.demand_tokens * (double) pool.block_bytes / (double) pool.gpu_total
+            : 0.0;
+        char rec[160] = "";
+        if (ratio_needed > 0.0 && ratio_needed <= 1.0) {
+            snprintf(rec, sizeof(rec),
+                    "或加大 --kvmem-gpu-ratio 至 >= %.2f 以保留完整工作集", ratio_needed * 1.05);
+        } else {
+            snprintf(rec, sizeof(rec),
+                    "ratio 需 >=%.2f 才能容纳（>1.0 不可行），维持当前池或减小 --kvmem-budget",
+                    ratio_needed);
+        }
+        LLAMA_LOG_WARN(
+                "%s: KVMem 工作集 %u tok（budget %u + gen_reserve %u）被 --kvmem-gpu-ratio 上限压到 %u tok，"
+                "长回合召回会受损。%s\n",
+                __func__, pool.demand_tokens, pool.budget,
+                pool.gen_reserve, pool.kv_size, rec);
+    }
+
+    if (need > free_bytes) {
+        const uint64_t usable  = free_bytes / 10u * 9u; // 建议按空闲的 90% 折算，给计算缓冲留余量
+        const uint64_t fit_tok = pool.block_bytes ? (usable / pool.block_bytes) * pool.block_tokens : 0;
+        const uint64_t bmax    = fit_tok > pool.gen_reserve ? fit_tok - pool.gen_reserve : pool.block_tokens;
+        LLAMA_LOG_ERROR(
+                "%s: KVMem 预检失败：显存不足以容纳 KV 池，拒绝启动（把运行中 OOM 提前到现在）\n"
+                "  GPU 总量        : %llu MiB\n"
+                "  当前空闲        : %llu MiB（已扣模型权重等既有分配；计算缓冲尚未分配，还另有开销）\n"
+                "  KVMem 池需求    : %llu MiB = %u slots × %llu MiB/块\n"
+                "  （块 = %u 个 attention 层 × (k_row %llu B + v_row %llu B) × %u tok）\n"
+                "  工作集          : %u tok = budget %u + gen_reserve %u（gpu-ratio 上限 %u tok%s）\n"
+                "  建议（任选其一）：\n"
+                "    1. 空闲的 90%% 最多容纳 %llu tok 池：--kvmem-budget %llu（gen_reserve 保持 %u）\n"
+                "    2. 调低 --kvmem-gen-reserve（当前 %u）\n"
+                "    3. 释放权重显存：调低 --ngl 或加大 --n-cpu-moe\n"
+                "    4. 减小 --ctx-size\n"
+                "  （确要跳过本预检：设环境变量 LLAMA_KVMEM_NO_PREFLIGHT=1）\n",
+                __func__,
+                (unsigned long long) mib(pool.gpu_total),
+                (unsigned long long) mib(free_bytes),
+                (unsigned long long) mib(need), pool.n_slots,
+                (unsigned long long) mib(pool.block_bytes),
+                pool.n_attn, (unsigned long long) pool.k_row, (unsigned long long) pool.v_row,
+                pool.block_tokens,
+                pool.demand_tokens, pool.budget, pool.gen_reserve, pool.cap_tokens,
+                pool.clamped_by_cap ? "，已被压小" : "",
+                (unsigned long long) fit_tok,
+                (unsigned long long) bmax,
+                pool.gen_reserve, pool.gen_reserve);
+        throw std::runtime_error("KVMem preflight: not enough free VRAM for the KV pool (see log above)");
+    }
+
+    const uint64_t margin = need / 4 + (256ull << 20);
+    if (free_bytes < need + margin) {
+        LLAMA_LOG_WARN(
+                "%s: KVMem 预检警告：空闲 %llu MiB，KV 池需 %llu MiB，余量偏小 —— 计算缓冲尚未分配，有运行中 OOM 风险。"
+                "建议减小 --kvmem-budget / --kvmem-gen-reserve，或释放权重显存\n",
+                __func__, (unsigned long long) mib(free_bytes), (unsigned long long) mib(need),
+                (unsigned long long) mib(margin));
+    }
+}
+
+} // namespace
+
 
 llama_memory_i * llama_memory_kvmem_maybe_create(
         const llama_model & model,
@@ -599,6 +741,12 @@ llama_memory_i * llama_memory_kvmem_maybe_create(
     if (model.hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
         LLAMA_LOG_WARN("%s: KVMem skips SWA models\n", __func__);
         return nullptr;
+    }
+    // pre-flight 必须在任何分配之前：hybrid 路径的基类构造函数会先创建整个 KV 池，
+    // 若把检查放在内层 llama_memory_kvmem 构造里，free 已被吃光，检查形同虚设。
+    {
+        const kvmem_pool_plan pool = kvmem_compute_pool(model, params, cparams);
+        kvmem_preflight_check(pool, cparams);
     }
     if (llm_arch_is_hybrid(model.arch)) {
         return new llama_memory_kvmem_hybrid(model, params, cparams);
