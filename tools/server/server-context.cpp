@@ -342,7 +342,7 @@ static std::pair<int32_t, int32_t> kvmem_last_user_span(
             if (chunk == nullptr || (int32_t) at >= end) {
                 break;
             }
-            const size_t n = mtmd_input_chunk_get_n_tokens((*chunk)->get());
+            const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
             if ((int32_t) (at + n) > begin) {
                 begin = (int32_t) std::min<size_t>(at + n, (size_t) end);
             }
@@ -1388,6 +1388,7 @@ private:
                 kp.mtp_state        = 1;
                 kp.image_autoscale  = params_base.kvmem_image_autoscale;
                 llama_kvmem_set_params(&kp);
+    }
 #endif
 
         llama_init = common_init_from_params(params_base);
@@ -3812,7 +3813,7 @@ private:
                                     if (chunk == nullptr) {
                                         break;
                                     }
-                                    const size_t n = mtmd_input_chunk_get_n_tokens((*chunk)->get());
+                                    const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
                                     mm_starts.push_back((uint32_t) at);
                                     mm_ends  .push_back((uint32_t) (at + n));
                                     mm_dbg += " [" + std::to_string(at) + "," + std::to_string(at + n) + ")";

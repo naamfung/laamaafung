@@ -1,5 +1,11 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
+if (LLAMA_KVMEM)
+    # the KVMem adapter's public API (llama-kvmem-hooks.h) lives out of tree
+    include_directories(${LLAMA_KVMEM_ROOT}/src/adapter)
+    add_compile_definitions(LLAMA_KVMEM=1)
+endif()
+
 # server-context containing the core server logic, used by llama-server and CLI
 
 set(TARGET server-context)
