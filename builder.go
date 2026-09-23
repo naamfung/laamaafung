@@ -25,9 +25,10 @@
 //     Ninja 下会连 cl.exe 一起包 → 必崩。
 //
 // 用法：
-//   builder.exe                  全量构建（默认 -j8；新建目录时 Ninja+ccache）
+//   builder.exe                  增量构建（默认；无构建目录时即全新构建）
+//   builder.exe -fresh           先删构建目录再重建（全量）
 //   builder.exe -j 12            指定并行度
-//   builder.exe -keep            不删构建目录（增量/重配置续编）
+//   builder.exe -keep            仅重置 CMake 状态、保留已编译对象
 //   builder.exe -arch 86         覆盖 CUDA 架构（默认 native；等价 sh 的 CUDA_ARCH）
 //   builder.exe -gen vs         强制 Visual Studio 生成器（ccache 自动停用）
 //   builder.exe -gen ninja      强制 Ninja（换生成器需先 clean）
@@ -36,6 +37,9 @@
 //   builder.exe -C <dir>         指定仓库根（默认取 builder.exe 所在目录；用于 worktree）
 //   builder.exe -list            打印探测到的工具链/环境后退出
 //   builder.exe clean            仅清理构建目录与 ui/dist
+//
+// 瞬时竞争（nvcc 的 tmpxft_*.cudafe1.cpp C1083 / MSB8066 / MSB6001）自动重跑：
+// 编译日志默认落在 <构建目录>/builder-build.log（configure 为 builder-configure.log）。
 //
 // 环境变量 CUDA_ARCH 等价于 -arch；两处都设置时 -arch 优先。
 package main
@@ -354,26 +358,30 @@ func detectGenerator(buildDir string) string {
 	return ""
 }
 
-// cleanArtifacts 删除构建目录与跨分支共享的预构建前端资源。
-// keep=true 时做增量重配置：**Ninja（单配置）的对象文件就落在 buildDir/CMakeFiles/ 下，
-// 删掉等于全量重编，所以 Ninja 的 -keep 不做任何删除**；VS（多配置）对象在
-// <target>.dir/Release/ 下，清缓存不影响对象。
-func cleanArtifacts(repoRoot, buildDir, generator string, keep bool) {
-	if keep {
-		if strings.Contains(generator, "Ninja") {
-			printInfo("-keep 模式（Ninja）: 保留全部构建状态，仅重跑 configure + build（真正增量）")
-		} else {
-			printInfo("-keep 模式: 仅清 CMake 缓存（保留构建目录增量）")
-			os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeCache.txt"))
-			os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeFiles"))
-		}
-	} else {
-		printInfo("删除构建目录 " + buildDir)
-		if err := os.RemoveAll(filepath.Join(repoRoot, buildDir)); err != nil {
-			printWarning("删除构建目录失败（继续）: " + err.Error())
-		}
+// removeBuildDir 全量删除构建目录。
+func removeBuildDir(repoRoot, buildDir string) {
+	printInfo("删除构建目录 " + buildDir)
+	if err := os.RemoveAll(filepath.Join(repoRoot, buildDir)); err != nil {
+		printWarning("删除构建目录失败（继续）: " + err.Error())
 	}
-	// 清理跨分支共享残留的预构建前端资源, 避免误用不匹配版本的静态页面
+}
+
+// clearCMakeState 仅重置 CMake 状态、保留已编译对象。
+// Ninja（单配置）的对象文件就在 buildDir/CMakeFiles/ 下，删 CMakeFiles 等于全量重编，
+// 所以 Ninja 下不做任何删除；VS（多配置）对象在 <target>.dir/Release/ 下，清缓存不影响对象。
+func clearCMakeState(repoRoot, buildDir, generator string) {
+	if strings.Contains(generator, "Ninja") {
+		printInfo("-keep（Ninja）: 保留全部构建状态，仅重跑 configure + build")
+		return
+	}
+	printInfo("-keep: 仅清 CMake 缓存（保留已编译对象）")
+	os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeCache.txt"))
+	os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeFiles"))
+}
+
+// cleanUIFrontend 清理跨分支共享残留的预构建前端资源,
+// 避免误用不匹配版本的静态页面。
+func cleanUIFrontend(repoRoot string) {
 	uiDist := filepath.Join(repoRoot, "tools", "ui", "dist")
 	if _, err := os.Stat(uiDist); err == nil {
 		printInfo("删除 tools/ui/dist（跨分支共享残留）")
@@ -475,7 +483,8 @@ func verifyArtifacts(repoRoot, buildDir string) error {
 
 func main() {
 	jobs := flag.Int("j", 8, "并行编译度")
-	keep := flag.Bool("keep", false, "保留构建目录（仅清 CMake 缓存做增量重配置）")
+	keep := flag.Bool("keep", false, "仅重置 CMake 状态，保留已编译对象（CMake 缓存损坏/改选项后用）")
+	fresh := flag.Bool("fresh", false, "先删除构建目录再重建（全量）")
 	arch := flag.String("arch", "", "CUDA 架构（默认 native；亦可用环境变量 CUDA_ARCH）")
 	clean := flag.Bool("clean", false, "只清理不构建")
 	root := flag.String("C", "", "仓库根（默认 builder.exe 所在目录）")
@@ -614,11 +623,21 @@ func main() {
 		}
 	}
 
-	cleanArtifacts(repoRoot, buildDir, chosenGen, *keep)
 	if *clean {
+		removeBuildDir(repoRoot, buildDir)
+		cleanUIFrontend(repoRoot)
 		printSuccess("清理完成")
 		return
 	}
+	switch {
+	case *fresh:
+		removeBuildDir(repoRoot, buildDir)
+	case *keep:
+		clearCMakeState(repoRoot, buildDir, chosenGen)
+	default:
+		printInfo("增量构建（保留已有构建状态）；要全新构建请加 -fresh")
+	}
+	cleanUIFrontend(repoRoot)
 
 	os.MkdirAll(filepath.Join(repoRoot, buildDir), 0o755)
 	cfgLog := filepath.Join(repoRoot, buildDir, "builder-configure.log")
