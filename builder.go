@@ -10,12 +10,32 @@
 //   - git-bash 的 rm -rf 大目录可能被环境安全钩子拦截 —— Go 的 os.RemoveAll
 //     原生删除，不走 shell；另提供 -keep 增量模式（只清 CMake 缓存）。
 //
+// 2026-09-23 新增（ccache + Ninja）：
+//   - MSVC 开发环境自建：本机 cmd.exe 被安全策略禁用、vcvars 无法调用，因此这里
+//     直接用 Go 探测 VS 安装 / MSVC 工具集 / Windows SDK 版本，手工拼出
+//     INCLUDE / LIB / PATH（等价 vcvars64.bat 的关键部分），Ninja 生成器即可用。
+//   - ccache：Ninja 是 CMake 里少数会真正执行 CMAKE_<LANG>_COMPILER_LAUNCHER 的
+//     Windows 生成器（Visual Studio 生成器会**静默忽略** launcher，实测 build 树内
+//     无任何 ccache 引用）。
+//   - **只给 CUDA 挂 ccache**：实测 ccache 4.13.6 包装本机本地化 MSVC 时必崩
+//     （cl.exe 输出中文 GBK，ccache 按 UTF-8 解析 → std::filesystem
+//     "Illegal byte sequence"；设 CCACHE_MSVC_DEP_PREFIX / VSLANG=1033 都无效），
+//     而包装 nvcc 完全正常且能命中。CUDA 实例正是耗时大头，所以这样配置既安全又有收益。
+//     因此必须同时 -DGGML_CCACHE=OFF：ggml 的自身接法会设全局 RULE_LAUNCH_COMPILE，
+//     Ninja 下会连 cl.exe 一起包 → 必崩。
+//
 // 用法：
-//   builder.exe              全量构建（默认 -j8）
-//   builder.exe -j 12        指定并行度
-//   builder.exe -keep        不删构建目录（增量/重配置续编）
-//   builder.exe -arch 86     覆盖 CUDA 架构（默认 native；等价 sh 的 CUDA_ARCH 环境变量）
-//   builder.exe clean        仅清理构建目录与 ui/dist
+//   builder.exe                  全量构建（默认 -j8；新建目录时 Ninja+ccache）
+//   builder.exe -j 12            指定并行度
+//   builder.exe -keep            不删构建目录（增量/重配置续编）
+//   builder.exe -arch 86         覆盖 CUDA 架构（默认 native；等价 sh 的 CUDA_ARCH）
+//   builder.exe -gen vs         强制 Visual Studio 生成器（ccache 自动停用）
+//   builder.exe -gen ninja      强制 Ninja（换生成器需先 clean）
+//   builder.exe -no-ccache       关闭 ccache
+//   builder.exe -ccache-all      也给 C/CXX 挂 ccache（本机本地化 MSVC 下会崩，仅调试用）
+//   builder.exe -C <dir>         指定仓库根（默认取 builder.exe 所在目录；用于 worktree）
+//   builder.exe -list            打印探测到的工具链/环境后退出
+//   builder.exe clean            仅清理构建目录与 ui/dist
 //
 // 环境变量 CUDA_ARCH 等价于 -arch；两处都设置时 -arch 优先。
 package main
@@ -26,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -50,7 +71,10 @@ var proxyVars = []string{
 	"NO_PROXY", "no_proxy",
 }
 
-// cleanEnv 返回剥离代理变量后的环境副本。
+// childExtraEnv 由 main 在解析参数后填好，run()/git 调用时合并进子进程环境。
+var childExtraEnv []string
+
+// cleanEnv 返回剥离代理变量后的环境副本，再叠加 childExtraEnv（MSVC / ccache）。
 func cleanEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
@@ -65,10 +89,10 @@ func cleanEnv() []string {
 			env = append(env, kv)
 		}
 	}
-	return env
+	return append(env, childExtraEnv...)
 }
 
-// run 执行命令，输出同时打到控制台与日志文件（tee）。
+// run 执行命令（工作目录固定为仓库根）。
 func run(repoRoot, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = repoRoot
@@ -85,16 +109,22 @@ func run(repoRoot, name string, args ...string) error {
 	return nil
 }
 
+// runCapture 执行命令并捕获输出（用于探测类调用，不打印）。
+func runCapture(dir, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = cleanEnv()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // gitBranch 取当前分支名；失败（如 detached HEAD）返回空串。
 func gitBranch(repoRoot string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = repoRoot
-	cmd.Env = cleanEnv()
-	out, err := cmd.Output()
+	out, err := runCapture(repoRoot, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out)
 }
 
 // buildDirName 按分支命名构建目录，取不到分支时回退 "build"。
@@ -103,6 +133,157 @@ func buildDirName(repoRoot string) string {
 		return "build-" + b
 	}
 	return "build"
+}
+
+// ---------------------------------------------------------------------------
+// MSVC 工具链探测（替代 vcvars64.bat）
+// ---------------------------------------------------------------------------
+
+const sdkBaseWin = `C:\Program Files (x86)\Windows Kits\10`
+
+func maxDirEntry(base string) string {
+	ents, err := os.ReadDir(base)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, e := range ents {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names) // 版本号零填充一致，字典序即版本序
+	return names[len(names)-1]
+}
+
+// findMSVC 探测 VS 安装根、MSVC 工具集版本、Windows SDK 版本。
+func findMSVC() (vsRoot, msvcVer, sdkVer string) {
+	for _, c := range []string{
+		`C:\Program Files\Microsoft Visual Studio\2022\Community`,
+		`C:\Program Files\Microsoft Visual Studio\2022\Professional`,
+		`C:\Program Files\Microsoft Visual Studio\2022\Enterprise`,
+		`C:\Program Files\Microsoft Visual Studio\2022\BuildTools`,
+		`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`,
+		`C:\Program Files\Microsoft Visual Studio\2019\Community`,
+		`C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools`,
+	} {
+		if v := maxDirEntry(filepath.Join(c, "VC", "Tools", "MSVC")); v != "" {
+			vsRoot, msvcVer = c, v
+			break
+		}
+	}
+	if vsRoot == "" {
+		return "", "", ""
+	}
+	sdkVer = maxDirEntry(filepath.Join(sdkBaseWin, "Include"))
+	return vsRoot, msvcVer, sdkVer
+}
+
+// msvcEnvVars 由探测结果拼出 vcvars64.bat 的关键环境变量。
+func msvcEnvVars(vsRoot, msvcVer, sdkVer string) []string {
+	vc := filepath.Join(vsRoot, "VC", "Tools", "MSVC", msvcVer)
+	include := strings.Join([]string{
+		filepath.Join(vc, "include"),
+		filepath.Join(sdkBaseWin, "Include", sdkVer, "ucrt"),
+		filepath.Join(sdkBaseWin, "Include", sdkVer, "um"),
+		filepath.Join(sdkBaseWin, "Include", sdkVer, "shared"),
+		filepath.Join(sdkBaseWin, "Include", sdkVer, "winrt"),
+	}, ";")
+	lib := strings.Join([]string{
+		filepath.Join(vc, "lib", "x64"),
+		filepath.Join(sdkBaseWin, "Lib", sdkVer, "ucrt", "x64"),
+		filepath.Join(sdkBaseWin, "Lib", sdkVer, "um", "x64"),
+	}, ";")
+	path := strings.Join([]string{
+		filepath.Join(vc, "bin", "Hostx64", "x64"),
+		filepath.Join(vsRoot, "Common7", "IDE", "CommonExtensions", "Microsoft", "CMake", "Ninja"),
+		filepath.Join(sdkBaseWin, "bin", sdkVer, "x64"),
+		os.Getenv("PATH"),
+	}, string(os.PathListSeparator))
+	return []string{
+		"INCLUDE=" + include,
+		"LIB=" + lib,
+		"PATH=" + path,
+		"VCToolsInstallDir=" + vc + `\`,
+		"VCINSTALLDIR=" + filepath.Join(vsRoot, "VC") + `\`,
+		"WindowsSdkDir=" + sdkBaseWin + `\`,
+		"WindowsSDKVersion=" + sdkVer + `\`,
+		// cl.exe 默认输出中文，ccache 解析编译器输出时会崩；同时 nvcc 的英文输出更稳。
+		"VSLANG=1033",
+	}
+}
+
+// findCcache 定位 ccache.exe：先 PATH，再常见便携安装目录。
+func findCcache() string {
+	if p, err := exec.LookPath("ccache"); err == nil {
+		return p
+	}
+	for _, pat := range []string{
+		filepath.Join(`D:\winkit\share`, "ccache-*", "ccache.exe"),
+		filepath.Join(`C:\winkit\share`, "ccache-*", "ccache.exe"),
+		filepath.Join(`D:\tools`, "ccache-*", "ccache.exe"),
+	} {
+		if ms, err := filepath.Glob(pat); err == nil && len(ms) > 0 {
+			sort.Strings(ms)
+			return ms[len(ms)-1]
+		}
+	}
+	return ""
+}
+
+// ccacheEnvVars 组装 ccache 运行环境。
+func ccacheEnvVars(repoRoot, ccacheDir string) []string {
+	if ccacheDir == "" {
+		// 放在仓库的兄弟目录：多个 worktree/分支共享同一份缓存，且不污染 git 工作区
+		ccacheDir = filepath.Join(filepath.Dir(repoRoot), ".ccache")
+	}
+	os.MkdirAll(ccacheDir, 0o755)
+	return []string{
+		"CCACHE_DIR=" + ccacheDir,
+		"CCACHE_MAXSIZE=20G",
+		// MSVC/nvcc 的 include 时间戳与绝对路径会让 ccache 拒绝缓存，放宽检查
+		"CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime",
+		"CCACHE_BASEDIR=" + filepath.Dir(repoRoot),
+	}
+}
+
+func ccacheStats(ccachePath string) {
+	if ccachePath == "" {
+		return
+	}
+	cmd := exec.Command(ccachePath, "-s")
+	cmd.Env = cleanEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	txt := string(out)
+	if i := strings.Index(txt, "Local storage:"); i > 0 {
+		txt = txt[:i]
+	}
+	printInfo("ccache 统计:\n" + strings.TrimRight(txt, "\n"))
+}
+
+// ---------------------------------------------------------------------------
+// 构建流程
+// ---------------------------------------------------------------------------
+
+// detectGenerator 读已有构建目录的 CMakeCache，返回其生成器名（无则空串）。
+// 注意：CMake 不允许在既有目录上更换生成器，所以已有目录必须沿用原生成器。
+func detectGenerator(buildDir string) string {
+	b, err := os.ReadFile(filepath.Join(buildDir, "CMakeCache.txt"))
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "CMAKE_GENERATOR:INTERNAL=") {
+			return strings.TrimSpace(strings.TrimPrefix(l, "CMAKE_GENERATOR:INTERNAL="))
+		}
+	}
+	return ""
 }
 
 // cleanArtifacts 删除构建目录与跨分支共享的预构建前端资源。
@@ -127,10 +308,13 @@ func cleanArtifacts(repoRoot, buildDir string, keep bool) {
 }
 
 // configure 组装并执行 CMake 配置。
-func configure(repoRoot, buildDir, cudaArch string, extra []string) error {
-	args := []string{
-		"-B", buildDir,
-		"-DCMAKE_CUDA_ARCHITECTURES=" + cudaArch,
+func configure(repoRoot, buildDir, cudaArch, generator, ccachePath string, ccacheAll bool, forceCcache bool, extra []string) error {
+	args := []string{"-B", buildDir}
+	if generator != "" {
+		args = append(args, "-G", generator)
+	}
+	args = append(args,
+		"-DCMAKE_CUDA_ARCHITECTURES="+cudaArch,
 		"-DGGML_CUDA=ON",
 		"-DGGML_NATIVE=ON",
 		"-DGGML_CUDA_FA=ON",
@@ -138,14 +322,35 @@ func configure(repoRoot, buildDir, cudaArch string, extra []string) error {
 		"-DCMAKE_BUILD_TYPE=Release",
 		// LLAMA_KVMEM=ON + ROOT 指向仓库根: 构建含 KVMem 的全部程序
 		"-DLLAMA_KVMEM=ON",
-		"-DLLAMA_KVMEM_ROOT=" + repoRoot,
+		"-DLLAMA_KVMEM_ROOT="+repoRoot,
 		// CMAKE_SUPPRESS_REGENERATION=ON (重要, 勿删):
 		//   VS 生成器会往每个 .vcxproj 塞"构建系统自检"规则并生成 ZERO_CHECK 工程，
 		//   并行构建时数十个进程抢写同一批 generate.stamp，被防病毒/索引器瞬时
 		//   占住就报 "Cannot restore timestamp: 拒绝访问" → MSB8066 中断工程。
 		//   本构建器全量配置不依赖增量自检，直接关闭。
 		"-DCMAKE_SUPPRESS_REGENERATION=ON",
+	)
+
+	// ccache：只挂 CUDA。ggml 自带的 GGML_CCACHE 会设全局 RULE_LAUNCH_COMPILE，
+	// Ninja 下会连 cl.exe 一起包（本机本地化 MSVC + ccache 必崩），必须关掉。
+	ccacheOn := forceCcache && ccachePath != "" && strings.Contains(generator, "Ninja")
+	if forceCcache && ccachePath == "" {
+		printWarning("未找到 ccache.exe，本次不使用 ccache")
 	}
+	if forceCcache && ccachePath != "" && !strings.Contains(generator, "Ninja") {
+		printWarning("当前生成器不是 Ninja，ccache 无法生效（VS 生成器会忽略 launcher）")
+	}
+	args = append(args, "-DGGML_CCACHE=OFF")
+	if ccacheOn {
+		args = append(args, "-DCMAKE_CUDA_COMPILER_LAUNCHER="+ccachePath)
+		if ccacheAll {
+			printWarning("-ccache-all: 也给 C/CXX 挂 ccache（本机本地化 MSVC 下预计会崩，仅调试用）")
+			args = append(args,
+				"-DCMAKE_C_COMPILER_LAUNCHER="+ccachePath,
+				"-DCMAKE_CXX_COMPILER_LAUNCHER="+ccachePath)
+		}
+	}
+
 	args = append(args, extra...)
 	return run(repoRoot, "cmake", args...)
 }
@@ -157,9 +362,23 @@ func build(repoRoot, buildDir string, jobs int) error {
 }
 
 // verifyArtifacts 收尾自检: MSB8066 只会中断单个工程，不会让 --build 整体
-// 失败，容易漏掉静默缺失的产物。
+// 失败，容易漏掉静默缺失的产物。多配置生成器产物在 bin/Release/，
+// 单配置（Ninja）在 bin/。
 func verifyArtifacts(repoRoot, buildDir string) error {
-	binDir := filepath.Join(repoRoot, buildDir, "bin", "Release")
+	candidates := []string{
+		filepath.Join(repoRoot, buildDir, "bin", "Release"),
+		filepath.Join(repoRoot, buildDir, "bin"),
+	}
+	binDir := ""
+	for _, d := range candidates {
+		if _, err := os.Stat(filepath.Join(d, "llama-cli.exe")); err == nil {
+			binDir = d
+			break
+		}
+	}
+	if binDir == "" {
+		binDir = candidates[0]
+	}
 	missing := 0
 	for _, exe := range []string{
 		"llama-server", "llama-cli", "llama-bench", "llama-perplexity",
@@ -176,34 +395,47 @@ func verifyArtifacts(repoRoot, buildDir string) error {
 	if missing > 0 {
 		return fmt.Errorf("缺少 %d 个产物", missing)
 	}
-	printSuccess("构建完成: " + buildDir + "\\bin\\Release")
+	printSuccess("构建完成: " + binDir)
 	return nil
 }
 
 func main() {
-	// 定位仓库根：以可执行文件所在目录为准（builder.exe 与 builder.go 同放仓库根）。
-	exePath, err := os.Executable()
-	if err != nil {
-		exePath = os.Args[0]
-	}
-	repoRoot, err := filepath.Abs(filepath.Dir(exePath))
-	if err != nil {
-		fmt.Println("定位仓库根失败:", err)
-		os.Exit(1)
-	}
-	// 供 `go run builder.go` 调试时使用当前目录（exe 在临时目录里）。
-	if strings.Contains(filepath.Base(exePath), "go-build") ||
-		filepath.Base(exePath) == "builder.test.exe" {
-		if wd, err := os.Getwd(); err == nil {
-			repoRoot = wd
-		}
-	}
-
 	jobs := flag.Int("j", 8, "并行编译度")
 	keep := flag.Bool("keep", false, "保留构建目录（仅清 CMake 缓存做增量重配置）")
 	arch := flag.String("arch", "", "CUDA 架构（默认 native；亦可用环境变量 CUDA_ARCH）")
 	clean := flag.Bool("clean", false, "只清理不构建")
+	root := flag.String("C", "", "仓库根（默认 builder.exe 所在目录）")
+	gen := flag.String("gen", "auto", "生成器: auto|ninja|vs")
+	noCcache := flag.Bool("no-ccache", false, "关闭 ccache")
+	ccacheAll := flag.Bool("ccache-all", false, "也给 C/CXX 挂 ccache（调试用）")
+	ccacheDir := flag.String("ccache-dir", "", "ccache 缓存目录（默认 <仓库父目录>/.ccache）")
+	listOnly := flag.Bool("list", false, "打印探测到的工具链后退出")
 	flag.Parse()
+
+	// 定位仓库根：默认以可执行文件所在目录为准（builder.exe 与 builder.go 同放仓库根）。
+	repoRoot := ""
+	if *root != "" {
+		if abs, err := filepath.Abs(*root); err == nil {
+			repoRoot = abs
+		}
+	} else {
+		exePath, err := os.Executable()
+		if err != nil {
+			exePath = os.Args[0]
+		}
+		repoRoot, _ = filepath.Abs(filepath.Dir(exePath))
+		// 供 `go run builder.go` 调试时使用当前目录（exe 在临时目录里）。
+		if strings.Contains(filepath.Base(exePath), "go-build") ||
+			filepath.Base(exePath) == "builder.test.exe" {
+			if wd, err := os.Getwd(); err == nil {
+				repoRoot = wd
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, "ggml")); err != nil {
+		printError("仓库根不像 llama.cpp 源码树（缺少 ggml/）: " + repoRoot)
+		os.Exit(1)
+	}
 
 	if envArch := os.Getenv("CUDA_ARCH"); *arch == "" && envArch != "" {
 		*arch = envArch
@@ -212,7 +444,93 @@ func main() {
 		*arch = "native"
 	}
 
+	// ---- 工具链探测 ----
+	vsRoot, msvcVer, sdkVer := findMSVC()
+	ccachePath := findCcache()
+	if *noCcache {
+		ccachePath = ""
+	}
+
+	// 子进程环境：MSVC 变量 + ccache 变量
+	childExtraEnv = nil
+	if vsRoot != "" {
+		childExtraEnv = append(childExtraEnv, msvcEnvVars(vsRoot, msvcVer, sdkVer)...)
+	}
+	if ccachePath != "" {
+		childExtraEnv = append(childExtraEnv, ccacheEnvVars(repoRoot, *ccacheDir)...)
+	}
+
 	buildDir := buildDirName(repoRoot)
+	detectedGen := detectGenerator(filepath.Join(repoRoot, buildDir))
+
+	// 选生成器：ccache 只在 Ninja 下生效，所以新目录默认 Ninja。
+	chosenGen := detectedGen
+	passGen := ""
+	switch {
+	case detectedGen != "":
+		// 已有构建目录：必须沿用原生成器（CMake 不允许换）
+		if *gen == "ninja" && !strings.Contains(detectedGen, "Ninja") {
+			printError(fmt.Sprintf("已有构建目录用的是 %q，无法直接换成 Ninja；请先执行: builder.exe clean", detectedGen))
+			os.Exit(1)
+		}
+		if *gen == "vs" && strings.Contains(detectedGen, "Ninja") {
+			printError(fmt.Sprintf("已有构建目录用的是 %q，无法直接换成 VS；请先执行: builder.exe clean", detectedGen))
+			os.Exit(1)
+		}
+	default:
+		switch *gen {
+		case "ninja":
+			chosenGen, passGen = "Ninja", "Ninja"
+		case "vs":
+			chosenGen = "Visual Studio 17 2022"
+		default:
+			if vsRoot != "" && ccachePath != "" {
+				chosenGen, passGen = "Ninja", "Ninja"
+			} else if vsRoot != "" {
+				chosenGen, passGen = "Ninja", "Ninja"
+			} else {
+				chosenGen = "Visual Studio 17 2022"
+			}
+		}
+	}
+
+	// ---- 打印摘要 ----
+	printInfo(fmt.Sprintf("仓库根: %s", repoRoot))
+	br := gitBranch(repoRoot)
+	if br == "" {
+		br = "(detached)"
+	}
+	printInfo(fmt.Sprintf("构建目录: %s（分支: %s）", buildDir, br))
+	printInfo(fmt.Sprintf("CUDA 架构: %s, 并行度: %d", *arch, *jobs))
+	if vsRoot != "" {
+		printInfo(fmt.Sprintf("MSVC: %s (%s) / SDK %s", vsRoot, msvcVer, sdkVer))
+	} else {
+		printWarning("未探测到 VS 安装：Ninja 构建可能找不到 cl.exe")
+	}
+	if chosenGen == "" {
+		chosenGen = "Visual Studio 17 2022"
+	}
+	printInfo(fmt.Sprintf("生成器: %s", chosenGen))
+	if ccachePath != "" && strings.Contains(chosenGen, "Ninja") {
+		printSuccess("ccache: " + ccachePath + "（仅 CUDA；缓存 " + func() string {
+			if *ccacheDir != "" {
+				return *ccacheDir
+			}
+			return filepath.Join(filepath.Dir(repoRoot), ".ccache")
+		}() + "）")
+	} else if ccachePath != "" {
+		printWarning("ccache: 已找到但当前生成器非 Ninja（VS 生成器会忽略 launcher），本次不生效")
+	} else {
+		printWarning("ccache: 未找到 ccache.exe（放在 PATH 或 D:\\winkit\\share\\ccache-*）")
+	}
+
+	if *listOnly {
+		printInfo("环境变量（子进程）：")
+		for _, kv := range childExtraEnv {
+			printInfo("  " + kv)
+		}
+		return
+	}
 
 	// 环境自检提示（有代理变量时说明剥离动作，避免 MSB6001 复发时排查无门）。
 	for _, p := range proxyVars {
@@ -221,14 +539,6 @@ func main() {
 			break
 		}
 	}
-	printInfo(fmt.Sprintf("仓库根: %s", repoRoot))
-	printInfo(fmt.Sprintf("构建目录: %s（分支: %s）", buildDir, func() string {
-		if b := gitBranch(repoRoot); b != "" {
-			return b
-		}
-		return "(detached)"
-	}()))
-	printInfo(fmt.Sprintf("CUDA 架构: %s, 并行度: %d", *arch, *jobs))
 
 	cleanArtifacts(repoRoot, buildDir, *keep)
 	if *clean {
@@ -237,16 +547,17 @@ func main() {
 	}
 
 	start := time.Now()
-	if err := configure(repoRoot, buildDir, *arch, flag.Args()); err != nil {
+	if err := configure(repoRoot, buildDir, *arch, passGen, ccachePath, *ccacheAll, !*noCcache, flag.Args()); err != nil {
 		printError("configure 失败，详见上方 CMake 输出")
 		os.Exit(1)
 	}
 	if err := build(repoRoot, buildDir, *jobs); err != nil {
-		printError("编译失败，详见上方 MSBuild 输出")
+		printError("编译失败，详见上方编译输出")
 		os.Exit(1)
 	}
 	if err := verifyArtifacts(repoRoot, buildDir); err != nil {
 		os.Exit(1)
 	}
+	ccacheStats(ccachePath)
 	printSuccess(fmt.Sprintf("总耗时 %s", time.Since(start).Round(time.Second)))
 }
