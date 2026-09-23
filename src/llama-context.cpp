@@ -550,6 +550,7 @@ llama_context::llama_context(
 
     cparams.ctx_other = nullptr;
 
+
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
         if (params.ctx_other == nullptr) {
@@ -567,6 +568,16 @@ llama_context::llama_context(
             }
             cparams.ctx_other = params.ctx_other;
         }
+    }
+
+    // Prism: activation-side Hadamard transforms are keyed by tensor pointer and
+    // shared with the model's maps. Borrowed target tensors (ctx_other) stay distinct.
+    hadamard_rotations = model.hadamard_rotations;
+    hadamard_inverses  = model.hadamard_inverses;
+    if (cparams.ctx_other) {
+        const auto & other = cparams.ctx_other->model;
+        hadamard_rotations.insert(other.hadamard_rotations.begin(), other.hadamard_rotations.end());
+        hadamard_inverses .insert(other.hadamard_inverses .begin(), other.hadamard_inverses .end());
     }
 
     if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
@@ -649,10 +660,211 @@ llama_context::llama_context(
     cparams.fused_dsv4_hc_post = true;
     cparams.auto_fhc           = true;
 
+
+    // Separate ubatch for prefill (throughput) vs decode (latency). Auto-tuned below.
+    int32_t n_ubatch_prefill_calc = -1;
+
+    // Auto-tune n_batch and n_ubatch if set to -1
+    if (params.n_batch == -1 || params.n_ubatch == -1) {
+        // Get free memory from all accelerator devices to prevent OOM
+        size_t free_mem_total = 0;
+        size_t total_mem_total = 0;
+
+        for (auto & backend : backends) {
+            auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
+            if (dev_type == GGML_BACKEND_DEVICE_TYPE_CPU || dev_type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                // skip CPU and generic ACCEL devices for GPU memory check
+                continue;
+            }
+            auto * dev = ggml_backend_get_device(backend.get());
+            if (dev) {
+                size_t free_mem = 0;
+                size_t total_mem = 0;
+                ggml_backend_dev_memory(dev, &free_mem, &total_mem);
+                if (free_mem > 0) {
+                    free_mem_total += free_mem;
+                    total_mem_total += total_mem;
+                }
+            }
+        }
+
+        // Calculate safe n_ubatch based on free memory if available
+        int32_t n_ubatch_calc = -1;
+        if (free_mem_total > 0 && params.n_ubatch == -1) {
+            size_t free_mem_mb = free_mem_total / (1024 * 1024);
+            size_t total_mem_mb = total_mem_total / (1024 * 1024);
+
+            LLAMA_LOG_INFO("%s: GPU memory - free: %zu MB, total: %zu MB\n", __func__, free_mem_mb, total_mem_mb);
+
+            const uint32_t n_layers = model.hparams.n_layer();
+            const uint32_t n_embd_k_gqa = model.hparams.n_embd_k_gqa_max();
+            const size_t type_size_v = ggml_type_size(params.type_v);
+            const size_t type_size_k = ggml_type_size(params.type_k);
+
+            size_t kv_per_ubatch_token = 2 * n_layers * n_embd_k_gqa * ((type_size_k + type_size_v) / 2);
+
+            // MoE expert routing temp: gate + up projection outputs coexist for SiLU(gate)*up.
+            size_t moe_per_token = 0;
+            if (model.hparams.n_expert_used(0) > 0) {
+                moe_per_token  = 2 * (size_t)model.hparams.n_expert_used(0) * model.hparams.n_ff_exp(0) * sizeof(float);
+                if (model.hparams.n_expert_shared > 0) {
+                    moe_per_token += 2 * (size_t)model.hparams.n_ff_shexp * sizeof(float);
+                }
+            }
+
+            // Total KV cache scales with n_ctx, not n_ubatch. Reserve it first or we
+            // overestimate free memory and pick an ubatch that starves CUDA graph capture.
+            size_t kv_cache_total = kv_per_ubatch_token * (size_t) cparams.n_ctx;
+
+            // Decode: 6x multiplier covers CUDA graph buffers + attention intermediates.
+            // Prefill: 3x KV for attention temp, plus MoE expert routing buffers.
+            size_t per_token_decode  = kv_per_ubatch_token * 6;
+            size_t per_token_prefill = kv_per_ubatch_token * 3 + moe_per_token;
+
+            // Free memory after reserving the full KV cache, with 20% safety margin
+            size_t avail_mem = free_mem_total > kv_cache_total ? (free_mem_total - kv_cache_total) : 0;
+            size_t safe_mem  = (size_t)(avail_mem * 0.8);
+
+            // Context-based conservative cap (refined tiers including 128K+ and 256K+)
+            int32_t max_ubatch_by_ctx;
+            if (cparams.n_ctx >= 262144) {
+                max_ubatch_by_ctx = 512;
+            } else if (cparams.n_ctx >= 131072) {
+                max_ubatch_by_ctx = 1024;
+            } else if (cparams.n_ctx >= 65536) {
+                max_ubatch_by_ctx = 1024;
+            } else if (cparams.n_ctx >= 32768) {
+                max_ubatch_by_ctx = 2048;
+            } else {
+                max_ubatch_by_ctx = 4096;
+            }
+
+            if (per_token_decode > 0 && safe_mem > 0) {
+                int32_t max_ubatch_by_mem = static_cast<int32_t>(safe_mem / per_token_decode);
+                n_ubatch_calc = std::min(max_ubatch_by_ctx, max_ubatch_by_mem);
+                n_ubatch_calc = std::max(n_ubatch_calc, static_cast<int32_t>(64));
+                n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(cparams.n_ctx));
+
+                // Prefill may use a larger tile for throughput, capped at 2x decode
+                // and bounded by the memory budget computed with the smaller multiplier
+                int32_t max_prefill_by_mem = static_cast<int32_t>(safe_mem / per_token_prefill);
+                int32_t max_prefill_by_ctx = std::min(max_ubatch_by_ctx * 2, static_cast<int32_t>(cparams.n_ctx));
+                n_ubatch_prefill_calc = std::min(max_prefill_by_ctx, max_prefill_by_mem);
+                n_ubatch_prefill_calc = std::max(n_ubatch_prefill_calc, n_ubatch_calc);
+
+                if (ggml_is_numa()) {
+                    n_ubatch_calc = std::min(n_ubatch_calc, static_cast<int32_t>(2048));
+                    n_ubatch_prefill_calc = std::min(n_ubatch_prefill_calc, static_cast<int32_t>(2048));
+                }
+
+                LLAMA_LOG_INFO("%s: n_ubatch auto (free: %zu MB, KV: %zu MB, avail: %zu MB, MoE/tok: %zu B): %d (prefill: %d)\n",
+                    __func__, free_mem_mb, kv_cache_total / (1024 * 1024), avail_mem / (1024 * 1024),
+                    moe_per_token, n_ubatch_calc, n_ubatch_prefill_calc);
+            } else {
+                n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch_by_ctx);
+                if (ggml_is_numa()) {
+                    n_ubatch_calc = std::min(n_ubatch_calc, 2048);
+                }
+                n_ubatch_calc = std::max(n_ubatch_calc, 64);
+                n_ubatch_prefill_calc = n_ubatch_calc;
+                LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
+            }
+        } else if (params.n_ubatch == -1) {
+            // Fallback when no GPU memory info available
+            int32_t max_ubatch = 4096;
+            if (cparams.n_ctx >= 262144) {
+                max_ubatch = 512;
+            } else if (cparams.n_ctx >= 131072) {
+                max_ubatch = 1024;
+            } else if (cparams.n_ctx >= 65536) {
+                max_ubatch = 1024;
+            } else if (cparams.n_ctx >= 32768) {
+                max_ubatch = 2048;
+            }
+
+            n_ubatch_calc = std::min((int32_t)cparams.n_ctx, max_ubatch);
+            if (ggml_is_numa()) {
+                n_ubatch_calc = std::min(n_ubatch_calc, 1024); // Reduce for NUMA architectures
+            }
+            n_ubatch_calc = std::max(n_ubatch_calc, 64);
+            n_ubatch_prefill_calc = n_ubatch_calc;
+            LLAMA_LOG_INFO("%s: n_ubatch set to auto (fallback based on n_ctx=%u and hardware): %d\n", __func__, cparams.n_ctx, n_ubatch_calc);
+        }
+
+        if (params.n_ubatch == -1 && n_ubatch_calc != -1) {
+            params.n_ubatch = n_ubatch_calc;
+        }
+
+        // Calculate auto n_batch based on n_ctx, hardware features, and free memory
+        if (params.n_batch == -1) {
+            int32_t n_batch_calc;
+            if (params.n_ubatch != -1) {
+                // n_batch is typically >= n_ubatch and limited by n_ctx
+                // For large context sizes, use more conservative batch limits
+                int32_t max_n_batch = 8192;
+                if (cparams.n_ctx >= 65536) {
+                    max_n_batch = 2048; // Conservative limit for 64K+ context
+                } else if (cparams.n_ctx >= 32768) {
+                    max_n_batch = 4096; // Conservative limit for 32K+ context
+                }
+
+                // Based on empirical results: when ub is very small, b should be ub * large_multiplier
+                // to reach max_n_batch. The multiplier decreases as ub increases (descending order):
+                // ub<=256 -> multiplier 32 (b=8192 when max_n_batch=8192)
+                // ub<=512 -> multiplier 16 (b=8192 when max_n_batch=8192)
+                // ub<=1024 -> multiplier 8 (b=8192 when max_n_batch=8192)
+                // ub<=2048 -> multiplier 4 (b=8192 when max_n_batch=8192)
+                // ub<=4096 -> multiplier 2 (b=8192 when max_n_batch=8192)
+                int32_t target_n_batch;
+                if (params.n_ubatch >= max_n_batch) {
+                    target_n_batch = params.n_ubatch;
+                } else if (params.n_ubatch <= 256) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 32);
+                } else if (params.n_ubatch <= 512) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 16);
+                } else if (params.n_ubatch <= 1024) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 8);
+                } else if (params.n_ubatch <= 2048) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 4);
+                } else if (params.n_ubatch <= 4096) {
+                    target_n_batch = std::min<int32_t>(max_n_batch, params.n_ubatch * 2);
+                } else {
+                    target_n_batch = max_n_batch;
+                }
+
+                n_batch_calc = std::min(static_cast<int32_t>(cparams.n_ctx), target_n_batch);
+                n_batch_calc = std::min(n_batch_calc, max_n_batch);
+            } else {
+                // Calculate based on n_ctx and hardware features
+                int32_t max_n_batch = 8192;
+                if (cparams.n_ctx >= 65536) {
+                    max_n_batch = 2048; // Conservative limit for 64K+ context
+                } else if (cparams.n_ctx >= 32768) {
+                    max_n_batch = 4096; // Conservative limit for 32K+ context
+                }
+                n_batch_calc = cparams.causal_attn ? std::min((int32_t)cparams.n_ctx, max_n_batch) : max_n_batch;
+            }
+            if (ggml_is_numa()) {
+                // Reduce for NUMA architectures
+                int32_t numa_limit = 4096;
+                if (cparams.n_ctx >= 65536) {
+                    numa_limit = 1024;
+                } else if (cparams.n_ctx >= 32768) {
+                    numa_limit = 2048;
+                }
+                n_batch_calc = std::min(n_batch_calc, numa_limit);
+            }
+            // Ensure minimum batch size for BLAS (>=32)
+            n_batch_calc = std::max(n_batch_calc, static_cast<int32_t>(32));
+
+            params.n_batch = n_batch_calc;
+            LLAMA_LOG_INFO("%s: n_batch set to auto, selected value: %d based on n_ctx=%u, n_ubatch=%d and hardware\n", __func__, params.n_batch, cparams.n_ctx, params.n_ubatch);
+        }
+    }
     // with causal attention, the batch size is limited by the context size
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
-    cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
+    cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 || params.n_ubatch == -1 ? params.n_batch : params.n_ubatch);
 
     cparams.n_outputs_max = params.n_outputs_max == 0 || llama_model_has_encoder(&model) ? cparams.n_batch : params.n_outputs_max;
     cparams.n_outputs_max_per_seq = params.n_outputs_max_per_seq == 0 ?
@@ -3091,7 +3303,7 @@ ggml_cgraph * llama_context::graph_reserve(
 
     // verify transform coverage on the pristine graph: after scheduling,
     // cross-backend copies break the producer chain the check follows
-    if (!hadamard_verified && gf && (!hadamard_rotations.empty() || !hadamard_inverses.empty())) {
+    if (!hadamard_verified && gf && !getenv("PRISM_NO_GRAPH") && (!hadamard_rotations.empty() || !hadamard_inverses.empty())) {
         llama_verify_hadamard_graph(gf, hadamard_rotations, hadamard_inverses);
         hadamard_verified = true;
     }
@@ -3161,6 +3373,7 @@ ggml_status llama_context::graph_compute(
     }
 
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }

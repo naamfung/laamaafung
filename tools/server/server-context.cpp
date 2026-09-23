@@ -1212,6 +1212,61 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
     return try_decode();
 }
 
+// Given a token sequence and a junction position, check if the junction
+// splits a multi-token tag sequence. Returns the number of tokens to shift
+// the junction: positive = move right, negative = move left, 0 = no change.
+static int check_tag_boundary(
+        const llama_context * ctx,
+        const llama_tokens & tokens,
+        int junction) {
+    const int radius = 12;
+
+    if (junction <= 0 || junction >= (int)tokens.size()) {
+        return 0;
+    }
+
+    int left_start = std::max(0, junction - radius);
+
+    llama_tokens left_tok(tokens.begin() + left_start, tokens.begin() + junction);
+    if (left_tok.empty()) {
+        return 0;
+    }
+
+    std::string left_text = common_detokenize(ctx, left_tok, true);
+
+    auto last_lt = left_text.rfind('<');
+    if (last_lt == std::string::npos) {
+        return 0;
+    }
+
+    if (left_text.find('>', last_lt) != std::string::npos) {
+        return 0;
+    }
+
+    // Unclosed '<' found. Try to include the full tag by moving junction right.
+    int right_end = std::min((int)tokens.size(), junction + radius);
+    for (int shift = 1; shift <= radius && junction + shift <= right_end; shift++) {
+        llama_tokens probe(tokens.begin() + left_start, tokens.begin() + junction + shift);
+        std::string probe_text = common_detokenize(ctx, probe, true);
+        auto lt = probe_text.rfind('<');
+        if (lt != std::string::npos && probe_text.find('>', lt) != std::string::npos) {
+            return shift;
+        }
+    }
+
+    // Could not find closing '>'. Remove the broken fragment by moving junction left.
+    for (int shift = 1; shift <= radius && junction - shift > left_start; shift++) {
+        llama_tokens probe(tokens.begin() + left_start, tokens.begin() + junction - shift);
+        std::string probe_text = common_detokenize(ctx, probe, true);
+        auto lt = probe_text.rfind('<');
+        if (lt == std::string::npos || probe_text.find('>', lt) != std::string::npos) {
+            return -shift;
+        }
+    }
+
+    return 0;
+}
+
 static bool has_unclosed_tag(const std::string & text, const std::string & open_tag, const std::string & close_tag) {
     size_t pos = 0;
     int depth = 0;
@@ -2327,6 +2382,46 @@ private:
 
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
+
+        // if prompt truncation is enabled and the prompt is larger than the context, truncate the middle
+        // and keep the first n_keep tokens; otherwise the request is rejected in update_slots()
+        if (params_base.prompt_truncate && !mctx && task.n_tokens() >= slot.n_ctx) {
+            int n_keep = task.params.n_keep < 0 ? task.n_tokens() : task.params.n_keep;
+            n_keep = std::min(slot.n_ctx - 4, n_keep);
+
+            const int n_left        = slot.n_ctx - n_keep;
+            const int n_block_size  = n_left / 2;
+            const int erased_blocks = (task.n_tokens() - n_keep - n_block_size) / n_block_size;
+
+            const llama_tokens & curr_tokens = task.tokens.get_text_tokens();
+
+            int junction = n_keep + erased_blocks * n_block_size;
+            int shift = check_tag_boundary(ctx_tgt, curr_tokens, junction);
+            if (shift != 0) {
+                SLT_WRN(slot, "adjusted truncation boundary by %d tokens to avoid splitting a tag\n", shift);
+                junction += shift;
+            }
+
+            llama_tokens new_tokens(curr_tokens.begin(), curr_tokens.begin() + n_keep);
+            new_tokens.insert(new_tokens.end(), curr_tokens.begin() + junction, curr_tokens.end());
+
+            task.tokens.clear();
+            task.tokens.insert(new_tokens);
+
+            // The token array was just rewritten, so every offset derived from its original
+            // numbering is stale. Recompute the chat message spans against the array we are
+            // about to decode: they place the --ctx-checkpoints boundaries and, when KVMem is
+            // enabled, they define the retrieval query span. Truncation requires !mctx, so
+            // there can be no media chunks whose offsets would need remapping here.
+            task.params.message_spans = task.tokens.find_message_spans(task.params.message_delimiters);
+
+            slot.truncated = true;
+
+            SLT_WRN(slot, "input truncated, n_ctx = %d, n_keep = %d, n_left = %d, n_tokens = %d\n",
+                    slot.n_ctx, n_keep, n_left, task.n_tokens());
+
+            GGML_ASSERT(task.n_tokens() < slot.n_ctx);
+        }
 
         // cache original chat messages for hidden self-check turn construction
         if (!task.params.original_messages.is_null() && task.params.original_messages.is_array()) {

@@ -2048,6 +2048,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_chunks = value;
         }
     ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_RETRIEVAL}));
+    add_opt(common_arg(
+        {"--prompt-truncate"},
+        {"--no-prompt-truncate"},
+        string_format("whether to truncate initial prompt to fit context, keeping head + tail (default: %s). Implied by --context-shift", params.prompt_truncate ? "enabled" : "disabled"),
+        [](common_params & params, bool value) {
+            params.prompt_truncate = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PROMPT_TRUNCATE"));
     add_opt(common_arg({ "-fa", "--flash-attn" }, "[on|off|auto]",
                        string_format("set Flash Attention use ('on', 'off', or 'auto', default: '%s')",
                                      llama_flash_attn_type_name(params.flash_attn_type)),
@@ -3434,6 +3442,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-boost-factor"}, "F",
+        string_format("set temperature boost factor when cyclic pattern is detected (default: %.2f)", (double)params.sampling.cycle_boost_factor),
+        [](common_params & params, const std::string & value) {
+            params.sampling.cycle_boost_factor = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-penalty-repeat"}, "F",
+        string_format("set repetition penalty factor when cyclic pattern is detected (default: %.2f)", (double)params.sampling.cycle_penalty_repeat),
+        [](common_params & params, const std::string & value) {
+            params.sampling.cycle_penalty_repeat = std::stof(value);
+        }    ).set_sampling());
     add_opt(common_arg(
         {"--runaway-threshold"}, "N",
         string_format("set consecutive identical token count to trigger runaway temp boost (default: %d, 0 = disabled)", params.sampling.runaway_threshold),

@@ -1485,7 +1485,11 @@ void ggml_compute_forward_mul_mat(
     const struct ggml_tensor * src1 = dst->src[1];
 
     const int32_t hint = ggml_get_op_params_i32(dst, 1);
-    if (hint == GGML_HINT_SRC0_IS_HADAMARD && !params->use_ref) {
+    static int fwht_disabled = -1;
+    if (fwht_disabled < 0) {
+        fwht_disabled = getenv("GGML_FWHT_REF") != NULL;
+    }
+    if (hint == GGML_HINT_SRC0_IS_HADAMARD && !params->use_ref && !fwht_disabled) {
         ggml_compute_forward_fwht(params, dst);
         return;
     }

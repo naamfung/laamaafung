@@ -2051,7 +2051,7 @@ ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * cur,
           ggml_tensor * w_s) const {
     ggml_tensor * cur_mm = cur;
-    if (hadamard_rotations) {
+    if (hadamard_rotations && !getenv("PRISM_NO_GRAPH")) {
         const auto it = hadamard_rotations->find(w);
         if (it != hadamard_rotations->end()) {
             const auto & t = it->second;
@@ -2111,7 +2111,7 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * ids,
           ggml_tensor * w_s) const {
     ggml_tensor * cur_mm = cur;
-    if (hadamard_rotations) {
+    if (hadamard_rotations && !getenv("PRISM_NO_GRAPH")) {
         const auto it = hadamard_rotations->find(w);
         if (it != hadamard_rotations->end()) {
             const auto & t = it->second;
@@ -2972,6 +2972,18 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
         auto & cur = inps[0];
 
         cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+
+        // a Hadamard-latent embedding table stores rotated rows; restore the
+        // primal basis right after the lookup: h = s * (H z)
+        if (hadamard_inverses && !getenv("PRISM_NO_GRAPH")) {
+            const auto it = hadamard_inverses->find(tok_embd);
+            if (it != hadamard_inverses->end()) {
+                cur = llama_mul_mat_hadamard(ctx0, cur, it->second.rot);
+                if (it->second.signs) {
+                    cur = ggml_mul(ctx0, cur, it->second.signs);
+                }
+            }
+        }
 
         // apply lora for embedding tokens if needed
         for (const auto & lora : *loras) {
