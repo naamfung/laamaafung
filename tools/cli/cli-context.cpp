@@ -497,6 +497,12 @@ int cli_context::run() {
             }
         }
 
+        // stdin 已结束（EOF）：干净退出会话循环。此前 EOF 只会让 readline 返回空行，
+        // 这里无法区分"用户敲了空行"与"流结束"，导致无限重读直至栈溢出。
+        if (buffer.empty() && console::input_eof()) {
+            break;
+        }
+
         if (should_stop()) {
             cli_context::interrupted().store(false);
             break;

@@ -197,6 +197,8 @@ namespace console {
         }
     }
 
+    static bool g_input_eof = false;
+
     static char32_t getchar32() {
 #if defined(_WIN32)
         HANDLE hConsole = GetStdHandle(STD_INPUT_HANDLE);
@@ -810,6 +812,7 @@ namespace console {
 
             if (input_char == (char32_t) WEOF || input_char == 0x04 /* Ctrl+D */) {
                 end_of_stream = true;
+                g_input_eof = true;
                 break;
             }
 
@@ -1047,9 +1050,11 @@ namespace console {
 #if defined(_WIN32)
         std::wstring wline;
         if (!std::getline(std::wcin, wline)) {
-            // Input stream is bad or EOF received
+            // Input stream is bad or EOF received.
+            // 此前这里对整个进程组发 CTRL_C_EVENT：重定向输入（EOF）时每次循环发一次，
+            // 实测会堆积上百万次直至栈溢出。现在只置 EOF 标志，由会话循环干净退出。
             line.clear();
-            GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+            g_input_eof = true;
             return false;
         }
 
@@ -1060,6 +1065,7 @@ namespace console {
         if (!std::getline(std::cin, line)) {
             // Input stream is bad or EOF received
             line.clear();
+            g_input_eof = true;
             return false;
         }
 #endif
@@ -1085,6 +1091,10 @@ namespace console {
             return readline_simple(line, multiline_input);
         }
         return readline_advanced(line, multiline_input);
+    }
+
+    bool input_eof() {
+        return g_input_eof;
     }
 
     void set_completion_callback(completion_callback cb) {

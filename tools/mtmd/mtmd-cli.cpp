@@ -528,7 +528,7 @@ int main(int argc, char ** argv) {
             console::set_display(DISPLAY_TYPE_USER_INPUT);
             std::string line;
             console::readline(line, false);
-            if (g_is_interrupted) break;
+            if (g_is_interrupted || console::input_eof()) break; // EOF: exit instead of looping forever
             console::set_display(DISPLAY_TYPE_RESET);
             line = string_strip(line);
             if (line.empty()) {
