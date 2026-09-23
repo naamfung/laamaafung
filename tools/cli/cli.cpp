@@ -510,6 +510,9 @@ int llama_cli(int argc, char ** argv) {
                 another_line = console::readline(line, params.multiline_input);
                 buffer += line;
             } while (another_line);
+            if (buffer.empty() && console::input_eof()) {
+                break; // stdin EOF: exit chat loop instead of spinning on empty input
+            }
         } else {
             // process input prompt from args
             for (auto & fname : params.image) {
