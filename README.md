@@ -48,6 +48,49 @@
   git clone -b v23 https://github.com/naamfung/laamaafung.git
   ```
 
+- **克隆 turbo/FA 內核修復 + builder 構建分支（v25，基線）**：
+  在 `v23` 之上修復融合 turbo-MMA 的 SMEM swizzle 寫側錯位、MMA 模板/launch 實參錯位與 turbo KV 的 FA 調度回退（turbo 系解碼最高 -18% 的根因）、恢復 MMA 內置因果掩碼優化，並引入 **builder** 標準構建流程（見下文「編譯指南」）。生產環境建議用此分支：
+  ```sh
+  git clone -b v25 https://github.com/naamfung/laamaafung.git
+  ```
+
+- **克隆 KVarN 引擎移植分支（v26，非穩定）**：
+  在 `v25` 之上合入 **beellama 引擎（KVarN）**：結構化 KV 快取（`kvarnN` 系列）、採樣防禦、自檢/EOG/重試子系統，並保留 KVMem 與 Prism 三值量化全鏈路（turbo 系列快取類型已還原原生路徑）。試驗 KVarN 特性時用此分支：
+  ```sh
+  git clone -b v26 https://github.com/naamfung/laamaafung.git
+  ```
+
+---
+
+### 编译指南（builder —— 标准生产构建流程）
+
+构建统一走仓库根目录的 **builder**（Go 实现）。builder 内置了旧脚本踩过的全部坑的处理：代理变量自动剥离（防 MSB6001）、MSVC 开发环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache 加速、Web UI 依赖兜底、产物齐全性自检。本分支仍保留旧 `build*.sh` 脚本，但已由 builder 取代、不再维护（v26 起移除）。
+
+**工具链依赖**：
+
+| 组件 | 用途 | 说明 |
+|---|---|---|
+| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`（仓库已附带预编译的 builder.exe 时可跳过） |
+| Visual Studio 2022 | MSVC C/C++ 编译器 + Windows SDK 10 | builder 自动探测安装路径并自建编译环境；`-list` 可查看探测结果 |
+| CUDA Toolkit 12.x | GPU 后端（nvcc） | 默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖 |
+| Ninja | 构建生成器 | builder 默认使用；换回 VS 生成器用 `-gen vs`（ccache 自动停用） |
+| ccache 4.13+（可选） | CUDA 编译缓存 | 仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃 |
+| bun（可选） | Web UI 源码构建 | 缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server |
+
+**基本用法**（在仓库根目录执行）：
+
+```sh
+builder.exe              # 增量构建（默认；无构建目录时即全新构建）
+builder.exe -fresh       # 先删构建目录再全量重建
+builder.exe -j 12        # 指定并行度
+builder.exe -list        # 打印探测到的工具链/环境后退出
+builder.exe clean        # 仅清理构建目录与 ui/dist
+```
+
+**常用参数**：`-target T1,T2`（只构建指定目标）、`-keep`（仅重置 CMake 状态）、`-arch 86`（覆盖 CUDA 架构）、`-gen ninja|vs`（强制生成器）、`-no-ccache` / `-ccache-all`、`-ui auto|archive|off`（UI 三级兜底，绝不静默产出无 UI 的二进制）、`-no-configure`、`-C <dir>`（指定仓库根，用于 worktree 或跨分支构建，如 `builder.exe -C ..\wt-v23`）。
+
+**构建目录与产物**：构建目录按分支命名（`build-<分支名>`）；产物在 `<构建目录>/bin`，每次构建结束自检产物齐全性 + 内嵌 UI 体积。编译日志在 `<构建目录>/builder-build.log` 与 `builder-configure.log`；瞬时竞争错误（nvcc C1083 / MSB8066 / MSB6001）自动重跑。
+
 ---
 
 ### 推荐模型
