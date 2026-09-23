@@ -329,15 +329,12 @@ struct handle_model_result {
 };
 
 static int32_t kvarn_bits_from_legacy_cache_type(const std::string & value) {
-    if (value == "turbo2" || value == "turbo2_tcq") {
-        return 2;
-    }
-    if (value == "turbo3" || value == "turbo3_tcq") {
-        return 3;
-    }
-    if (value == "turbo4" || value == "turbo4_tcq") {
-        return 4;
-    }
+    // TurboQuant KV cache types (turbo2/3/4, *_tcq, turbo1_5) are laamaafung-native
+    // formats with their own full implementation path (ggml traits + CUDA kernels +
+    // llama-kv-cache support).  They must resolve through the plain cache-type
+    // lookup below -- never redirect them into the KVarN family, and never let a
+    // kvarn setting on one side silently rewrite the other side.
+    (void) value;
     return 0;
 }
 
@@ -376,6 +373,13 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_Q3_1,
     GGML_TYPE_Q2_0S,
     GGML_TYPE_Q2_1,
+    // laamaafung TurboQuant KV cache formats -- original implementation path
+    GGML_TYPE_TURBO2_0,
+    GGML_TYPE_TURBO3_0,
+    GGML_TYPE_TURBO4_0,
+    GGML_TYPE_TURBO3_TCQ,
+    GGML_TYPE_TURBO2_TCQ,
+    GGML_TYPE_TURBO1_5,
 };
 
 const std::vector<ggml_type> & common_kv_cache_types() {
@@ -1471,14 +1475,14 @@ static void common_kvarn_pair_normalize(
         return;
     }
 
-    if (key_bits == 0) {
-        LOG_WRN("warning: %s uses KVarN but %s is %s; forcing K to kvarn%d\n",
-                option_v, option_k, kv_cache_type_name(cache_type_k), value_bits);
-        key_bits = value_bits;
-    } else if (value_bits == 0) {
-        LOG_WRN("warning: %s uses KVarN but %s is %s; forcing V to kvarn%d\n",
-                option_k, option_v, kv_cache_type_name(cache_type_v), key_bits);
-        value_bits = key_bits;
+    // K and V resolve independently: never silently rewrite one side because of
+    // the other.  If exactly one side opted into kvarnN, fail loudly instead.
+    if (key_bits == 0 || value_bits == 0) {
+        throw std::invalid_argument(string_format(
+                "%s uses KVarN but %s does not: KVarN cache types must be set for both "
+                "K and V explicitly (kvarnN on both sides), or use plain types for both",
+                key_bits != 0 ? option_k : option_v,
+                key_bits != 0 ? option_v : option_k));
     }
 
     const llama_kvarn_type type = kvarn_type_from_bits(key_bits, value_bits);

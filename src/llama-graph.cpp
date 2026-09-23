@@ -3322,6 +3322,15 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         if (kvarn_domain != GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_AUTO) {
             cur->op_params[GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN] = (int32_t) kvarn_domain;
         }
+        // FA op params (sinks / n_kv_max / prec) must be applied to the
+        // FLASH_ATTN_EXT node itself.  The TurboQuant inverse-WHT rewrite below
+        // replaces `cur` with a non-FA node, and the kv-tail merge may produce a
+        // fresh FA node -- so apply these here, before any rewrite (v25 ordering).
+        ggml_tensor * fa_node = cur;
+        ggml_flash_attn_ext_add_sinks(fa_node, sinks);
+        GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
+        ggml_flash_attn_ext_set_n_kv_max(fa_node, static_cast<int32_t>(n_kv_max));
+        ggml_flash_attn_ext_set_prec (fa_node, GGML_PREC_F32);
         // TurboQuant: inverse WHT on the FA output, then unpad if V was padded.
         // NOTE: gate on v->type (not k->type) for asymmetric configs where K=q8_0 but V=turbo
         if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO1_5 || v->type == GGML_TYPE_TURBO3_TCQ || v->type == GGML_TYPE_TURBO2_TCQ) {
@@ -3362,12 +3371,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 ggml_flash_attn_ext_set_kv_tail_history_slots(cur, int32_t(tail_history_slots));
             }
         }
-        res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
-
-        ggml_flash_attn_ext_add_sinks(cur, sinks);
-        GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
-        ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
-        ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
+        // The fused-probe consumer expects the layer's attention output tensor:
+        // the tail-merged node when the kv-tail feature rewrote it, the FA node
+        // itself otherwise (v25 semantics -- never the turbo WHT post-processing).
+        res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, use_native_tail ? cur : fa_node, il});
 
         if (final_attn_op) {
             *final_attn_op = cur;
