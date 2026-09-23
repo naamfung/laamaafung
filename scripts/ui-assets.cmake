@@ -8,13 +8,13 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-set(UI_SOURCE_DIR     "" CACHE STRING "UI source directory (to run npm build)")
+set(UI_SOURCE_DIR     "" CACHE STRING "UI source directory (to run bun build)")
 set(UI_BINARY_DIR     "" CACHE STRING "UI binary directory (to store generated files)")
 set(LLAMA_SOURCE_DIR  "" CACHE STRING "Project source root (to resolve version from git)")
 set(HF_BUCKET         "" CACHE STRING "Hugging Face bucket name (unused, kept for compatibility)")
 set(HF_VERSION        "" CACHE STRING "Version to match for local archive (empty = resolve from git)")
 set(HF_ENABLED        "" CACHE STRING "Whether to use prebuilt UI from local archives (ON/OFF)")
-set(BUILD_UI          "" CACHE STRING "Build UI via npm (ON/OFF)")
+set(BUILD_UI          "" CACHE STRING "Build UI from source via bun (fallback npm) (ON/OFF)")
 set(LLAMA_UI_EMBED    "" CACHE STRING "Path to llama-ui-embed helper")
 set(LLAMA_UI_GZIP     "" CACHE STRING "Apply gzip compress to assets to save bandwidth")
 
@@ -25,7 +25,7 @@ set(STAMP_FILE   "${UI_BINARY_DIR}/.ui-stamp")
 set(UI_CPP       "${UI_BINARY_DIR}/ui.cpp")
 set(UI_H         "${UI_BINARY_DIR}/ui.h")
 
-function(npm_build_should_skip out_var)
+function(bun_build_should_skip out_var)
     set(${out_var} FALSE PARENT_SCOPE)
 
     if(NOT EXISTS "${DIST_DIR}/index.html")
@@ -81,7 +81,7 @@ function(stage_sources)
     )
 endfunction()
 
-function(npm_build out_var)
+function(bun_build out_var)
     set(${out_var} FALSE PARENT_SCOPE)
 
     if(NOT EXISTS "${UI_SOURCE_DIR}/package.json")
@@ -89,7 +89,7 @@ function(npm_build out_var)
         return()
     endif()
 
-    npm_build_should_skip(skip)
+    bun_build_should_skip(skip)
     if(skip)
         message(STATUS "UI: build output up-to-date, skipping")
         set(${out_var} TRUE PARENT_SCOPE)
@@ -314,15 +314,15 @@ if(EXISTS "${SRC_DIST_DIR}/index.html")
 endif()
 
 # ---------------------------------------------------------------------------
-# 2. Priority 2: npm build (if BUILD_UI=ON)
+# 2. Priority 2: bun build (if BUILD_UI=ON)
 # ---------------------------------------------------------------------------
 set(provisioned FALSE)
 
 if(BUILD_UI)
     # Resolve version from git build-info if not explicitly set
     resolve_version(HF_VERSION)
-    npm_build(NPM_OK)
-    if(NPM_OK)
+    bun_build(BUN_OK)
+    if(BUN_OK)
         set(provisioned TRUE)
     endif()
 endif()
