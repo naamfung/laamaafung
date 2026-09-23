@@ -70,7 +70,7 @@
 
 | 组件 | 用途 | 说明 |
 |---|---|---|
-| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`（仓库已附带预编译的 builder.exe 时可跳过） |
+| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`。**builder.exe 为本地构建产物，不入仓库**（.gitignore 已忽略），仓库只跟踪源码 builder.go |
 | Visual Studio 2022 | MSVC C/C++ 编译器 + Windows SDK 10 | builder 自动探测安装路径并自建编译环境；`-list` 可查看探测结果 |
 | CUDA Toolkit 12.x | GPU 后端（nvcc） | 默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖 |
 | Ninja | 构建生成器 | builder 默认使用；换回 VS 生成器用 `-gen vs`（ccache 自动停用） |
