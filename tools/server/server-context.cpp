@@ -369,6 +369,13 @@ static std::pair<int32_t, int32_t> kvmem_last_user_span(
 //
 // server_metrics
 
+// sequence removal through the memory layer, non-fatal on failure (unlike
+// common_context_seq_rm, which aborts) - used by the self-check rollback where
+// the removal is guaranteed possible by the ctx_tgt_seq_rm_type gate
+static void server_context_seq_rm(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    llama_memory_seq_rm(llama_get_memory(ctx), seq_id, p0, p1);
+}
+
 struct server_slot {
     int id;
 
@@ -404,6 +411,53 @@ struct server_slot {
     int32_t n_ctx   = 0;  // context size per slot
     int32_t n_keep  = 0;
     int32_t i_batch = -1;
+
+    // ---- laamaafung: anti-runaway + hidden self-check state ----
+    llama_token last_repeated_tok    = LLAMA_TOKEN_NULL;
+    int32_t     n_consecutive_repeat = 0;
+    float       sampling_temp_boost  = 0.0f;
+
+    int32_t eog_retry_count = 0;
+    bool    suppress_eog    = false;
+
+    // tokens generated after reasoning was force-ended (-1 = not forced)
+    int32_t n_tokens_after_reasoning = -1;
+
+    // monitoring state (persists across requests, not reset by reset())
+    int monitoring_turns = 0;
+
+    // cached original chat messages + jinja flag, used to construct a hidden
+    // self-check turn when early-stop monitoring triggers. Populated at launch,
+    // cleared at reset().
+    std::vector<common_chat_msg> cached_messages;
+    bool                         chat_use_jinja = false;
+
+    // hidden self-check turn state (see SELF_CHECK_* phases below)
+    //   NONE        -> inactive
+    //   PREFILL     -> self-check prompt tokens queued, batched in
+    //                  handle_last_sampled_token() alongside the triggering EOS
+    //   GENERATING  -> self-check reply being sampled; tokens are hidden from
+    //                  the client until the reply ends
+    //   ROLLBACK    -> self-check ended with "incomplete"; the self-check turn
+    //                  is truncated and the triggering EOS re-evaluated under
+    //                  EOG suppression
+    enum self_check_phase_t {
+        SELF_CHECK_NONE,
+        SELF_CHECK_PREFILL,
+        SELF_CHECK_GENERATING,
+        SELF_CHECK_ROLLBACK,
+    };
+    self_check_phase_t self_check_phase   = SELF_CHECK_NONE;
+    llama_tokens       self_check_prefill;      // prompt tokens to prefill
+    std::string        self_check_text;         // accumulated hidden reply
+    bool               self_check_complete = false; // parsed result of last check
+    std::string        self_check_reason;       // why self-check was armed (drives prompt wording)
+
+    // rollback bookkeeping (populated when SELF_CHECK_PREFILL is entered,
+    // consumed when SELF_CHECK_ROLLBACK is processed in handle_last_sampled_token)
+    size_t      self_check_rollback_size = 0;   // prompt.tokens.size() incl. EOS, before prefill
+    llama_pos   self_check_rollback_pos  = -1;  // KV position of the triggering EOS
+    llama_token self_check_eos_token     = LLAMA_TOKEN_NULL;  // the EOS token to re-evaluate
 
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_lcp       = 0;
@@ -577,6 +631,31 @@ struct server_slot {
         loop_guard_event = {};
         reasoning_output_tokens = 0;
         visible_output_tokens = 0;
+
+        last_repeated_tok     = LLAMA_TOKEN_NULL;
+        n_consecutive_repeat  = 0;
+        sampling_temp_boost   = 0.0f;
+        eog_retry_count = 0;
+        suppress_eog    = false;
+        n_tokens_after_reasoning = -1;
+        if (monitoring_turns > 0) {
+            monitoring_turns--;
+            if (monitoring_turns > 0) {
+                SLT_INF(*this, "slot under high monitoring, %d turns remaining\n", monitoring_turns);
+            } else {
+                SLT_INF(*this, "%s", "slot monitoring period ended\n");
+            }
+        }
+        cached_messages.clear();
+        chat_use_jinja = false;
+        self_check_phase      = SELF_CHECK_NONE;
+        self_check_prefill.clear();
+        self_check_text.clear();
+        self_check_complete   = false;
+        self_check_reason.clear();
+        self_check_rollback_size = 0;
+        self_check_rollback_pos  = -1;
+        self_check_eos_token     = LLAMA_TOKEN_NULL;
         stopping_word  = "";
         n_sent_text    = 0;
 
@@ -720,18 +799,83 @@ struct server_slot {
     // add sampled token of this slot to the batch, optionally add the speculative draft tokens if any
     void handle_last_sampled_token(server_batch & batch) {
         bool add_ok = true;
+        // when true, this branch has already pushed the sampled token (and the
+        // self-check prefill) into prompt.tokens, so the trailing unified
+        // push_back/insert must be skipped.
+        bool self_check_managed = false;
         if (spec_draft.empty()) {
             // no speculative decoding
-            i_batch = batch.size();
+            if (self_check_phase == SELF_CHECK_PREFILL && !self_check_prefill.empty()) {
+                // Hidden self-check turn: the triggering EOS is kept in the
+                // context (output=false, no logits needed), then the prefill
+                // tokens are appended; the last prefill token carries output
+                // =true so the next sample produces the self-check reply.
+                self_check_managed = true;
 
-            if (!inp_embd.empty()) {
-                add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true, false);
+                // save rollback bookkeeping BEFORE mutating prompt.tokens
+                self_check_rollback_pos = prompt.tokens.pos_next(); // position where EOS will land
+                self_check_eos_token    = sampled;
+
+                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), false, false);
+                prompt.tokens.push_back(sampled);
+                self_check_rollback_size = prompt.n_tokens(); // includes EOS, before prefill
+
+                for (auto token : self_check_prefill) {
+                    add_ok &= batch.add(id, token, prompt.tokens.pos_next(), false, false);
+                    prompt.tokens.push_back(token);
+                    // keep the sampler in sync with the injected tokens so
+                    // penalties/repeat state stay consistent
+                    if (smpl) {
+                        common_sampler_accept(smpl.get(), token, false);
+                    }
+                }
+                batch.set_output(batch.size() - 1, true);
+                i_batch = batch.size() - 1;
+
+                SLT_INF(*this, "self-check prefill appended (%zu tokens), entering hidden generation\n",
+                        self_check_prefill.size());
+                self_check_phase = SELF_CHECK_GENERATING;
+                self_check_prefill.clear();
+            } else if (self_check_phase == SELF_CHECK_ROLLBACK) {
+                // Self-check ended with "incomplete": truncate the entire
+                // self-check turn (EOS + prefill + reply) from KV cache and
+                // prompt.tokens, then re-add the triggering EOS with output=true
+                // so the next sample produces a continuation token under EOG
+                // suppression.
+                self_check_managed = true;
+
+                server_context_seq_rm(ctx_tgt, id, self_check_rollback_pos, -1);
+                if (ctx_dft) {
+                    server_context_seq_rm(ctx_dft, id, self_check_rollback_pos, -1);
+                }
+#if defined(LLAMA_KVMEM)
+                // KVMem's tiered store keeps per-row position metadata next to the KV
+                // cache, so every row that just left the cache must leave the store
+                // too. No-op unless KVMem is the active memory.
+                llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) self_check_rollback_pos));
+#endif
+                prompt.tokens.keep_first(self_check_rollback_size - 1);
+
+                i_batch = batch.size();
+                add_ok &= batch.add(id, self_check_eos_token, self_check_rollback_pos, true, false);
+                prompt.tokens.push_back(self_check_eos_token);
+
+                SLT_INF(*this, "%s", "self-check rollback complete, re-evaluating EOS with output=true\n");
+                self_check_phase     = SELF_CHECK_NONE;
+                self_check_complete  = false;
+                self_check_eos_token = LLAMA_TOKEN_NULL;
             } else {
-                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true, false);
-            }
+                i_batch = batch.size();
 
-            SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
-                    sampled, n_ctx, prompt.n_tokens(), truncated);
+                if (!inp_embd.empty()) {
+                    add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true, false);
+                } else {
+                    add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true, false);
+                }
+
+                SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
+                        sampled, n_ctx, prompt.n_tokens(), truncated);
+            }
         } else {
             SLT_DBG(*this, "generate_draft: id=%d, #tokens=%zu, #draft=%zu, pos_next=%d\n",
                     sampled, prompt.tokens.size(), spec_draft.size(), prompt.tokens.pos_next());
@@ -753,8 +897,10 @@ struct server_slot {
 
         GGML_ASSERT(add_ok && "batch must be large enough to hold the sampled and draft tokens");
 
-        prompt.tokens.push_back(sampled);
-        prompt.tokens.insert(spec_draft);
+        if (!self_check_managed) {
+            prompt.tokens.push_back(sampled);
+            prompt.tokens.insert(spec_draft);
+        }
     }
 
     void release() {
@@ -1064,6 +1210,31 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
     }
 
     return try_decode();
+}
+
+static bool has_unclosed_tag(const std::string & text, const std::string & open_tag, const std::string & close_tag) {
+    size_t pos = 0;
+    int depth = 0;
+    while ((pos = text.find(open_tag, pos)) != std::string::npos) {
+        depth++;
+        pos += open_tag.size();
+    }
+    pos = 0;
+    while ((pos = text.find(close_tag, pos)) != std::string::npos) {
+        depth--;
+        pos += close_tag.size();
+    }
+    return depth > 0;
+}
+
+// returns true if there is non-whitespace after the given offset
+static bool has_visible_after(const std::string & text, size_t offset) {
+    for (size_t i = offset; i < text.size(); i++) {
+        if (!std::isspace((unsigned char) text[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 //
@@ -2157,6 +2328,18 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
+        // cache original chat messages for hidden self-check turn construction
+        if (!task.params.original_messages.is_null() && task.params.original_messages.is_array()) {
+            try {
+                slot.cached_messages  = common_chat_msgs_parse_oaicompat(task.params.original_messages);
+                slot.chat_use_jinja   = task.params.chat_use_jinja;
+            } catch (const std::exception & e) {
+                SLT_WRN(slot, "failed to parse original_messages for self-check: %s\n", e.what());
+                slot.cached_messages.clear();
+                slot.chat_use_jinja = false;
+            }
+        }
+
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         slot.state = slot.task->is_child()
@@ -2274,6 +2457,147 @@ private:
         }
     }
 
+    // Build the hidden self-check prompt as a chat-template *increment*.
+    //
+    // past_msg = cached_messages + an assistant message carrying the text the
+    //            model has produced so far this turn (generated_text)
+    // new_msg  = a user message asking the model to judge whether its prior
+    //            reply is complete
+    //
+    // We render the template twice and return the delta, so the result is short
+    // (just the user question + the assistant generation prompt) and can be
+    // appended to the current context without re-evaluating the whole history.
+    //
+    // The <complete>/<incomplete> markers are an internal protocol and do not
+    // depend on any vendor-specific tags, so the self-check works uniformly
+    // across Qwen, Gemma, etc.
+    std::string build_self_check_prompt(const server_slot & slot) {
+        if (slot.cached_messages.empty()) {
+            return "";
+        }
+
+        std::vector<common_chat_msg> past_msg = slot.cached_messages;
+
+        common_chat_msg assistant_msg;
+        assistant_msg.role    = "assistant";
+        assistant_msg.content = slot.generated_text;
+        past_msg.push_back(std::move(assistant_msg));
+
+        common_chat_msg user_msg;
+        user_msg.role    = "user";
+        if (slot.self_check_reason == "multiple_think_close") {
+            user_msg.content =
+                "Your previous response contains multiple </think> tags, "
+                "but only one is allowed. If the response is otherwise complete "
+                "and not truncated, output <complete>. Otherwise output <incomplete>. "
+                "Output only the tag.";
+        } else {
+            user_msg.content =
+                "Review your previous response for completeness. "
+                "If it is complete and not truncated, output <complete>. "
+                "If it is incomplete, truncated, or missing an intended tool call, "
+                "output <incomplete>. Output only the tag.";
+        }
+        if (!slot.chat_use_jinja) {
+            return common_chat_format_single(chat_params.tmpls.get(),
+                                             past_msg,
+                                             user_msg,
+                                             /*add_ass=*/true,
+                                             /*use_jinja=*/false);
+        }
+
+        // Jinja path: render the template twice and return the delta.
+        auto kwargs = chat_params.chat_template_kwargs;
+        kwargs["preserve_reasoning"] = "true";
+
+        common_chat_templates_inputs inputs;
+        inputs.use_jinja            = true;
+        inputs.chat_template_kwargs = kwargs;
+
+        // Render 1: past_msg only (no generation prompt)
+        inputs.messages              = past_msg;
+        inputs.add_generation_prompt = false;
+        std::string fmt_past = common_chat_templates_apply(chat_params.tmpls.get(), inputs).prompt;
+
+        // Render 2: past_msg + user_msg (with generation prompt)
+        inputs.messages.push_back(user_msg);
+        inputs.add_generation_prompt = true;
+        std::string fmt_full = common_chat_templates_apply(chat_params.tmpls.get(), inputs).prompt;
+
+        // Find common prefix and return the delta
+        size_t prefix_len = 0;
+        const size_t min_len = std::min(fmt_past.size(), fmt_full.size());
+        while (prefix_len < min_len && fmt_past[prefix_len] == fmt_full[prefix_len]) {
+            prefix_len++;
+        }
+
+        std::ostringstream ss;
+        if (!fmt_past.empty() && fmt_past.back() == '\n') {
+            ss << "\n";
+        }
+        ss << fmt_full.substr(prefix_len);
+        return ss.str();
+    }
+
+    // Process one token of a hidden self-check reply. Tokens are hidden from
+    // the client. When a <complete>/<incomplete> marker is seen, or the model
+    // emits EOS, the self-check phase ends:
+    //   complete   -> end generation normally (STOP_TYPE_EOS)
+    //   incomplete -> transition to SELF_CHECK_ROLLBACK; handle_last_sampled_token()
+    //                 truncates the self-check turn and re-evaluates the EOS under
+    //                 EOG suppression
+    bool handle_self_check_token(completion_token_output & result, server_slot & slot) {
+        const std::string token_str = result.text_to_send;
+        slot.self_check_text += token_str;
+        // hidden from the client
+        result.text_to_send = "";
+        slot.has_next_token = true;
+
+        bool got_result = false;
+        if (slot.self_check_text.find("<complete>") != std::string::npos) {
+            slot.self_check_complete = true;
+            got_result = true;
+        } else if (slot.self_check_text.find("<incomplete>") != std::string::npos) {
+            slot.self_check_complete = false;
+            got_result = true;
+        }
+
+        // safety valve: if the model rambles without producing a marker,
+        // cut it short and default to incomplete (conservative)
+        if (!got_result && slot.self_check_text.size() > 64) {
+            got_result = true;
+            slot.self_check_complete = false;
+            SLT_WRN(slot, "%s", "self-check reply exceeded 64 chars without marker, defaulting to incomplete\n");
+        }
+
+        if (got_result || llama_vocab_is_eog(vocab, result.tok)) {
+            slot.self_check_text.clear();
+
+            if (!got_result) {
+                // no marker found - be conservative, treat as incomplete
+                slot.self_check_complete = false;
+            }
+
+            if (slot.self_check_complete) {
+                SLT_INF(slot, "%s", "self-check result: complete, allowing EOS\n");
+                slot.self_check_phase = server_slot::SELF_CHECK_NONE;
+                slot.stop           = STOP_TYPE_EOS;
+                slot.has_next_token = false;
+            } else {
+                SLT_WRN(slot, "%s", "self-check result: incomplete, will rollback and resume under EOG suppression\n");
+                // Defer the actual truncation to handle_last_sampled_token().
+                // suppress_eog is armed here so the sampler has it set before
+                // the next sample.
+                slot.suppress_eog = true;
+                common_sampler_set_suppress_eog(slot.smpl.get(), true);
+                slot.self_check_phase = server_slot::SELF_CHECK_ROLLBACK;
+                slot.has_next_token = true;
+            }
+        }
+
+        return slot.has_next_token;
+    }
+
     bool process_token(completion_token_output & result, server_slot & slot) {
         const bool stopped_before_process = slot.stop != STOP_TYPE_NONE && !slot.has_next_token;
 
@@ -2281,11 +2605,53 @@ private:
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
 
+        // Hidden self-check reply: route tokens through a dedicated handler that
+        // accumulates them internally (hidden from the client) and watches for
+        // <complete>/<incomplete> markers. Skip all normal processing so the
+        // self-check reply never pollutes generated_text, stop-word detection,
+        // partial responses, or the EOS early-stop logic.
+        if (slot.self_check_phase == server_slot::SELF_CHECK_GENERATING) {
+            return handle_self_check_token(result, slot);
+        }
+
+        if (result.tok == slot.last_repeated_tok) {
+            slot.n_consecutive_repeat++;
+        } else {
+            if (slot.sampling_temp_boost > 0.0f) {
+                slot.sampling_temp_boost = 0.0f;
+                common_sampler_set_temp_boost(slot.smpl.get(), 0.0f);
+            }
+            slot.last_repeated_tok    = result.tok;
+            slot.n_consecutive_repeat = 1;
+        }
+
+        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold && slot.sampling_temp_boost < params_base.sampling.runaway_boost) {
+            slot.sampling_temp_boost = params_base.sampling.runaway_boost;
+            common_sampler_set_temp_boost(slot.smpl.get(), params_base.sampling.runaway_boost);
+            SLT_WRN(slot, "runaway repetition detected, token %d repeated %d times, mild temp boost %.2f\n",
+                    slot.last_repeated_tok, slot.n_consecutive_repeat, params_base.sampling.runaway_boost);
+        }
+
+        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold * 2 && slot.sampling_temp_boost < params_base.sampling.runaway_boost_strong) {
+            slot.sampling_temp_boost = params_base.sampling.runaway_boost_strong;
+            common_sampler_set_temp_boost(slot.smpl.get(), params_base.sampling.runaway_boost_strong);
+            SLT_WRN(slot, "runaway repetition persists, token %d repeated %d times, strong temp boost %.2f\n",
+                    slot.last_repeated_tok, slot.n_consecutive_repeat, params_base.sampling.runaway_boost_strong);
+        }
+
         slot.generated_text += token_str;
         if (slot.task->params.return_tokens) {
             slot.generated_tokens.push_back(result.tok);
         }
         slot.has_next_token = !stopped_before_process;
+
+        // track tokens generated after reasoning is force-ended
+        if (common_sampler_reasoning_was_forced(slot.smpl.get())) {
+            if (slot.n_tokens_after_reasoning < 0) {
+                slot.n_tokens_after_reasoning = 0;
+            }
+            slot.n_tokens_after_reasoning++;
+        }
 
         // check if there is incomplete UTF-8 character at the end
         bool incomplete = validate_utf8(slot.generated_text) < slot.generated_text.size();
@@ -2321,6 +2687,52 @@ private:
             slot.add_token(result);
             if (slot.task->params.stream) {
                 send_partial_response(slot, result, false);
+            }
+        }
+
+        // clear EOG suppression once visible content appears
+        if (slot.suppress_eog) {
+            const auto & gt = slot.generated_text;
+            bool has_think_open  = gt.find("<think>")     != std::string::npos;
+            bool has_think_close = gt.find("</think>")    != std::string::npos;
+            bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
+
+            // <think> may have been pre-injected into the prompt, so generated_text
+            // lacks the opening tag; the reasoning budget COUNTING state means we
+            // are still inside a reasoning block
+            if (!has_think_open && common_sampler_is_reasoning_active(slot.smpl.get())) {
+                has_think_open = true;
+            }
+
+            bool has_visible_content = false;
+            if (has_tool_call) {
+                // require all tool_call tags to be closed
+                if (!has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
+                    has_visible_content = true;
+                }
+            } else if (has_think_close) {
+                // require visible content after </think>
+                if (has_visible_after(gt, gt.rfind("</think>") + 8)) {
+                    has_visible_content = true;
+                }
+            } else if (has_think_open) {
+                // <think> opened but not yet closed: keep suppressing
+            } else if (slot.n_sent_text > 0) {
+                // plain text output, no think/tool tags
+                has_visible_content = true;
+            }
+
+            if (has_visible_content) {
+                // when reasoning was force-ended, require a minimum number of tokens
+                // before clearing suppression, to avoid premature EOG on brief transition text
+                if (slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
+                    SLT_INF(slot, "visible content detected but reasoning was forced, keeping EOG suppression (%d/20 tokens)\n",
+                            slot.n_tokens_after_reasoning);
+                } else {
+                    slot.suppress_eog = false;
+                    common_sampler_set_suppress_eog(slot.smpl.get(), false);
+                    SLT_INF(slot, "%s", "visible content detected, clearing EOG suppression\n");
+                }
             }
         }
 
@@ -2400,11 +2812,111 @@ private:
         }
 
         if (llama_vocab_is_eog(vocab, result.tok)) {
-            slot.stop           = STOP_TYPE_EOS;
-            slot.stop_detail    = "eos";
-            slot.has_next_token = false;
+            // check for early stop without output (laamaafung)
+            bool early_stop_no_output = false;
+            if (params_base.sampling.eog_retry_max > 0 && slot.eog_retry_count < params_base.sampling.eog_retry_max) {
+                if (slot.n_sent_text == 0) {
+                    early_stop_no_output = true;
+                } else {
+                    const auto & gt = slot.generated_text;
+                    bool has_think_open  = gt.find("<think>")     != std::string::npos;
+                    bool has_think_close = gt.find("</think>")    != std::string::npos;
+                    bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
 
-            SLT_DBG(slot, "%s", "stopped by EOS\n");
+                    // <think> may have been pre-injected into the prompt; the
+                    // reasoning budget COUNTING state means we are still inside
+                    // a reasoning block
+                    if (!has_think_open && common_sampler_is_reasoning_active(slot.smpl.get())) {
+                        has_think_open = true;
+                    }
+
+                    // thinking opened but not closed (no </think> and no <tool_call>)
+                    if (has_think_open && !has_think_close && !has_tool_call) {
+                        early_stop_no_output = true;
+                    }
+
+                    // </think> present but only whitespace after it
+                    if (!early_stop_no_output) {
+                        size_t think_end = gt.rfind("</think>");
+                        if (think_end != std::string::npos && !has_visible_after(gt, think_end + 8)) {
+                            early_stop_no_output = true;
+                        }
+                    }
+
+                    // tool_call opened but not closed
+                    if (!early_stop_no_output && has_tool_call) {
+                        if (has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
+                            early_stop_no_output = true;
+                        }
+                    }
+
+                    // reasoning was force-ended but too few tokens followed
+                    if (!early_stop_no_output && slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
+                        early_stop_no_output = true;
+                    }
+
+                    // multiple </think> tags: spurious closing tag inside content.
+                    // Trigger a self-check so the model can confirm completeness.
+                    if (!early_stop_no_output && has_think_close) {
+                        size_t first_close = gt.find("</think>");
+                        if (first_close != std::string::npos &&
+                            gt.find("</think>", first_close + 8) != std::string::npos) {
+                            early_stop_no_output = true;
+                            slot.self_check_reason = "multiple_think_close";
+                        }
+                    }
+                }
+            }
+
+            if (early_stop_no_output) {
+                slot.eog_retry_count++;
+
+                // arm monitoring regardless of which path is taken below
+                slot.monitoring_turns = 5;
+
+                // Try a hidden self-check turn first: ask the model whether its
+                // reply is complete. The self-check prompt is an internal
+                // <complete>/<incomplete> protocol that works across vendors.
+                bool self_check_armed = false;
+                // the hidden self-check turn is truncated from the KV cache via
+                // sequence removal when it ends with <incomplete>. recurrent and
+                // hybrid caches only allow a rollback bounded by n_rs_seq, so the
+                // removal can fail there - skip self-check and use the direct
+                // EOG-suppression fallback below for such contexts instead
+                if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART &&
+                        !slot.cached_messages.empty() && slot.self_check_phase == server_slot::SELF_CHECK_NONE) {
+                    std::string sc_prompt = build_self_check_prompt(slot);
+                    if (!sc_prompt.empty()) {
+                        llama_tokens sc_tokens = common_tokenize(ctx_tgt, sc_prompt, false, true);
+                        if (!sc_tokens.empty()) {
+                            slot.self_check_prefill  = std::move(sc_tokens);
+                            slot.self_check_phase    = server_slot::SELF_CHECK_PREFILL;
+                            slot.self_check_complete = false;
+                            slot.self_check_text.clear();
+                            self_check_armed = true;
+                            SLT_WRN(slot, "early stop detected, triggering hidden self-check (retry %d/%d, %zu prefill tokens)\n",
+                                    slot.eog_retry_count, params_base.sampling.eog_retry_max,
+                                    slot.self_check_prefill.size());
+                        }
+                    }
+                }
+
+                if (!self_check_armed) {
+                    // Fallback: no cached messages or tokenization failed -
+                    // suppress EOG directly so the model continues generating
+                    slot.suppress_eog = true;
+                    common_sampler_set_suppress_eog(slot.smpl.get(), true);
+                    SLT_WRN(slot, "early stop without output detected, suppressing EOG directly (retry %d/%d, monitoring %d turns)\n",
+                            slot.eog_retry_count, params_base.sampling.eog_retry_max,
+                            slot.monitoring_turns);
+                }
+            } else {
+                slot.stop           = STOP_TYPE_EOS;
+                slot.stop_detail    = "eos";
+                slot.has_next_token = false;
+
+                SLT_DBG(slot, "%s", "stopped by EOS\n");
+            }
         }
 
         SLT_DBG(slot, "n_gen = %d, n_remaining = %d, next token: %5d '%s'\n", (int) slot.stats.n_gen, slot.n_remaining(), result.tok, token_str.c_str());
@@ -5188,7 +5700,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
     int32_t sse_ping_interval = params.sse_ping_interval;
 
-    try {
+    // laamaafung: task creation factored out so non-stream requests can be
+    // retried (with re-seeded sampling) when the model produced no visible output.
+    auto create_tasks = [&]() {
         std::vector<server_task> tasks;
 
         const auto & prompt = data.at("prompt");
@@ -5237,6 +5751,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
             task.params.message_spans = task.tokens.find_message_spans(delimiters);
 
+            // cache the original chat messages for the hidden self-check turn
+            if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT && data.contains("messages") && data.at("messages").is_array()) {
+                task.params.original_messages = data.at("messages");
+                task.params.chat_use_jinja    = meta->chat_params.use_jinja;
+            }
+
             task.id_slot = json_value(data, "id_slot", -1);
             sse_ping_interval = task.params.sse_ping_interval;
 
@@ -5256,45 +5776,92 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             tasks.push_back(std::move(task));
         }
 
-        rd.post_tasks(std::move(tasks));
-    } catch (const std::exception & e) {
-        res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
-        return res;
-    }
+        return tasks;
+    };
 
     bool stream = json_value(data, "stream", false);
 
     if (!stream) {
         // non-stream, wait for the results
-        auto all_results = rd.wait_for_all(req.should_stop);
-        if (all_results.is_terminated) {
-            return res; // connection is closed
-        } else if (all_results.error) {
-            res->error(all_results.error->to_json());
-            return res;
-        } else {
-            json arr = json::array();
-            for (auto & res : all_results.results) {
-                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
-                arr.push_back(res->to_json());
-            }
-            GGML_ASSERT(!arr.empty() && "empty results");
-            if (arr.size() == 1) {
-                // if single request, return single object instead of array
-                res->ok(arr[0]);
-            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
-                // if multiple results in OAI format, we need to re-format them
-                json & choices = arr[0]["choices"];
-                for (size_t i = 1; i < arr.size(); i++) {
-                    choices.push_back(std::move(arr[i]["choices"][0]));
+        // laamaafung: retry with re-seeded sampling when the model produced no
+        // visible output (early EOG); gated by --eog-retry-max (0 = disabled)
+        int http_retry = 0;
+        const int http_retry_max = params.sampling.eog_retry_max;
+
+        while (true) {
+            try {
+                if (http_retry > 0) {
+                    // the reader is single-use by design; clear the bookkeeping
+                    // of the finished attempt before posting the retry
+                    rd.reset_for_retry();
                 }
-                res->ok(arr[0]);
-            } else {
-                // multi-results, non-OAI compat
-                res->ok(arr);
+                auto tasks = create_tasks();
+                if (http_retry > 0) {
+                    for (auto & task : tasks) {
+                        if (http_retry >= 2) {
+                            task.params.sampling.seed += http_retry;
+                        }
+                    }
+                    SRV_WRN("empty output, retrying non-stream completion (%d/%d)\n", http_retry, http_retry_max);
+                }
+                rd.post_tasks(std::move(tasks));
+            } catch (const std::exception & e) {
+                res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+                return res;
             }
+
+            auto all_results = rd.wait_for_all(req.should_stop);
+            if (all_results.is_terminated) {
+                return res; // connection is closed
+            } else if (all_results.error) {
+                res->error(all_results.error->to_json());
+                return res;
+            }
+
+            // check for empty output
+            bool has_output = false;
+            for (auto & result : all_results.results) {
+                auto * final_result = dynamic_cast<server_task_result_cmpl_final*>(result.get());
+                if (final_result && (!final_result->oaicompat_msg.content.empty() || !final_result->oaicompat_msg.tool_calls.empty())) {
+                    has_output = true;
+                    break;
+                }
+            }
+
+            if (has_output || http_retry >= http_retry_max) {
+                json arr = json::array();
+                for (auto & result : all_results.results) {
+                    GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr);
+                    arr.push_back(result->to_json());
+                }
+                GGML_ASSERT(!arr.empty() && "empty results");
+                if (arr.size() == 1) {
+                    // if single request, return single object instead of array
+                    res->ok(arr[0]);
+                } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
+                    // if multiple results in OAI format, we need to re-format them
+                    json & choices = arr[0]["choices"];
+                    for (size_t i = 1; i < arr.size(); i++) {
+                        choices.push_back(std::move(arr[i]["choices"][0]));
+                    }
+                    res->ok(arr[0]);
+                } else {
+                    // multi-results, non-OAI compat
+                    res->ok(arr);
+                }
+                break;
+            }
+
+            http_retry++;
         }
     } else {
+        try {
+            rd.post_tasks(create_tasks());
+        } catch (const std::exception & e) {
+            res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
         // in streaming mode, the first error must be treated as non-stream response
         // this is to match the OAI API behavior
         // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309

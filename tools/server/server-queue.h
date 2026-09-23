@@ -215,6 +215,17 @@ struct server_response_reader {
     // should_stop function will be called each polling_interval_seconds
     server_response_reader(server_queue & queue_tasks, server_response & queue_results, int polling_interval_seconds)
         : queue_tasks(queue_tasks), queue_results(queue_results), polling_interval_seconds(polling_interval_seconds) {}
+
+    // laamaafung: clear per-request state so post_tasks() can be called again
+    // (used by the non-stream empty-output retry in handle_completions_impl)
+    void reset_for_retry() {
+        // drop the finished attempt's ids from the results queue's waiting set
+        queue_results.remove_waiting_task_ids(id_tasks);
+        id_tasks.clear();
+        states.clear();
+        received_count = 0;
+        cancelled = false;
+    }
     ~server_response_reader() {
         stop();
     }

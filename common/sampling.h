@@ -59,6 +59,22 @@ void common_sampler_free(struct common_sampler * gsmpl);
 void                    common_sampler_accept(struct common_sampler * gsmpl, llama_token token, bool is_generated);
 common_sampler_accept_info common_sampler_accept_with_info(struct common_sampler * gsmpl, llama_token token, bool is_generated);
 void                    common_sampler_reset (struct common_sampler * gsmpl);
+
+// temporarily boost temperature (runaway repetition defense)
+void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost);
+
+// EOG suppression: while set, the sampler lowers the probability of EOG tokens so
+// a model that stops "too early" (e.g. right after </think>) keeps generating.
+// Cleared by the server once visible content appears.
+void common_sampler_set_suppress_eog(struct common_sampler * gsmpl, bool suppress);
+
+// returns true if the reasoning budget sampler exists and is currently counting
+// (i.e. the model is inside a reasoning block and has not yet emitted the end sequence)
+bool common_sampler_is_reasoning_active(const struct common_sampler * gsmpl);
+
+// returns true if the reasoning budget sampler has completed (DONE state) and was
+// force-ended (budget exhausted or manual force) rather than ending naturally
+bool common_sampler_reasoning_was_forced(const struct common_sampler * gsmpl);
 struct common_sampler * common_sampler_clone (struct common_sampler * gsmpl);
 void                    common_sampler_copy  (const struct common_sampler * src, struct common_sampler * dst);
 

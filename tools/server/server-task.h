@@ -183,6 +183,11 @@ struct task_params {
     // KVMem retrieval query span.
     common_chat_msg_delimiters message_delimiters;
 
+    // Original chat messages (OAI json array) + template mode, cached so a slot
+    // can build a hidden self-check turn when early-stop monitoring triggers.
+    json original_messages;      // null when not an OAI chat request
+    bool chat_use_jinja = false;
+
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
 
