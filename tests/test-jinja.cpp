@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include <nlohmann/json.hpp>
+#include "json.h"
 #include "subproc.h"
 
 #include "jinja/runtime.h"
@@ -2008,7 +2009,7 @@ static void test_stats(testing & t) {
         jinja::program prog = jinja::parse_from_tokens(lexer_res);
 
         jinja::context ctx(tmpl);
-        jinja::global_from_json(ctx, json{{ "val", vars }}, true);
+        jinja::global_from_json(ctx, common_json::parse(json{{ "val", vars }}.dump()), true);
         ctx.is_get_stats = true;
 
         jinja::runtime runtime(ctx);
@@ -2065,7 +2066,7 @@ static void test_template_cpp(testing & t, const std::string & name, const std::
         jinja::program ast = jinja::parse_from_tokens(lexer_res);
 
         jinja::context ctx(tmpl);
-        jinja::global_from_json(ctx, vars, true);
+        jinja::global_from_json(ctx, common_json::parse(vars.dump()), true);
 
         jinja::runtime runtime(ctx);
 
@@ -2224,7 +2225,7 @@ static bool fuzz_test_template(const std::string & tmpl, const json & vars) {
         auto lexer_res = lexer.tokenize(tmpl);
         jinja::program ast = jinja::parse_from_tokens(lexer_res);
         jinja::context ctx(tmpl);
-        jinja::global_from_json(ctx, vars, true);
+        jinja::global_from_json(ctx, common_json::parse(vars.dump()), true);
         jinja::runtime runtime(ctx);
         const jinja::value results = runtime.execute(ast);
         runtime.gather_string_parts(results);

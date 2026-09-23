@@ -265,7 +265,7 @@ static jinja::value_string format_using_direct_engine(
     std::cout << "\n=== RUN ===\n";
     jinja::context ctx(template_str);
 
-    jinja::global_from_json(ctx, input, true);
+    jinja::global_from_json(ctx, common_json::parse(input.dump()), true);
 
     jinja::runtime runtime(ctx);
     const jinja::value results = runtime.execute(ast);
@@ -306,8 +306,8 @@ void run_single(const std::string& contents, json input, bool use_common, bool d
         }
         nlohmann::ordered_json msgs_json = input["messages"];
         nlohmann::ordered_json tools_json = input["tools"];
-        auto messages = common_chat_msgs_parse_oaicompat(msgs_json);
-        auto tools = common_chat_tools_parse_oaicompat(tools_json);
+        auto messages = common_chat_msgs_parse_oaicompat(common_json::parse(msgs_json.dump()));
+        auto tools = common_chat_tools_parse_oaicompat(common_json::parse(tools_json.dump()));
         auto output = format_using_common(contents, bos_token, eos_token, messages, tools);
         std::cout << "\n=== OUTPUT ===\n";
         std::cout << output << "\n";

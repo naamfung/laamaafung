@@ -162,8 +162,9 @@ static void test_example_native(testing & t) {
 
             // tool calling parser
             if (tc.tools.is_array() && !tc.tools.empty()) {
+                common_json tools_json = common_json::parse(tc.tools.dump());
                 auto tool_call =
-                    p.standard_json_tools("<tool_call>[", "]</tool_call>", tc.tools, tc.parallel_tool_calls,
+                    p.standard_json_tools("<tool_call>[", "]</tool_call>", tools_json, tc.parallel_tool_calls,
                                           tc.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED);
 
                 return p.sequence({ (reasoning_in_content ? p.eps() : reasoning), p.content(p.until("<tool_call>")),
@@ -173,7 +174,8 @@ static void test_example_native(testing & t) {
             // response_format parser
             if (tc.json_schema.is_object() && !tc.json_schema.empty()) {
                 return p.sequence({ (reasoning_in_content ? p.eps() : reasoning),
-                                    p.content(p.schema(p.json(), "response-output", tc.json_schema)), p.space(),
+                                    p.content(p.schema(p.json(), "response-output",
+                                                       common_json::parse(tc.json_schema.dump()))), p.space(),
                                     p.end() });
             }
 
@@ -357,7 +359,7 @@ static void test_example_native(testing & t) {
             auto grammar = build_grammar([&](const common_grammar_builder & builder) {
                 for (const auto & def : tc.tools) {
                     auto function   = def.at("function");
-                    auto parameters = function.at("parameters");
+                    common_json parameters = common_json::parse(function.at("parameters").dump());
                     builder.resolve_refs(parameters);
                 };
                 parser.build_grammar(builder, lazy);
@@ -410,15 +412,16 @@ static void test_example_qwen3_coder(testing & t) {
             for (const auto & [param_name, param_schema] : properties.items()) {
                 bool is_required = required_properties.find(param_name) != required_properties.end();
                 auto type        = param_schema.value("type", "object");
+                common_json param_schema_cj = common_json::parse(param_schema.dump());
 
                 auto arg = p.tool_arg(
                     p.sequence({ p.tool_arg_open("<parameter=" + p.tool_arg_name(p.literal(param_name)) + ">"),
                                  (type == "string" ?
                                       p.tool_arg_string_value(p.schema(
                                           p.until_one_of({ "</parameter>\n<parameter=", "</parameter>\n</function>" }),
-                                          "tool-" + name + "-arg-" + param_name + "-schema", param_schema, true)) :
+                                          "tool-" + name + "-arg-" + param_name + "-schema", param_schema_cj, true)) :
                                       p.tool_arg_json_value(p.schema(
-                                          p.json(), "tool-" + name + "-arg-" + param_name + "-schema", param_schema))),
+                                          p.json(), "tool-" + name + "-arg-" + param_name + "-schema", param_schema_cj))),
                                  p.tool_arg_close("</parameter>\n" +
                                                   p.peek(p.literal("<parameter=") | p.literal("</function>"))) }));
 
@@ -439,7 +442,7 @@ static void test_example_qwen3_coder(testing & t) {
     auto grammar = build_grammar([&](const common_grammar_builder & builder) {
         for (const auto & def : tools) {
             auto function   = def.at("function");
-            auto parameters = function.at("parameters");
+            common_json parameters = common_json::parse(function.at("parameters").dump());
             builder.resolve_refs(parameters);
         };
         parser.build_grammar(builder);
@@ -504,7 +507,8 @@ static void test_example_qwen3_non_coder(testing & t) {
     auto tools  = create_tools();
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
         // tool calling parser using standard JSON format
-        auto tool_call = p.standard_json_tools("<tool_call>", "</tool_call>", tools, true, false);
+        auto tool_call = p.standard_json_tools("<tool_call>", "</tool_call>",
+                                               common_json::parse(tools.dump()), true, false);
 
         return p.sequence({ p.content(p.until("<tool_call>")), p.optional(p.space() + tool_call), p.end() });
     });
@@ -512,7 +516,7 @@ static void test_example_qwen3_non_coder(testing & t) {
     auto grammar = build_grammar([&](const common_grammar_builder & builder) {
         for (const auto & def : tools) {
             auto function   = def.at("function");
-            auto parameters = function.at("parameters");
+            common_json parameters = common_json::parse(function.at("parameters").dump());
             builder.resolve_refs(parameters);
         };
         parser.build_grammar(builder);
@@ -774,7 +778,7 @@ static void test_prefix_tool_names(testing & t) {
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
         auto content   = p.rule("content", p.content(p.until("<tool_call>")));
-        auto tool_call = p.standard_constructed_tools(markers, tools, false, false);
+        auto tool_call = p.standard_constructed_tools(markers, common_json::parse(tools.dump()), false, false);
         return content + p.zero_or_more(p.space() + tool_call) + p.end();
     });
 
