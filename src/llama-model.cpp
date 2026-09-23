@@ -1,4 +1,7 @@
 #include "llama-model.h"
+#if defined(LLAMA_KVMEM)
+#include "llama-kvmem-factory.h"
+#endif
 
 #include "llama-arch.h"
 #include "llama-ext.h"
@@ -2270,6 +2273,14 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
     llama_memory_i * res;
+
+#if defined(LLAMA_KVMEM)
+    // KVMem (tiered/sparse KV): must take over before any standard cache is built.
+    if (llama_memory_i * kvmem = llama_memory_kvmem_maybe_create(*this, params, cparams)) {
+        return kvmem;
+    }
+#endif
+
     const ggml_type kvarn_tail_type = params.kv_tail_type == GGML_TYPE_COUNT ?
             GGML_TYPE_F16 : params.kv_tail_type;
 
