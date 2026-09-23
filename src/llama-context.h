@@ -258,6 +258,12 @@ public:
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
 private:
+    // Prism: activation-side Hadamard transforms of the folded weights, keyed by
+    // tensor pointer (shared with the model's map).
+    llama_hadamard_rotations hadamard_rotations;
+    llama_hadamard_rotations hadamard_inverses;
+    bool hadamard_verified = false;
+
     llm_graph_params graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,

@@ -16,6 +16,21 @@ struct ggml_cgraph;
 struct ggml_context;
 struct ggml_tensor;
 
+// Prism: maps a folded model weight to the activation-side transform applied
+// immediately before the matmul: optional sign flip, then the normalized
+// blockwise Hadamard rotation.
+struct llama_hadamard_transform {
+    ggml_tensor * rot;
+    ggml_tensor * signs; // nullptr for identity sign mode
+    // when perm_rep > 1 the activation arrives with its feature axis in tiled
+    // head order [hd, nk, rep] and must be permuted to the grouped order
+    // [hd, rep, nk] the fold was computed in, before signs and rotation
+    int64_t perm_hd  = 0;
+    int64_t perm_nk  = 0;
+    int64_t perm_rep = 0;
+};
+using llama_hadamard_rotations = std::unordered_map<const ggml_tensor *, llama_hadamard_transform>;
+
 struct llama_cparams;
 struct llama_layer;
 
@@ -866,6 +881,8 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    const llama_hadamard_rotations * hadamard_rotations = nullptr;
+    const llama_hadamard_rotations * hadamard_inverses  = nullptr;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1106,6 +1123,8 @@ struct llm_graph_context {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    const llama_hadamard_rotations * hadamard_rotations;
+    const llama_hadamard_rotations * hadamard_inverses;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1116,10 +1135,22 @@ struct llm_graph_context {
     ggml_context * ctx0 = nullptr;
     ggml_cgraph  * gf   = nullptr;
 
+    // Prism: memoises the activation-side Hadamard transform keyed by (activation, rot)
+    mutable std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hadamard_memo;
+
     llm_graph_context(const llm_graph_params & params);
     virtual ~llm_graph_context() = default;
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
+
+    // KVMem: side-channel copies. No-ops unless LLAMA_KVMEM is enabled and
+    // llama_kvmem_get_params()->enabled. Q is copied only when the ubatch
+    // overlaps the retrieval query span. V is copied in prefill only with
+    // --kvmem-harvest-v (or KVMEM_DUMP_CAPTURE); otherwise D2H on stage-out.
+    // Dest tensors are graph outputs named kvmem_{k,q,v}-<il>.
+    void kvmem_capture_k(ggml_tensor * k_prerope, int il) const;
+    void kvmem_capture_q(ggml_tensor * q, int il) const;
+    void kvmem_capture_v(ggml_tensor * v, int il) const;
 
     //
     // common
