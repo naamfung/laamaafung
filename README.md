@@ -48,18 +48,6 @@
   git clone -b v23 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 turbo/FA 內核修復 + builder 構建分支（v25，基線）**：
-  在 `v23` 之上修復融合 turbo-MMA 的 SMEM swizzle 寫側錯位、MMA 模板/launch 實參錯位與 turbo KV 的 FA 調度回退（turbo 系解碼最高 -18% 的根因）、恢復 MMA 內置因果掩碼優化，並引入 **builder** 標準構建流程（見下文「編譯指南」）。生產環境建議用此分支：
-  ```sh
-  git clone -b v25 https://github.com/naamfung/laamaafung.git
-  ```
-
-- **克隆 KVarN 引擎移植分支（v26，非穩定）**：
-  在 `v25` 之上合入 **beellama 引擎（KVarN）**：結構化 KV 快取（`kvarnN` 系列）、採樣防禦、自檢/EOG/重試子系統，並保留 KVMem 與 Prism 三值量化全鏈路（turbo 系列快取類型已還原原生路徑）。試驗 KVarN 特性時用此分支：
-  ```sh
-  git clone -b v26 https://github.com/naamfung/laamaafung.git
-  ```
-
 ---
 
 ### 编译指南（builder —— 标准生产构建流程）
