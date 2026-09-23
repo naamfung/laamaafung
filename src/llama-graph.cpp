@@ -3227,6 +3227,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
               uint32_t tail_history_slots,
                    bool tail_bodyless,
         ggml_tensor ** final_attn_op) const {
+    // TurboQuant pre-rotate-queries: O(d log d) WHT rotation via custom op
+    // Q shape: (n_embd_head, n_head, n_tokens)
+    // For zero-padded models (head_dim not 128-aligned), pad Q to match padded K dim first.
+    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ) {
+        // Pad Q per-head to next multiple of 128 if needed
+        if (q->ne[0] % 128 != 0) {
+            const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
+            q = ggml_pad(ctx0, q, pad, 0, 0, 0);
+        }
+        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
+        ggml_tensor * innerq_scale = mctx ? mctx->get_turbo_innerq_scale_inv() : nullptr;
+        q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);  // 0 = forward, 0 = auto group size from q->ne[0]
+    }
+
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -3296,6 +3310,31 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         if (kvarn_domain != GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_AUTO) {
             cur->op_params[GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN] = (int32_t) kvarn_domain;
         }
+        // TurboQuant: inverse WHT on the FA output, then unpad if V was padded.
+        // NOTE: gate on v->type (not k->type) for asymmetric configs where K=q8_0 but V=turbo
+        if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO1_5 || v->type == GGML_TYPE_TURBO3_TCQ || v->type == GGML_TYPE_TURBO2_TCQ) {
+            const ggml_tensor * group_src = k->type == v->type ? v : (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ ? k : v);
+            const int turbo_group = (group_src->ne[0] % 128 == 0) ? 128 : 64;
+            if (cur->ne[0] % turbo_group == 0) {
+                ggml_tensor * innerq_scale = mctx ? mctx->get_turbo_innerq_scale_inv() : nullptr;
+                cur = ggml_turbo_wht(ctx0, cur, 1, turbo_group, innerq_scale);  // 1 = inverse
+            }
+            const int64_t orig_v_head = hparams.n_embd_head_v(il);
+            const int64_t padded_v_head = v->ne[0];
+            if (padded_v_head != orig_v_head) {
+                // cur shape post-MHA is (n_embd_head * n_head, n_tokens); reshape needs
+                // the Q-head count so GQA models with n_head != n_head_kv don't fail.
+                const int64_t n_head_v = hparams.n_head(il);
+                const int64_t n_tokens_cur = cur->ne[1];
+                cur = ggml_reshape_3d(ctx0, cur, padded_v_head, n_head_v, n_tokens_cur);
+                // ggml_view_3d to extract first orig_v_head elements per head
+                cur = ggml_view_3d(ctx0, cur, orig_v_head, n_head_v, n_tokens_cur,
+                                   cur->nb[1], cur->nb[2], 0);
+                cur = ggml_cont(ctx0, cur);
+                cur = ggml_reshape_2d(ctx0, cur, orig_v_head * n_head_v, n_tokens_cur);
+            }
+        }
+
         if (use_native_tail) {
             GGML_ASSERT(tail_query_order && tail_run_desc);
             cur = k_tail_current ?

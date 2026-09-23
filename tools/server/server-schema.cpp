@@ -2,7 +2,26 @@
 
 #include "json-schema-to-grammar.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace server_schema {
+
+static llama_tokens tokenize_reasoning_marker(const llama_vocab * vocab, const std::string & marker) {
+    llama_tokens tokens = common_tokenize(vocab, marker, false, true);
+    if (marker.empty() || std::isspace((unsigned char) marker.front())) {
+        return tokens;
+    }
+
+    while (!tokens.empty()) {
+        const std::string piece = common_token_to_piece(vocab, tokens.front(), true);
+        if (piece.empty() || !std::all_of(piece.begin(), piece.end(), [](unsigned char ch) { return std::isspace(ch); })) {
+            break;
+        }
+        tokens.erase(tokens.begin());
+    }
+    return tokens;
+}
 
 //
 // llama.cpp-specific completion schema
@@ -124,8 +143,8 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Dynamic temperature exponent, controls how entropy maps to temperature"));
 
     add((new field_num("repeat_last_n", params.sampling.penalty_last_n))
-        ->set_hard_limits(-1, INT32_MAX)
-        ->set_desc("Last n tokens to consider for penalizing repetition (0 = disabled, -1 = ctx-size)"));
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Last n tokens to consider for penalizing repetition (0 = disabled)"));
 
     add((new field_num("repeat_penalty", params.sampling.penalty_repeat))
         ->set_desc("Control the repetition of token sequences in the generated text (1.0 = disabled)"));
@@ -151,26 +170,8 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Tokens that extend repetition beyond this length receive exponentially increasing penalty: multiplier * base ^ (sequence_length - allowed_length)"));
 
     add((new field_num("dry_penalty_last_n", params.sampling.dry_penalty_last_n))
-        ->set_hard_limits(-1, INT32_MAX)
-        ->set_desc("How many tokens to scan for repetitions (0 = disabled, -1 = context size)"));
-
-    add((new field_num("repeat_line_window", params.sampling.repeat_line_window))
         ->set_hard_limits(0, INT32_MAX)
-        ->set_desc("Number of past segments to track for loop detection (0 = disabled)"));
-
-    add((new field_num("repeat_line_min_length", params.sampling.repeat_line_min_length))
-        ->set_hard_limits(1, INT32_MAX)
-        ->set_desc("Minimum segment length to consider for loop detection (avoids false positives)"));
-
-    add((new field_str("repeat_line_delimiters"))
-        ->set_desc("Characters that end a segment for loop detection (default: \"\\n.!?:\")")
-        ->set_handler([&](field_eval_context & ctx, const json & data) {
-            ctx.params.sampling.repeat_line_delimiters = data.at("repeat_line_delimiters").get<std::string>();
-        }));
-
-    add((new field_num("repeat_line_temp_boost", params.sampling.repeat_line_temp_boost))
-        ->set_hard_limits(0.0f, std::numeric_limits<float>::max())
-        ->set_desc("Temperature boost when a repetition loop is detected"));
+        ->set_desc("How many tokens to scan for repetitions (0 = disabled)"));
 
     add((new field_num("mirostat", params.sampling.mirostat))
         ->set_limits(0, 2)
@@ -207,96 +208,6 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
 
     add((new field_bool("post_sampling_probs", params.post_sampling_probs))
         ->set_desc("Return probabilities of top n_probs tokens after applying the sampling chain"));
-
-    add((new field_num("reasoning_temp", params.sampling.reasoning_temp))
-        ->set_limits(0.0f, std::numeric_limits<float>::infinity())
-        ->add_alias("reasoning_temperature")
-        ->set_desc("Temperature override inside reasoning blocks"));
-
-    add((new field_num("reasoning_top_k", params.sampling.reasoning_top_k))
-        ->set_limits(0, INT32_MAX)
-        ->set_desc("Top-k override inside reasoning blocks"));
-
-    add((new field_num("reasoning_top_p", params.sampling.reasoning_top_p))
-        ->set_limits(0.0f, 1.0f)
-        ->set_desc("Top-p override inside reasoning blocks"));
-
-    add((new field_num("reasoning_min_p", params.sampling.reasoning_min_p))
-        ->set_limits(0.0f, 1.0f)
-        ->set_desc("Min-p override inside reasoning blocks"));
-
-    add((new field_num("reasoning_top_n_sigma", params.sampling.reasoning_top_n_sigma))
-        ->set_desc("Top-n-sigma override inside reasoning blocks"));
-
-    add((new field_num("reasoning_xtc_probability", params.sampling.reasoning_xtc_probability))
-        ->set_limits(0.0f, 1.0f)
-        ->set_desc("XTC probability override inside reasoning blocks"));
-
-    add((new field_num("reasoning_xtc_threshold", params.sampling.reasoning_xtc_threshold))
-        ->set_limits(0.0f, 1.0f)
-        ->set_desc("XTC threshold override inside reasoning blocks"));
-
-    add((new field_num("reasoning_typical_p", params.sampling.reasoning_typ_p))
-        ->set_desc("Locally typical sampling override inside reasoning blocks"));
-
-    add((new field_num("reasoning_dynatemp_range", params.sampling.reasoning_dynatemp_range))
-        ->set_desc("Dynamic temperature range override inside reasoning blocks"));
-
-    add((new field_num("reasoning_dynatemp_exponent", params.sampling.reasoning_dynatemp_exponent))
-        ->set_desc("Dynamic temperature exponent override inside reasoning blocks"));
-
-    add((new field_num("reasoning_repeat_last_n", params.sampling.reasoning_penalty_last_n))
-        ->set_hard_limits(-1, INT32_MAX)
-        ->set_desc("Repeat history override inside reasoning blocks"));
-
-    add((new field_num("reasoning_repeat_penalty", params.sampling.reasoning_penalty_repeat))
-        ->set_desc("Repeat penalty override inside reasoning blocks"));
-
-    add((new field_num("reasoning_frequency_penalty", params.sampling.reasoning_penalty_freq))
-        ->set_desc("Frequency penalty override inside reasoning blocks"));
-
-    add((new field_num("reasoning_presence_penalty", params.sampling.reasoning_penalty_present))
-        ->set_desc("Presence penalty override inside reasoning blocks"));
-
-    add((new field_num("reasoning_dry_multiplier", params.sampling.reasoning_dry_multiplier))
-        ->set_desc("DRY multiplier override inside reasoning blocks"));
-
-    add((new field_num("reasoning_dry_base", params.sampling.reasoning_dry_base))
-        ->set_limits(1.0f, std::numeric_limits<float>::infinity())
-        ->set_desc("DRY base override inside reasoning blocks"));
-
-    add((new field_num("reasoning_dry_allowed_length", params.sampling.reasoning_dry_allowed_length))
-        ->set_hard_limits(0, INT32_MAX)
-        ->set_desc("DRY allowed length override inside reasoning blocks"));
-
-    add((new field_num("reasoning_dry_penalty_last_n", params.sampling.reasoning_dry_penalty_last_n))
-        ->set_hard_limits(-1, INT32_MAX)
-        ->set_desc("DRY history override inside reasoning blocks"));
-
-    add((new field_num("reasoning_mirostat", params.sampling.reasoning_mirostat))
-        ->set_limits(0, 2)
-        ->set_desc("Mirostat mode override inside reasoning blocks"));
-
-    add((new field_num("reasoning_mirostat_tau", params.sampling.reasoning_mirostat_tau))
-        ->set_desc("Mirostat target entropy override inside reasoning blocks"));
-
-    add((new field_num("reasoning_mirostat_eta", params.sampling.reasoning_mirostat_eta))
-        ->set_desc("Mirostat learning rate override inside reasoning blocks"));
-
-    add((new field_num("reasoning_adaptive_target", params.sampling.reasoning_adaptive_target))
-        ->set_limits(-std::numeric_limits<float>::max(), 1.0f)
-        ->set_desc("Adaptive sampling target override inside reasoning blocks"));
-
-    add((new field_num("reasoning_adaptive_decay", params.sampling.reasoning_adaptive_decay))
-        ->set_hard_limits(0.0f, 0.99f)
-        ->set_desc("Adaptive sampling decay override inside reasoning blocks"));
-
-    add((new field_num("reasoning_min_keep", params.sampling.reasoning_min_keep))
-        ->set_hard_limits(0, INT32_MAX)
-        ->set_desc("Minimum candidate count override inside reasoning blocks"));
-
-    add((new field_num("reasoning_seed", params.sampling.reasoning_seed))
-        ->set_desc("RNG seed override inside reasoning blocks"));
 
     //
     // Speculative decoding params
@@ -428,9 +339,6 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
             ctx.params.chat_parser_params.parser.load(data.at("chat_parser").get<std::string>());
         }));
 
-    add((new field_bool("strict_eof_on_complete", params.chat_parser_params.strict_eof_on_complete))
-        ->set_desc("Retry parsing without leniency on the final input so EOF can act as a real boundary"));
-
     add((new field_json("continue_final_message"))
         ->set_desc("Whether to continue the final message of the chat template")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
@@ -491,6 +399,37 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
     add((new field_bool("reasoning_control", params.sampling.reasoning_control))
         ->set_desc("Create the budget sampler on demand so reasoning can be ended at runtime"));
 
+    add((new field_str("reasoning_loop_guard"))
+        ->set_desc("Reasoning loop guard mode: off, force-close, or stop")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            ctx.params.reasoning_loop_guard.mode =
+                common_reasoning_loop_guard_mode_from_name(data.at("reasoning_loop_guard").get<std::string>());
+        }));
+
+    add((new field_num("reasoning_loop_min_tokens", params.reasoning_loop_guard.min_reasoning_tokens))
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Minimum hidden reasoning tokens before loop checks"));
+
+    add((new field_num("reasoning_loop_window", params.reasoning_loop_guard.window_tokens))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Token tail window for reasoning loop checks"));
+
+    add((new field_num("reasoning_loop_max_period", params.reasoning_loop_guard.max_period))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Maximum periodic loop length to check"));
+
+    add((new field_num("reasoning_loop_min_coverage", params.reasoning_loop_guard.min_repeated_coverage))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Minimum repeated-token coverage before a loop trigger"));
+
+    add((new field_num("reasoning_loop_check_interval", params.reasoning_loop_guard.check_interval))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Accepted-token interval between loop checks"));
+
+    add((new field_num("reasoning_loop_interventions", params.reasoning_loop_guard.interventions_max))
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Maximum force-close interventions before stopping"));
+
     add((new field_num("reasoning_budget_tokens", params.sampling.reasoning_budget_tokens))
         ->set_hard_limits(-1, INT32_MAX)
         ->set_desc("Number of tokens in the reasoning budget (-1 = disabled)"));
@@ -499,35 +438,32 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Token string marking the start of the reasoning budget section")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
-            ctx.params.sampling.reasoning_budget_start = common_tokenize(ctx.vocab, data.at("reasoning_budget_start_tag").get<std::string>(), false, true);
+            ctx.params.sampling.reasoning_budget_start = tokenize_reasoning_marker(
+                ctx.vocab, data.at("reasoning_budget_start_tag").get<std::string>());
         }));
 
     add((new field_json("reasoning_budget_end_tags"))
         ->add_alias("reasoning_budget_end_tag")
-        ->set_desc("Token strings marking the end of the reasoning budget section; the first is forced when the budget expires. Accepts a single string or an array of strings")
+        ->set_desc("Token strings marking the end of the reasoning budget section; the first is forced when the budget expires")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
             ctx.params.sampling.reasoning_budget_end.clear();
+            ctx.params.sampling.reasoning_budget_forced.clear();
             if (data.contains("reasoning_budget_end_tags")) {
-                const auto & val = data.at("reasoning_budget_end_tags");
-                if (val.is_string()) {
-                    std::string tag = val.get<std::string>();
+                for (const auto & t : data.at("reasoning_budget_end_tags")) {
+                    std::string tag = t.get<std::string>();
                     if (!tag.empty()) {
-                        ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
-                    }
-                } else if (val.is_array()) {
-                    for (const auto & el : val) {
-                        std::string tag = el.get<std::string>();
-                        if (!tag.empty()) {
-                            ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
-                        }
+                        ctx.params.sampling.reasoning_budget_end.push_back(tokenize_reasoning_marker(ctx.vocab, tag));
                     }
                 }
             } else if (data.contains("reasoning_budget_end_tag")) {
                 std::string tag = data.at("reasoning_budget_end_tag").get<std::string>();
                 if (!tag.empty()) {
-                    ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
+                    ctx.params.sampling.reasoning_budget_end.push_back(tokenize_reasoning_marker(ctx.vocab, tag));
                 }
+            }
+            if (!ctx.params.sampling.reasoning_budget_end.empty()) {
+                ctx.params.sampling.reasoning_budget_forced = ctx.params.sampling.reasoning_budget_end.front();
             }
         }));
 
@@ -622,7 +558,7 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             const auto & samplers = data.at("samplers");
             if (samplers.is_array()) {
-                ctx.params.sampling.samplers = common_sampler_types_from_names(samplers);
+                ctx.params.sampling.samplers = common_sampler_types_from_names(samplers.get<std::vector<std::string>>());
             } else if (samplers.is_string()) {
                 ctx.params.sampling.samplers = common_sampler_types_from_chars(samplers.get<std::string>());
             }
@@ -634,14 +570,14 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
 task_params eval_llama_cmpl_schema(
                 const llama_vocab * vocab,
                 const common_params & params_base,
-                const int n_ctx_slot,
                 const std::vector<llama_logit_bias> & logit_bias_eog,
                 const json & data) {
     task_params params;
 
-    // Sampling parameter defaults are loaded from the global server context (but individual requests can still them)
+    // Sampling parameter defaults are loaded from the global server context (but individual requests can still override them)
     params.sampling      = params_base.sampling;
     params.speculative   = params_base.speculative;
+    params.reasoning_loop_guard = params_base.reasoning_loop_guard;
     params.n_keep        = params_base.n_keep;
     params.n_predict     = params_base.n_predict;
     params.n_cache_reuse = params_base.n_cache_reuse;
@@ -668,74 +604,13 @@ task_params eval_llama_cmpl_schema(
 
     // post-processing
     {
-        if (params.sampling.penalty_last_n == -1) {
-            // note: should be the slot's context and not the full context, but it's ok
-            params.sampling.penalty_last_n = n_ctx_slot;
-        }
-
-        if (params.sampling.dry_penalty_last_n == -1) {
-            params.sampling.dry_penalty_last_n = n_ctx_slot;
-        }
-
-        auto enable_reasoning_override = [&](const char * name, uint64_t flag) {
-            auto it = data.find(name);
-            if (it != data.end() && !it->is_null()) {
-                params.sampling.reasoning_sampling |= flag;
-            }
-        };
-
-        enable_reasoning_override("reasoning_temp",               COMMON_PARAMS_SAMPLING_CONFIG_TEMP);
-        enable_reasoning_override("reasoning_temperature",        COMMON_PARAMS_SAMPLING_CONFIG_TEMP);
-        enable_reasoning_override("reasoning_top_k",              COMMON_PARAMS_SAMPLING_CONFIG_TOP_K);
-        enable_reasoning_override("reasoning_top_p",              COMMON_PARAMS_SAMPLING_CONFIG_TOP_P);
-        enable_reasoning_override("reasoning_min_p",              COMMON_PARAMS_SAMPLING_CONFIG_MIN_P);
-        enable_reasoning_override("reasoning_top_n_sigma",        COMMON_PARAMS_SAMPLING_CONFIG_TOP_N_SIGMA);
-        enable_reasoning_override("reasoning_xtc_probability",    COMMON_PARAMS_SAMPLING_CONFIG_XTC_PROBABILITY);
-        enable_reasoning_override("reasoning_xtc_threshold",      COMMON_PARAMS_SAMPLING_CONFIG_XTC_THRESHOLD);
-        enable_reasoning_override("reasoning_typical_p",          COMMON_PARAMS_SAMPLING_CONFIG_TYPICAL_P);
-        enable_reasoning_override("reasoning_dynatemp_range",     COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_RANGE);
-        enable_reasoning_override("reasoning_dynatemp_exponent",  COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_EXPONENT);
-        enable_reasoning_override("reasoning_repeat_last_n",      COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_LAST_N);
-        enable_reasoning_override("reasoning_repeat_penalty",     COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_REPEAT);
-        enable_reasoning_override("reasoning_frequency_penalty",  COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_FREQ);
-        enable_reasoning_override("reasoning_presence_penalty",   COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_PRESENT);
-        enable_reasoning_override("reasoning_dry_multiplier",     COMMON_PARAMS_SAMPLING_CONFIG_DRY_MULTIPLIER);
-        enable_reasoning_override("reasoning_dry_base",           COMMON_PARAMS_SAMPLING_CONFIG_DRY_BASE);
-        enable_reasoning_override("reasoning_dry_allowed_length", COMMON_PARAMS_SAMPLING_CONFIG_DRY_ALLOWED_LEN);
-        enable_reasoning_override("reasoning_dry_penalty_last_n", COMMON_PARAMS_SAMPLING_CONFIG_DRY_PENALTY_LAST_N);
-        enable_reasoning_override("reasoning_mirostat",           COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT);
-        enable_reasoning_override("reasoning_mirostat_tau",       COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_TAU);
-        enable_reasoning_override("reasoning_mirostat_eta",       COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA);
-        enable_reasoning_override("reasoning_adaptive_target",    COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_TARGET);
-        enable_reasoning_override("reasoning_adaptive_decay",     COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_DECAY);
-        enable_reasoning_override("reasoning_min_keep",           COMMON_PARAMS_SAMPLING_CONFIG_MIN_KEEP);
-        enable_reasoning_override("reasoning_seed",               COMMON_PARAMS_SAMPLING_CONFIG_SEED);
-
-        if ((params.sampling.reasoning_sampling & COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_LAST_N) &&
-            params.sampling.reasoning_penalty_last_n == -1) {
-            params.sampling.reasoning_penalty_last_n = n_ctx_slot;
-        }
-        if ((params.sampling.reasoning_sampling & COMMON_PARAMS_SAMPLING_CONFIG_DRY_PENALTY_LAST_N) &&
-            params.sampling.reasoning_dry_penalty_last_n == -1) {
-            params.sampling.reasoning_dry_penalty_last_n = n_ctx_slot;
-        }
-
         // if "reasoning_format" is not provided, its handler will not be called, we will need to handle it here
         auto reasoning_format = params.chat_parser_params.reasoning_format;
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
 
-        // If n_predict would truncate generation before reasoning finishes, bump it
-        // so the model can still produce content after the reasoning budget.
-        {
-            const int budget = params.sampling.reasoning_budget_tokens;
-            if (budget > 0 && params.n_predict > 0 && params.n_predict <= budget) {
-                const int min_content_tokens = 2048;
-                const int new_n_predict = budget + min_content_tokens;
-                SRV_WRN("n_predict (%d) <= reasoning_budget_tokens (%d): bumping n_predict to %d to leave room for content after reasoning\n",
-                        params.n_predict, budget, new_n_predict);
-                params.n_predict = new_n_predict;
-            }
-        }
+        common_validate_reasoning_loop_guard_params(params.reasoning_loop_guard);
+        params.sampling.reasoning_budget_tracking =
+            params.reasoning_loop_guard.mode != COMMON_REASONING_LOOP_GUARD_OFF;
     }
 
     // debugging
@@ -746,14 +621,6 @@ task_params eval_llama_cmpl_schema(
                 params.sampling.reasoning_budget_start.size(),
                 params.sampling.reasoning_budget_end.size(),
                 params.sampling.reasoning_budget_forced.size());
-    }
-
-    // original messages for hidden self-check turn (only present for /chat/completions)
-    if (data.contains("original_messages")) {
-        params.original_messages = data.at("original_messages");
-    }
-    if (data.contains("chat_use_jinja")) {
-        params.chat_use_jinja = data.at("chat_use_jinja").get<bool>();
     }
 
     return params;
@@ -773,8 +640,7 @@ static void handle_with_catch(const char * name, std::function<void()> func) {
 
 // treat a null value as absent so clients can send null to request the server default
 static bool has_value(const json & data, const char * n) {
-    auto it = data.find(n);
-    return it != data.end() && !it->is_null();
+    return data.contains(n) && !data.at(n).is_null();
 }
 
 template <typename T>

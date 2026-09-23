@@ -5,6 +5,7 @@
 
 import subprocess
 import os
+import threading
 
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp")
 import re
@@ -80,12 +81,15 @@ class ServerProcess:
     n_slots: int | None = None
     ctk: str | None = None
     ctv: str | None = None
+    kv_tail_tokens: str | int | None = None
+    kv_tail_type: str | None = None
     fa: str | None = None
     server_continuous_batching: bool | None = False
     server_embeddings: bool | None = False
     server_reranking: bool | None = False
     server_metrics: bool | None = False
     kv_unified: bool | None = False
+    swa_full: bool | None = False
     server_slots: bool | None = False
     pooling: str | None = None
     api_key: str | None = None
@@ -98,6 +102,8 @@ class ServerProcess:
     spec_type: str | None = None
     spec_draft_n_min: int | None = None
     spec_draft_n_max: int | None = None
+    spec_synth_len: float | None = None
+    spec_synth_rates: List[float] | None = None
     no_ui: bool | None = None
     jinja: bool | None = None
     reasoning_format: Literal['deepseek', 'none', 'nothink'] | None = None
@@ -106,15 +112,19 @@ class ServerProcess:
     chat_template_file: str | None = None
     server_path: str | None = None
     mmproj_url: str | None = None
+    no_mmproj: bool | None = None
     media_path: str | None = None
     sleep_idle_seconds: int | None = None
     cache_ram: int | None = None
+    ctx_checkpoints: int | None = None
+    checkpoint_min_step: int | None = None
     no_cache_idle_slots: bool = False
     log_path: str | None = None
     ui_mcp_proxy: bool = False
     backend_sampling: bool = False
     gcp_compat: bool = False
     server_tools: str | None = None
+    server_tools_runtime: str | None = None
     mcp_servers_config: str | None = None
     mcp_servers_json: str | None = None
     cors_origins: str | None = None
@@ -132,7 +142,10 @@ class ServerProcess:
         self.external_server = "DEBUG_EXTERNAL" in os.environ
 
     def start(self, timeout_seconds: int = DEFAULT_HTTP_TIMEOUT) -> None:
-        env = {**os.environ}
+        env = {
+            **os.environ,
+            "LLAMA_SERVER_DEBUG_FAKE_TIMING": "1",
+        }
         if "LLAMA_CACHE" not in os.environ:
             env["LLAMA_CACHE"] = "tmp"
         if self.external_server:
@@ -194,6 +207,8 @@ class ServerProcess:
             server_args.append("--metrics")
         if self.kv_unified:
             server_args.append("--kv-unified")
+        if self.swa_full:
+            server_args.append("--swa-full")
         if self.server_slots:
             server_args.append("--slots")
         else:
@@ -212,6 +227,10 @@ class ServerProcess:
             server_args.extend(["-ctk", self.ctk])
         if self.ctv:
             server_args.extend(["-ctv", self.ctv])
+        if self.kv_tail_tokens is not None:
+            server_args.extend(["--kv-tail-tokens", self.kv_tail_tokens])
+        if self.kv_tail_type is not None:
+            server_args.extend(["--kv-tail-type", self.kv_tail_type])
         if self.fa is not None:
             server_args.extend(["-fa", self.fa])
         if self.n_predict:
@@ -237,6 +256,11 @@ class ServerProcess:
             server_args.extend(["--spec-draft-n-max", self.spec_draft_n_max])
         if self.spec_draft_n_min:
             server_args.extend(["--spec-draft-n-min", self.spec_draft_n_min])
+        if self.spec_synth_len is not None:
+            server_args.extend(["--spec-synth-len", self.spec_synth_len])
+        if self.spec_synth_rates is not None:
+            rates = ",".join(str(rate) for rate in self.spec_synth_rates)
+            server_args.extend(["--spec-synth-rates", rates])
         if self.no_ui:
             server_args.append("--no-ui")
         if self.no_models_autoload:
@@ -255,18 +279,26 @@ class ServerProcess:
             server_args.extend(["--chat-template-file", self.chat_template_file])
         if self.mmproj_url:
             server_args.extend(["--mmproj-url", self.mmproj_url])
+        if self.no_mmproj:
+            server_args.append("--no-mmproj")
         if self.media_path:
             server_args.extend(["--media-path", self.media_path])
         if self.sleep_idle_seconds is not None:
             server_args.extend(["--sleep-idle-seconds", self.sleep_idle_seconds])
         if self.cache_ram is not None:
             server_args.extend(["--cache-ram", self.cache_ram])
+        if self.ctx_checkpoints is not None:
+            server_args.extend(["--ctx-checkpoints", self.ctx_checkpoints])
+        if self.checkpoint_min_step is not None:
+            server_args.extend(["--checkpoint-min-step", self.checkpoint_min_step])
         if self.no_cache_idle_slots:
             server_args.append("--no-cache-idle-slots")
         if self.ui_mcp_proxy:
             server_args.append("--ui-mcp-proxy")
         if self.server_tools:
             server_args.extend(["--tools", self.server_tools])
+        if self.server_tools_runtime:
+            server_args.extend(["--tools-runtime", self.server_tools_runtime])
         if self.mcp_servers_config:
             server_args.extend(["--mcp-servers-config", self.mcp_servers_config])
         if self.mcp_servers_json:
@@ -275,6 +307,7 @@ class ServerProcess:
             server_args.append("--backend_sampling")
         if self.gcp_compat:
             env["AIP_MODE"] = "PREDICTION"
+            env["AIP_HTTP_PORT"] = str(self.server_port)
 
         args = [str(arg) for arg in [server_path, *server_args]]
         print(f"tests: starting server with: {' '.join(args)}")
@@ -286,40 +319,52 @@ class ServerProcess:
             flags |= subprocess.CREATE_NO_WINDOW
 
         if self.log_path:
-            self._log = open(self.log_path, "w")
+            self._log = open(self.log_path, "w", encoding="utf-8", errors="replace")
         else:
             self._log = sys.stdout
 
         self.process = subprocess.Popen(
             [str(arg) for arg in [server_path, *server_args]],
             creationflags=flags,
-            stdout=self._log,
-            stderr=self._log if self._log != sys.stdout else sys.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
         server_instances.add(self)
 
         print(f"server pid={self.process.pid}, pytest pid={os.getpid()}")
 
-        # wait for server to start
-        start_time = time.time()
-        while time.time() - start_time < timeout_seconds:
-            try:
-                response = self.make_request("GET", "/health", headers={
-                    "Authorization": f"Bearer {self.api_key}" if self.api_key else None
-                })
-                if response.status_code == 200:
-                    self.ready = True
-                    return  # server is ready
-            except Exception as e:
-                pass
-            # Check if process died
-            if self.process.poll() is not None:
-                raise RuntimeError(f"Server process died with return code {self.process.returncode}")
+        # Consume output continuously and signal readiness from the server's
+        # own listening event. This tracks startup and early exit without
+        # polling either the process or /health.
+        self._ready_event = threading.Event()
+        self._exit_event = threading.Event()
 
-            print(f"Waiting for server to start...")
-            time.sleep(0.5)
-        raise TimeoutError(f"Server did not start within {timeout_seconds} seconds")
+        def pump_output() -> None:
+            assert self.process is not None and self.process.stdout is not None
+            for line in self.process.stdout:
+                try:
+                    self._log.write(line)
+                except UnicodeEncodeError:
+                    encoding = self._log.encoding or "ascii"
+                    self._log.write(line.encode(encoding, errors="backslashreplace").decode(encoding))
+                self._log.flush()
+                if "listening on http://" in line:
+                    self._ready_event.set()
+            self._exit_event.set()
+
+        self._output_thread = threading.Thread(target=pump_output, daemon=True)
+        self._output_thread.start()
+        if not self._ready_event.wait(timeout_seconds):
+            if self._exit_event.is_set():
+                self.process.wait()
+                raise RuntimeError(f"Server process died with return code {self.process.returncode}")
+            raise TimeoutError(f"Server did not start within {timeout_seconds} seconds")
+        self.ready = True
 
     def stop(self) -> None:
         if self.external_server:
@@ -338,6 +383,8 @@ class ServerProcess:
                 self.process.wait(timeout=5)
             except Exception as e:
                 print(f"Error waiting for server: {e}")
+            if hasattr(self, '_output_thread'):
+                self._output_thread.join(timeout=5)
             self.process = None
         if hasattr(self, '_log') and self._log != sys.stdout:
             self._log.close()
@@ -608,7 +655,7 @@ class ServerPreset:
         server.model_hf_repo = "ggml-org/tinygemma3-GGUF:Q8_0"
         server.model_alias = "tinygemma3"
         server.n_ctx = 1024
-        server.n_batch = 32
+        server.n_batch = 512
         server.n_slots = 2
         server.n_predict = 4
         server.seed = 42

@@ -127,7 +127,6 @@ enum common_sampler_type {
     COMMON_SAMPLER_TYPE_PENALTIES   = 10,
     COMMON_SAMPLER_TYPE_TOP_N_SIGMA = 11,
     COMMON_SAMPLER_TYPE_ADAPTIVE_P  = 12,
-    COMMON_SAMPLER_TYPE_PERIODIC_REPEAT = 13,
 };
 
 // dimensionality reduction methods, used by cvector-generator
@@ -259,7 +258,9 @@ struct common_params_sampling {
     float   dry_multiplier     = 0.0f;   // 0.0 = disabled;      DRY repetition penalty for tokens extending repetition:
     float   dry_base           = 1.75f;  // 0.0 = disabled;      multiplier * base ^ (length of sequence before token - allowed length)
     int32_t dry_allowed_length = 2;      // tokens extending repetitions beyond this receive penalty
-    int32_t dry_penalty_last_n = -1;     // how many tokens to scan for repetitions (0 = disable penalty, -1 = context size)
+    int32_t dry_penalty_last_n = 64;     // how many tokens to scan for repetitions (0 = disable penalty)
+
+    // anti-runaway defenses (laamaafung)
     int32_t repeat_line_window     = 0;            // 0 = disabled; number of past segments to compare against
     int32_t repeat_line_min_length = 20;           // ignore segments shorter than this (avoids false positives)
     std::string repeat_line_delimiters = "\n.!?:"; // characters that end a segment
@@ -270,11 +271,10 @@ struct common_params_sampling {
     int32_t cycle_detect_last_n    = 64;            // number of recent tokens to check for cyclic patterns (0 = disabled)
     int32_t cycle_detect_min_period = 2;            // minimum period length to detect
     int32_t cycle_detect_max_period = 8;            // maximum period length to detect
-    int32_t cycle_detect_action    = 0;             // action when cyclic pattern detected: 0 = boost (temp boost), 1 = penalty (repetition penalty)
-    float   cycle_boost_factor     = 0.50f;         // temperature boost factor when cyclic pattern is detected (boost mode)
-    float   cycle_penalty_repeat   = 1.00f;         // repetition penalty factor when cyclic pattern is detected (penalty mode, 1.0 = disabled)
+    int32_t cycle_detect_action    = 0;             // action: 0 = boost (temp boost), 1 = penalty (repetition penalty)
+    float   cycle_boost_factor     = 0.50f;         // temp boost factor when cyclic pattern detected (boost mode)
+    float   cycle_penalty_repeat   = 1.00f;         // repetition penalty factor (penalty mode, 1.0 = disabled)
     int32_t eog_retry_max          = 3;             // max EOG suppression retries for think-only early stop (0 = disabled)
-    int32_t dry_penalty_last_n = 64;     // how many tokens to scan for repetitions (0 = disable penalty)
     float   adaptive_target    = -1.0f;  // select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
     float   adaptive_decay     = 0.90f;  // EMA decay for adaptation; history ≈ 1/(1-decay) tokens (0.0 - 0.99)
     int32_t mirostat           = 0;      // 0 = disabled, 1 = mirostat, 2 = mirostat 2.0
@@ -315,6 +315,9 @@ struct common_params_sampling {
     // Only applied when the grammar is of output-format or tool-calls type.
     std::string generation_prompt;
 
+
+    // print the parameters into a string
+    std::string print() const;
     // reasoning budget sampler parameters
     // these are populated by the server/CLI based on chat template params
     int32_t                   reasoning_budget_tokens   = -1;  // -1 = disabled, >= 0 = token budget
@@ -322,6 +325,7 @@ struct common_params_sampling {
     std::vector<llama_tokens> reasoning_budget_end;            // end tag token sequences; the first tag is used as the forcing sequence
     std::vector<llama_token>  reasoning_budget_forced;         // forced sequence (message + first end tag)
     std::string               reasoning_budget_message;        // message injected before end tag when budget exhausted
+    bool                      reasoning_budget_tracking = false; // track reasoning state even with an unlimited budget
     bool                      reasoning_control = false;       // create the budget sampler on demand so reasoning can be ended at runtime
 
     // Sampling overrides used while inside the reasoning block. The bitfield
@@ -353,13 +357,8 @@ struct common_params_sampling {
     float    reasoning_top_n_sigma        = -1.00f;
     float    reasoning_mirostat_tau       = 5.00f;
     float    reasoning_mirostat_eta       = 0.10f;
-    bool                      reasoning_budget_tracking = false; // track reasoning state even with an unlimited budget
-    bool                      reasoning_control = false;       // create the budget sampler on demand so reasoning can be ended at runtime
 
     bool backend_sampling = false;
-
-    // print the parameters into a string
-    std::string print() const;
 };
 
 struct common_params_model {
@@ -580,6 +579,9 @@ struct common_params {
     int32_t n_parallel            =     1; // number of parallel sequences to decode
     int32_t n_sequences           =     1; // number of sequences to decode
     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
+    int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
+    int32_t grp_attn_n            =     1; // group-attention factor
+    int32_t grp_attn_w            =   512; // group-attention width
     // KVMem tiered/sparse KV memory (needs a build with LLAMA_KVMEM=ON). Off by default.
     bool    kvmem                = false; // enable the KVMem memory adapter
     int32_t kvmem_budget         =     0; // KVMem GPU working-set tokens; 0 = n_ctx
@@ -591,9 +593,6 @@ struct common_params {
     bool    kvmem_retrieval      =  true; // true = retrieval, false = recency
     bool    kvmem_harvest_v      = false; // prefill D2H V together with raw-K
     bool    kvmem_image_autoscale = true; // shrink images that do not fit the working set
-    int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
-    int32_t grp_attn_n            =     1; // group-attention factor
-    int32_t grp_attn_w            =   512; // group-attention width
     int32_t n_print               =    -1; // print token count every n tokens (-1 = disabled)
     float   rope_freq_base        =  0.0f; // RoPE base frequency
     float   rope_freq_scale       =  0.0f; // RoPE frequency scaling factor
@@ -617,7 +616,6 @@ struct common_params {
     std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
-    enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_MMAP; // how to load the model
     enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_AUTO; // how to load the model
 
     enum llama_lazy_mode lazy_mode = LLAMA_LAZY_MODE_AUTO; // on-demand reading of tensors marked by the arch
@@ -706,7 +704,6 @@ struct common_params {
     bool no_perf           = false; // disable performance metrics
     bool show_timings      = true;  // show timing information on CLI
     bool ctx_shift         = false; // context shift on infinite text generation
-    bool prompt_truncate   = false; // truncate initial prompt to fit context (keeps head + tail)
     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
     bool kv_unified        = false; // enable unified KV cache
 
@@ -824,9 +821,6 @@ struct common_params {
     // CLI params
     std::string server_base; // if set, connect to this server instead of starting a new one
 
-    // CLI params
-    std::string server_base; // if set, connect to this server instead of starting a new one
-
     // UI configs
     bool ui = true;
     bool ui_mcp_proxy = false;
@@ -840,10 +834,6 @@ struct common_params {
     // enable built-in tools
     std::vector<std::string> server_tools;
     std::string server_tools_runtime;
-
-    // MCP server configs (Cursor-compatible JSON)
-    std::string mcp_servers_config;   // path to JSON file with MCP server definitions
-    std::string mcp_servers_json;     // inline JSON with MCP server definitions
 
     // MCP server configs (Cursor-compatible JSON)
     std::string mcp_servers_config;   // path to JSON file with MCP server definitions
@@ -1214,18 +1204,6 @@ struct common_memory {
             llama_pos & planned_p0) const;
 };
 
-struct common_memory {
-    llama_context * ctx_tgt = nullptr;
-    llama_context * ctx_dft = nullptr;
-
-    void init(llama_context * ctx_tgt, llama_context * ctx_dft = nullptr);
-
-    // aborts execution on failure
-    void seq_rm (llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
-    void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const;
-    void seq_cp (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
-};
-
 //
 // Batch utils
 //
@@ -1447,7 +1425,6 @@ struct common_prompt_checkpoint {
 
     llama_pos pos_min;
     llama_pos pos_max;
-    llama_pos pos_end;
 
     common_prompt_checkpoint_buffer data_tgt;
     common_prompt_checkpoint_buffer data_dft;
@@ -1464,8 +1441,7 @@ struct common_prompt_checkpoint {
     void update_pos(
             int64_t n_tokens,
             llama_pos pos_min,
-            llama_pos pos_max,
-            llama_pos pos_end);
+            llama_pos pos_max);
 
     common_prompt_checkpoint_result update_tgt(
             llama_context * ctx,

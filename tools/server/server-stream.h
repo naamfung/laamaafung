@@ -77,4 +77,3 @@ public:
     void on_complete() override;
     void set_next(std::function<bool(std::string &)> next_fn);
 };
-

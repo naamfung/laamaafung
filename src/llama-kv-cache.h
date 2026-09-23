@@ -214,6 +214,11 @@ public:
     ggml_type type_k() const;
     ggml_type type_v() const;
 
+    // TurboQuant rotation tensors (null unless a turbo KV type is in use)
+    ggml_tensor * get_turbo_rotation() const { return turbo_rotation; }
+    ggml_tensor * get_turbo_rotation_inv() const { return turbo_rotation_inv; }
+    ggml_tensor * get_turbo_innerq_scale_inv() const { return turbo_innerq_scale_inv; }
+
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
 
@@ -523,6 +528,12 @@ private:
 
     std::vector<kv_layer> layers;
 
+    // TurboQuant rotation matrices (shared across layers, allocated once)
+    ggml_tensor * turbo_rotation = nullptr;      // R (forward rotation)
+    ggml_tensor * turbo_rotation_inv = nullptr;   // R^T = R^{-1} (inverse rotation)
+    ggml_tensor * turbo_innerq_scale_inv = nullptr;
+
+
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
     // Shared auxiliary layer id -> source model layer id.
@@ -653,6 +664,11 @@ public:
     // get views of the current state of the cache
     virtual ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     virtual ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_turbo_rotation() const;
+    ggml_tensor * get_turbo_rotation_inv() const;
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
+    ggml_tensor * get_turbo_innerq_scale_inv() const override;
     virtual ggml_tensor * get_k_tail(ggml_context * ctx, int32_t il) const;
     virtual ggml_tensor * get_v_tail(ggml_context * ctx, int32_t il) const;
     virtual ggml_tensor * get_k_tail_fallback(ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const;

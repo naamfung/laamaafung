@@ -203,9 +203,8 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                 } else {
                     json chatcmpl_outputs = item.at("output");
                     for (json & chatcmpl_output : chatcmpl_outputs) {
-                        auto type = chatcmpl_output.value("type", "");
-                        if (type != "input_text" && type != "output_text" && type != "text") {
-                            throw std::invalid_argument("Output of tool call should be text");
+                        if (!chatcmpl_output.contains("type") || chatcmpl_output.at("type") != "input_text") {
+                            throw std::invalid_argument("Output of tool call should be 'Input text'");
                         }
                         chatcmpl_output["type"] = "text";
                     }
@@ -218,33 +217,26 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
             } else if (exists_and_is_array(item, "summary") &&
                 exists_and_is_string(item, "type") &&
                 item.at("type") == "reasoning") {
-                std::string reasoning_text;
+                // #responses_create-input-input_item_list-item-reasoning
 
-                if (exists_and_is_array(item, "content") && !item.at("content").empty()) {
-                    if (!exists_and_is_string(item.at("content")[0], "text")) {
-                        throw std::invalid_argument("item['content']['text'] is not a string");
-                    }
-                    reasoning_text = item.at("content")[0].at("text").get<std::string>();
-                } else if (!item.at("summary").empty()) {
-                    for (const auto & summary_item : item.at("summary")) {
-                        if (exists_and_is_string(summary_item, "text")) {
-                            reasoning_text += summary_item.at("text").get<std::string>();
-                        }
-                    }
+                if (!exists_and_is_array(item, "content")) {
+                    throw std::invalid_argument("item['content'] is not an array");
                 }
-
-                if (reasoning_text.empty()) {
-                    continue;
+                if (item.at("content").empty()) {
+                    throw std::invalid_argument("item['content'] is empty");
+                }
+                if (!exists_and_is_string(item.at("content")[0], "text")) {
+                    throw std::invalid_argument("item['content']['text'] is not a string");
                 }
 
                 if (merge_prev) {
                     auto & prev_msg = chatcmpl_messages.back();
-                    prev_msg["reasoning_content"] = reasoning_text;
+                    prev_msg["reasoning_content"] = item.at("content")[0].at("text");
                 } else {
                     chatcmpl_messages.push_back(json {
                         {"role", "assistant"},
                         {"content", json::array()},
-                        {"reasoning_content", reasoning_text},
+                        {"reasoning_content", item.at("content")[0].at("text")},
                     });
                 }
             } else {
@@ -585,27 +577,6 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
 
     // Pass through common params
     for (const auto & key : {"temperature", "top_p", "top_k", "stream", "chat_template_kwargs"}) {
-        if (body.contains(key)) {
-            oai_body[key] = body.at(key);
-        }
-    }
-
-    // Pass through reasoning sampling overrides so Anthropic clients can also
-    // dynamically configure reasoning-block sampling per request.
-    for (const auto & key : {
-        "reasoning_temp", "reasoning_temperature",
-        "reasoning_top_k", "reasoning_top_p", "reasoning_min_p", "reasoning_top_n_sigma",
-        "reasoning_xtc_probability", "reasoning_xtc_threshold", "reasoning_typical_p",
-        "reasoning_dynatemp_range", "reasoning_dynatemp_exp", "reasoning_dynatemp_exponent",
-        "reasoning_repeat_last_n", "reasoning_repeat_penalty",
-        "reasoning_presence_penalty", "reasoning_frequency_penalty",
-        "reasoning_dry_multiplier", "reasoning_dry_base",
-        "reasoning_dry_allowed_length", "reasoning_dry_penalty_last_n",
-        "reasoning_mirostat", "reasoning_mirostat_tau", "reasoning_mirostat_ent",
-        "reasoning_mirostat_eta", "reasoning_mirostat_lr",
-        "reasoning_adaptive_target", "reasoning_adaptive_decay",
-        "reasoning_min_keep", "reasoning_seed",
-    }) {
         if (body.contains(key)) {
             oai_body[key] = body.at(key);
         }

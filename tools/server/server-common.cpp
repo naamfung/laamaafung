@@ -6,9 +6,6 @@
 #include "mtmd-helper.h"
 #include "chat.h"
 #include "base64.hpp"
-#if defined(LLAMA_KVMEM)
-#include "llama-kvmem-hooks.h"
-#endif
 
 #include "server-common.h"
 
@@ -400,11 +397,7 @@ llama_pos server_tokens::pos_next(int64_t n_tokens) const {
     int64_t idx = 0;
     llama_pos pos = 0;
 
-    // clamp to the tokens available in this list - a caller may pass a token
-    // count taken from a full task while this list only holds a cached prefix
-    if (n_tokens > (int64_t) tokens.size()) {
-        n_tokens = (int64_t) tokens.size();
-    }
+    GGML_ASSERT(n_tokens <= (int64_t)tokens.size());
 
     while (idx < n_tokens) {
         const auto media_it = map_idx_to_media.find(idx);
@@ -488,16 +481,6 @@ std::pair<const mtmd::input_chunk_ptr *, size_t> server_tokens::find_next_media_
         return { &it->second, it->first };
     }
     return { nullptr, 0 };
-}
-
-std::vector<std::pair<const mtmd::input_chunk_ptr *, size_t>> server_tokens::get_media_chunks() const {
-    std::vector<std::pair<const mtmd::input_chunk_ptr *, size_t>> res;
-    res.reserve(map_idx_to_media.size());
-    // std::map iterates in key order == token order
-    for (const auto & kv : map_idx_to_media) {
-        res.emplace_back(&kv.second, kv.first);
-    }
-    return res;
 }
 
 void server_tokens::push_back(llama_token tok) {
@@ -932,12 +915,17 @@ size_t validate_utf8(const std::string& text) {
     return len;
 }
 
-server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, const mtmd_helper_init_opt & init_opt, bool is_placeholder) {
+server_tokens process_mtmd_prompt(
+        mtmd_context * mctx,
+        const std::string & prompt,
+        const std::vector<raw_buffer> & files,
+        const mtmd_helper_init_opt & init_opt,
+        bool is_placeholder) {
     // these will be freed upon going out of scope
     mtmd::bitmaps bitmaps;
     std::vector<mtmd_helper::video_ptr> videos;
     for (auto & file : files) {
-        auto out = mtmd_helper_bitmap_init_from_buf_opt(mctx, file.data(), file.size(), is_placeholder, init_opt);
+        auto out = mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size(), is_placeholder, init_opt);
         if (!out.bitmap) {
             throw std::runtime_error("Failed to load image or audio file");
         }
@@ -957,24 +945,6 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & promp
     };
     mtmd::input_chunks chunks(mtmd_input_chunks_init());
     auto bitmaps_c_ptr = bitmaps.c_ptr();
-#if defined(LLAMA_KVMEM)
-    // Shrink oversized images *before* they become tokens. An image is a mandatory
-    // group in KVMem's selection (kept whole, never split across blocks), so one
-    // whose row count does not fit what is left of the working-set budget cannot be
-    // scheduled at all. The model can only refuse that after tokenization, so the
-    // budget has to be applied here, where the preprocessor still owns the pixels.
-    // No-op unless KVMem is enabled with an explicit budget and autoscale on.
-    {
-        const int32_t cap = llama_kvmem_image_token_cap((int32_t) files.size());
-        if (cap > 0) {
-            const int32_t limit = mtmd_set_image_token_cap(mctx, cap);
-            if (limit > 0 && cap < limit) {
-                LOG_INF("%s: KVMem budget caps one image at %d tokens (model limit %d) for %zu media file(s)\n",
-                        __func__, cap, limit, files.size());
-            }
-        }
-    }
-#endif
     int32_t tokenized = mtmd_tokenize(mctx,
                                       chunks.ptr.get(),
                                       &inp_txt,
@@ -1019,7 +989,7 @@ static server_tokens tokenize_input_subprompt(const llama_vocab * vocab, mtmd_co
             for (const auto & entry : json_prompt.at(JSON_MTMD_DATA_KEY)) {
                 files.push_back(base64_decode(entry));
             }
-            return process_mtmd_prompt(mctx, json_prompt.at(JSON_STRING_PROMPT_KEY), files, mtmd_helper_init_opt_default());
+            return process_mtmd_prompt(mctx, json_prompt.at(JSON_STRING_PROMPT_KEY), files, init_opt);
         } else {
             // Not multimodal, but contains a subobject.
             llama_tokens tmp = tokenize_mixed(vocab, json_prompt.at(JSON_STRING_PROMPT_KEY), add_special, parse_special);
@@ -1166,8 +1136,56 @@ static void handle_media(
 }
 
 // used by /chat/completions endpoint
-void oaicompat_chat_process_media(json & body, const server_chat_params & opt,
-                                 std::vector<raw_buffer> & out_files) {
+json oaicompat_chat_params_parse(
+    json & body, /* openai api json semantics */
+    const server_chat_params & opt,
+    std::vector<raw_buffer> & out_files)
+{
+    json llama_params;
+
+    auto tools = json_value(body, "tools", json());
+    auto has_tools = tools.is_array() && !tools.empty();
+    auto stream = json_value(body, "stream", false);
+    auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
+
+    if (!opt.use_jinja) {
+        if (has_tools) {
+            throw std::runtime_error("tools param requires --jinja flag");
+        }
+        if (tool_choice != "auto") {
+            throw std::runtime_error("tool_choice param requires --jinja flag");
+        }
+    }
+
+    // Handle "stop" field
+    if (body.contains("stop") && body.at("stop").is_string()) {
+        llama_params["stop"] = json::array({body.at("stop").get<std::string>()});
+    } else {
+        llama_params["stop"] = json_value(body, "stop", json::array());
+    }
+
+    auto json_schema = json_value(body, "json_schema", json());
+    auto grammar = json_value(body, "grammar", std::string());
+    if (!json_schema.is_null() && !grammar.empty()) {
+        throw std::runtime_error("Cannot use both json_schema and grammar");
+    }
+
+    // Handle "response_format" field
+    if (body.contains("response_format")) {
+        json response_format      = json_value(body, "response_format", json::object());
+        std::string response_type = json_value(response_format, "type", std::string());
+        if (response_type == "json_object") {
+            if (response_format.contains("schema") || json_schema.empty()) {
+                json_schema = json_value(response_format, "schema", json::object());
+            }
+        } else if (response_type == "json_schema") {
+            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
+            json_schema = json_value(schema_wrapper, "schema", json::object());
+        } else if (!response_type.empty() && response_type != "text") {
+            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
+        }
+    }
+
     // get input files
     if (!body.contains("messages")) {
         throw std::invalid_argument("'messages' is required");
@@ -1247,62 +1265,6 @@ void oaicompat_chat_process_media(json & body, const server_chat_params & opt,
             }
         }
     }
-}
-
-// used by /chat/completions endpoint
-json oaicompat_chat_params_parse(
-    json & body, /* openai api json semantics */
-    const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files)
-{
-    json llama_params;
-
-    auto tools = json_value(body, "tools", json());
-    auto has_tools = tools.is_array() && !tools.empty();
-    auto stream = json_value(body, "stream", false);
-    auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
-
-    if (!opt.use_jinja) {
-        if (has_tools) {
-            throw std::runtime_error("tools param requires --jinja flag");
-        }
-        if (tool_choice != "auto") {
-            throw std::runtime_error("tool_choice param requires --jinja flag");
-        }
-    }
-
-    // Handle "stop" field
-    if (body.contains("stop") && body.at("stop").is_string()) {
-        llama_params["stop"] = json::array({body.at("stop").get<std::string>()});
-    } else {
-        llama_params["stop"] = json_value(body, "stop", json::array());
-    }
-
-    auto json_schema = json_value(body, "json_schema", json());
-    auto grammar = json_value(body, "grammar", std::string());
-    if (!json_schema.is_null() && !grammar.empty()) {
-        throw std::runtime_error("Cannot use both json_schema and grammar");
-    }
-
-    // Handle "response_format" field
-    if (body.contains("response_format")) {
-        json response_format      = json_value(body, "response_format", json::object());
-        std::string response_type = json_value(response_format, "type", std::string());
-        if (response_type == "json_object") {
-            if (response_format.contains("schema") || json_schema.empty()) {
-                json_schema = json_value(response_format, "schema", json::object());
-            }
-        } else if (response_type == "json_schema") {
-            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
-            json_schema = json_value(schema_wrapper, "schema", json::object());
-        } else if (!response_type.empty() && response_type != "text") {
-            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
-        }
-    }
-
-    // get input files
-    oaicompat_chat_process_media(body, opt, out_files);
-    json & messages = body.at("messages");
 
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());
 
@@ -1364,12 +1326,15 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
-    // Parse also the OAI "reasoning_effort": "none" specific value
+    // Parse the OAI "reasoning_effort" field; "none" disables reasoning.
     if (body.contains("reasoning_effort")) {
         auto reasoning_effort = json_value(body, "reasoning_effort", std::string(""));
         if (reasoning_effort == "none") {
             inputs.enable_thinking = false;
-        } // other reasoning_effort values are model-specific and not yet handled
+            inputs.chat_template_kwargs.erase("reasoning_effort");
+        } else if (!reasoning_effort.empty()) {
+            inputs.chat_template_kwargs["reasoning_effort"] = json(reasoning_effort).dump();
+        }
     }
 
     inputs.force_pure_content = opt.force_pure_content;
@@ -1398,14 +1363,8 @@ json oaicompat_chat_params_parse(
     if (!chat_params.parser.empty()) {
         llama_params["chat_parser"] = chat_params.parser;
     }
-    llama_params["strict_eof_on_complete"] = chat_params.strict_eof_on_complete;
 
     llama_params["message_delimiters"] = chat_params.message_delimiters.to_json();
-
-    // cache original messages (after media_marker rewrite) so the slot can build
-    // a hidden self-check turn later without re-parsing the HTTP body
-    llama_params["original_messages"] = messages;
-    llama_params["chat_use_jinja"]    = opt.use_jinja;
 
     // Reasoning budget: pass parameters through to sampling layer
     {

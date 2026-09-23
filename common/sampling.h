@@ -53,17 +53,7 @@ struct common_sampler * common_sampler_init(
         const struct llama_model * model,
         struct common_params_sampling & params);
 
-// Update reasoning markers after applying a chat template.
-void common_sampler_configure_reasoning(
-        struct common_sampler * gsmpl,
-        const llama_vocab * vocab,
-        const common_params_sampling & params);
-
 void common_sampler_free(struct common_sampler * gsmpl);
-
-void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost);
-
-void common_sampler_set_suppress_eog(struct common_sampler * gsmpl, bool suppress);
 
 // if is_generated is true, the token is accepted by the sampling chain, the reasoning budget sampler, and the grammar sampler
 void                    common_sampler_accept(struct common_sampler * gsmpl, llama_token token, bool is_generated);
@@ -77,8 +67,6 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
 
 // get the underlying llama_sampler_chain
 struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
-
-void common_sampler_set_temp_boost(struct common_sampler * gsmpl, float boost);
 
 // extended sampling implementation:
 //
@@ -128,15 +116,6 @@ uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl);
 
 // force the reasoning budget sampler (if any) to begin forcing its end sequence now.
 bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl);
-
-// returns true if the reasoning budget sampler exists and is currently counting
-// (i.e. the model is inside a reasoning block and has not yet emitted the end sequence)
-bool common_sampler_is_reasoning_active(const struct common_sampler * gsmpl);
-
-// returns true if the reasoning budget sampler exists, has completed (DONE state),
-// and was force-ended (budget exhausted or manual force) rather than ending naturally
-// via an end sequence match
-bool common_sampler_reasoning_was_forced(const struct common_sampler * gsmpl);
 
 // helpers
 

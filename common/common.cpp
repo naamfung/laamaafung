@@ -45,12 +45,6 @@
 #include <string.h>
 #include <fcntl.h>
 #include <io.h>
-#ifndef fileno
-#define fileno _fileno
-#endif
-#ifndef isatty
-#define isatty _isatty
-#endif
 #else
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -255,6 +249,9 @@ static int cpu_count_math_cpus(int n_cpu) {
 
 #endif // __x86_64__ && __linux__
 
+/**
+ * Returns number of CPUs on system that are useful for math.
+ */
 static int32_t common_cpu_get_num_math_raw() {
 #if defined(__x86_64__) && defined(__linux__) && !defined(__ANDROID__)
     int n_cpu = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1599,10 +1596,8 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
-    // ctx_shift now controls only runtime K-shift; initial prompt truncation
-    // is handled by prompt_truncate (independently or implied by ctx_shift).
     if (params.ctx_shift && !llama_memory_can_shift(llama_get_memory(lctx))) {
-        COM_WRN("%s", "KV cache shifting is not supported for this context, disabling runtime context shift (initial prompt truncation is unaffected)\n");
+        COM_WRN("%s", "KV cache shifting is not supported for this context, disabling KV cache shifting\n");
         params.ctx_shift = false;
     }
 
@@ -1711,20 +1706,6 @@ std::string common_get_model_endpoint() {
         endpoint += '/';
     }
     return endpoint;
-}
-
-char * common_get_model_or_exit(int argc, char * argv[]) {
-    if (argc > 1) {
-        return argv[1];
-    }
-
-    char * path = getenv("LLAMACPP_TEST_MODELFILE");
-    if (!path || strlen(path) == 0) {
-        fprintf(stderr, "\033[33mWARNING: No model file provided. Skipping this test. Set LLAMACPP_TEST_MODELFILE=<gguf_model_path> to silence this warning and run this test.\n\033[0m");
-        exit(EXIT_SUCCESS);
-    }
-
-    return path;
 }
 
 char * common_get_model_or_exit(int argc, char * argv[]) {
@@ -2498,7 +2479,6 @@ void common_prompt_checkpoint::clear() {
 
     pos_min = 0;
     pos_max = 0;
-    pos_end = 0;
 
     data_tgt.clear();
     data_dft.clear();
@@ -2508,12 +2488,10 @@ void common_prompt_checkpoint::clear() {
 void common_prompt_checkpoint::update_pos(
         int64_t n_tokens,
         llama_pos pos_min,
-        llama_pos pos_max,
-        llama_pos pos_end) {
+        llama_pos pos_max) {
     this->n_tokens = n_tokens;
     this->pos_min  = pos_min;
     this->pos_max  = pos_max;
-    this->pos_end  = pos_end;
 }
 
 common_prompt_checkpoint_result common_prompt_checkpoint::update_tgt(

@@ -48,7 +48,6 @@ struct token_matcher {
 
     void reset() { state = 0; }
 };
-
 struct common_reasoning_budget_ctx {
     const llama_vocab * vocab;
 
@@ -237,6 +236,8 @@ static struct llama_sampler_i common_reasoning_budget_i = {
     /* .backend_accept    = */ nullptr,
     /* .backend_apply     = */ nullptr,
     /* .backend_set_input = */ nullptr,
+    /* .backend_reset     = */ nullptr,
+    /* .copy_state        = */ nullptr,
 };
 
 static struct llama_sampler * common_reasoning_budget_clone(const struct llama_sampler * smpl) {
@@ -312,6 +313,31 @@ bool common_reasoning_budget_was_forced(const struct llama_sampler * smpl) {
         return false;
     }
     return ((const common_reasoning_budget_ctx *) smpl->ctx)->was_forced;
+}
+
+bool common_reasoning_budget_force_end(struct llama_sampler * smpl) {
+    if (!smpl) {
+        return false;
+    }
+
+    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
+    if (ctx->forced_tokens.empty()) {
+        return false;
+    }
+
+    ctx->state = REASONING_BUDGET_FORCING;
+    ctx->force_pos = 0;
+    ctx->end_matcher.reset();
+    return true;
+}
+
+size_t common_reasoning_budget_forced_token_count(const struct llama_sampler * smpl) {
+    if (!smpl) {
+        return 0;
+    }
+
+    const auto * ctx = (const common_reasoning_budget_ctx *) smpl->ctx;
+    return ctx->forced_tokens.size();
 }
 
 bool common_reasoning_budget_force(struct llama_sampler * smpl) {

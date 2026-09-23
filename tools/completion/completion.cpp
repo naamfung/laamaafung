@@ -160,47 +160,6 @@ int llama_completion(int argc, char ** argv) {
     // start measuring performance timings from here
     llama_perf_context_reset(ctx);
 
-    LOG_INF("%s: llama threadpool init, n_threads = %d\n", __func__, (int) params.cpuparams.n_threads);
-
-    auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
-    if (!cpu_dev) {
-        LOG_ERR("%s: no CPU backend found\n", __func__);
-        return 1;
-    }
-    auto * reg = ggml_backend_dev_backend_reg(cpu_dev);
-    auto * ggml_threadpool_new_fn = (decltype(ggml_threadpool_new) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_new");
-    auto * ggml_threadpool_free_fn = (decltype(ggml_threadpool_free) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_free");
-
-    struct ggml_threadpool_params tpp_batch =
-            ggml_threadpool_params_from_cpu_params(params.cpuparams_batch);
-    struct ggml_threadpool_params tpp =
-            ggml_threadpool_params_from_cpu_params(params.cpuparams);
-
-    if (!set_process_priority(params.cpuparams.priority)) {
-        LOG_ERR("%s: error: failed to set process priority\n", __func__);
-        return 1;
-    }
-
-    struct ggml_threadpool * threadpool_batch = NULL;
-    if (!ggml_threadpool_params_match(&tpp, &tpp_batch)) {
-        threadpool_batch = ggml_threadpool_new_fn(&tpp_batch);
-        if (!threadpool_batch) {
-            LOG_ERR("%s: batch threadpool create failed : n_threads %d\n", __func__, tpp_batch.n_threads);
-            return 1;
-        }
-
-        // start the non-batch threadpool in the paused state
-        tpp.paused = true;
-    }
-
-    struct ggml_threadpool * threadpool = ggml_threadpool_new_fn(&tpp);
-    if (!threadpool) {
-        LOG_ERR("%s: threadpool create failed : n_threads %d\n", __func__, tpp.n_threads);
-        return 1;
-    }
-
-    llama_attach_threadpool(ctx, threadpool, threadpool_batch);
-
     const int n_ctx_train = llama_model_n_ctx_train(model);
     const int n_ctx = llama_n_ctx(ctx);
 
@@ -286,24 +245,6 @@ int llama_completion(int argc, char ** argv) {
         return formatted;
     };
 
-    auto configure_reasoning_sampler = [&](const common_chat_params & chat_params) {
-        if (chat_params.thinking_start_tag.empty() || chat_params.thinking_end_tags.empty()) {
-            return;
-        }
-
-        sparams.generation_prompt       = chat_params.generation_prompt;
-        sparams.reasoning_budget_start  = common_tokenize(vocab, chat_params.thinking_start_tag, false, true);
-        for (const auto & tag : chat_params.thinking_end_tags) {
-            sparams.reasoning_budget_end.push_back(common_tokenize(vocab, tag, false, true));
-        }
-        sparams.reasoning_budget_forced = common_tokenize(vocab, sparams.reasoning_budget_message + chat_params.thinking_end_tags.front(), false, true);
-
-        common_sampler_configure_reasoning(smpl, vocab, sparams);
-    };
-
-    const bool needs_reasoning_sampler = sparams.reasoning_sampling ||
-        sparams.reasoning_budget_tokens >= 0 || sparams.reasoning_control;
-
     std::string prompt;
     {
         if (params.conversation_mode && params.enable_chat_template) {
@@ -326,11 +267,7 @@ int llama_completion(int argc, char ** argv) {
                 inputs.add_generation_prompt = !params.prompt.empty();
                 inputs.force_pure_content = params.force_pure_content_parser;
 
-                auto chat_params = common_chat_templates_apply(chat_templates.get(), inputs);
-                prompt = chat_params.prompt;
-                if (needs_reasoning_sampler) {
-                    configure_reasoning_sampler(chat_params);
-                }
+                prompt = common_chat_templates_apply(chat_templates.get(), inputs).prompt;
             }
         } else {
             // otherwise use the prompt as is
@@ -931,14 +868,6 @@ int llama_completion(int argc, char ** argv) {
                     std::string user_inp = format_chat
                         ? chat_add_and_format("user", std::move(buffer))
                         : std::move(buffer);
-                    if (format_chat && needs_reasoning_sampler) {
-                        common_chat_templates_inputs inputs;
-                        inputs.use_jinja             = params.use_jinja;
-                        inputs.messages              = chat_msgs;
-                        inputs.add_generation_prompt = true;
-                        inputs.force_pure_content    = params.force_pure_content_parser;
-                        configure_reasoning_sampler(common_chat_templates_apply(chat_templates.get(), inputs));
-                    }
                     // TODO: one inconvenient of current chat template implementation is that we can't distinguish between user input and special tokens (prefix/postfix)
                     const auto line_pfx = common_tokenize(ctx, params.input_prefix, false, true);
                     const auto line_inp = common_tokenize(ctx, user_inp,            false, format_chat);
@@ -1022,9 +951,6 @@ int llama_completion(int argc, char ** argv) {
     common_perf_print(ctx, smpl);
 
     llama_backend_free();
-
-    ggml_threadpool_free_fn(threadpool);
-    ggml_threadpool_free_fn(threadpool_batch);
 
     return 0;
 }

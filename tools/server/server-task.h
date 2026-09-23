@@ -5,7 +5,7 @@
 #include "server-loop-guard.h"
 
 #include <string>
-#include <limits>
+#include <functional>
 #include <unordered_set>
 #include <list>
 #include <map>
@@ -183,12 +183,6 @@ struct task_params {
     // KVMem retrieval query span.
     common_chat_msg_delimiters message_delimiters;
 
-    // original chat messages (JSON, after media_marker rewrite) + jinja flag,
-    // used by the slot to construct a hidden self-check turn when early-stop
-    // monitoring is triggered. Empty for non-chat endpoints.
-    json original_messages;
-    bool chat_use_jinja = false;
-
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
 
@@ -206,10 +200,6 @@ struct task_result_state {
     std::vector<std::string> generated_tool_call_ids;
     std::unordered_set<size_t> sent_tool_call_names;
 
-    // last partial tool-call count that we skipped due to regression, to log
-    // the regression only once per distinct count instead of on every token
-    size_t last_regressed_tool_calls = std::numeric_limits<size_t>::max();
-
     // for OpenAI Responses and Anthropic streaming API:
     // track output item / content block state across chunks
     bool thinking_block_started = false;
@@ -221,8 +211,6 @@ struct task_result_state {
     const std::string oai_resp_reasoning_id;
     const std::string oai_resp_message_id;
     std::string oai_resp_fc_id; // function call ID for current args delta
-
-    uint64_t oai_seq_num = 0;
 
     task_result_state(const common_chat_parser_params & chat_parser_params);
 
@@ -461,7 +449,6 @@ struct server_task_result_cmpl_final : server_task_result {
     std::string oai_resp_id;
     std::string oai_resp_reasoning_id;
     std::string oai_resp_message_id;
-    uint64_t * oai_seq_num_ptr = nullptr;
 
     virtual bool is_stop() override {
         return true; // in stream mode, final responses are considered stop
@@ -476,7 +463,6 @@ struct server_task_result_cmpl_final : server_task_result {
         oai_resp_id = state.oai_resp_id;
         oai_resp_reasoning_id = state.oai_resp_reasoning_id;
         oai_resp_message_id = state.oai_resp_message_id;
-        oai_seq_num_ptr = &state.oai_seq_num;
     }
 
     json to_json_non_oaicompat();
@@ -534,7 +520,6 @@ struct server_task_result_cmpl_partial : server_task_result {
     std::string oai_resp_reasoning_id;
     std::string oai_resp_message_id;
     std::string oai_resp_fc_id;
-    uint64_t * oai_seq_num_ptr = nullptr;
 
     // for Anthropic API: track if any reasoning content has been generated
     bool anthropic_has_reasoning = false;
@@ -677,54 +662,20 @@ struct server_prompt {
 
     std::list<common_prompt_checkpoint> checkpoints;
 
-    // second-chance score for cache eviction, 1 = fresh/decayed, higher = more retained
-    uint8_t score = 1;
-
     void clear() {
         tokens.clear();
         checkpoints.clear();
-        score = 1;
     }
 
     int n_tokens() const {
         return tokens.size();
     }
 
-    size_t size() const {
-        size_t res = 0;
-
-        for (const auto & ckpt : checkpoints) {
-            res += ckpt.size();
-        }
-
-        return res;
-    }
-
     server_prompt clone() const {
         return server_prompt {
             tokens.clone(),
             checkpoints,
-            score,
         };
-    }
-};
-
-// KV cache state data paired with its logical prompt
-struct server_prompt_data {
-    std::vector<uint8_t> main;
-    std::vector<uint8_t> drft;
-
-    size_t size() const {
-        return main.size() + drft.size();
-    }
-};
-
-struct server_prompt_cache_state {
-    server_prompt prompt;
-    server_prompt_data data;
-
-    size_t size() const {
-        return data.size() + prompt.size();
     }
 };
 
@@ -912,9 +863,28 @@ struct server_prompt_cache {
 
     size_t n_tokens() const;
 
-    server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft);
+    server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
 
-    bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
+    server_prompt_cache_state * insert(const server_prompt & prompt, server_prompt_data && data);
+
+    bool erase(const server_prompt_cache_state * entry);
+
+    bool load(
+            server_prompt & prompt,
+            const server_tokens & tokens_new,
+            size_t live_native_restorable_tokens,
+            int32_t reuse_alignment,
+            const server_prompt_cache_state_io & io);
+
+    bool load(
+            server_prompt & prompt,
+            const server_tokens & tokens_new,
+            llama_context * ctx_tgt,
+            llama_context * ctx_dft,
+            common_speculative * spec,
+            int32_t id_slot,
+            size_t live_native_restorable_tokens,
+            int32_t reuse_alignment);
 
     void update();
 

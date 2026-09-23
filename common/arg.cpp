@@ -12,6 +12,28 @@
 #include "speculative.h"
 #include "preset.h"
 
+// Write / remove a process environment variable on behalf of an option. Used for the
+// ggml-level knobs that are otherwise readable only through the environment.
+static void arg_setenv(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+static void arg_unsetenv(const char * name) {
+#ifdef _WIN32
+    // An empty value removes the variable from the CRT's environment, which is what
+    // getenv() reads.
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+
+
 // fix problem with std::min and std::max
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -27,7 +49,6 @@
 #include <climits>
 #include <cmath>
 #include <cstdarg>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <list>
@@ -73,26 +94,6 @@ static std::string read_file(const std::string & fname) {
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
     return content;
-}
-
-// Write / remove a process environment variable on behalf of an option. Used for the
-// ggml-level knobs that are otherwise readable only through the environment.
-static void arg_setenv(const char * name, const char * value) {
-#ifdef _WIN32
-    _putenv_s(name, value);
-#else
-    setenv(name, value, 1);
-#endif
-}
-
-static void arg_unsetenv(const char * name) {
-#ifdef _WIN32
-    // An empty value removes the variable from the CRT's environment, which is what
-    // getenv() reads.
-    _putenv_s(name, "");
-#else
-    unsetenv(name);
-#endif
 }
 
 static const std::vector<common_arg> & get_common_arg_defs() {
@@ -369,12 +370,6 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
-    GGML_TYPE_TURBO2_0,
-    GGML_TYPE_TURBO3_0,
-    GGML_TYPE_TURBO4_0,
-    GGML_TYPE_TURBO3_TCQ,
-    GGML_TYPE_TURBO2_TCQ,
-    GGML_TYPE_TURBO1_5,
     GGML_TYPE_Q6_0,
     GGML_TYPE_Q6_1,
     GGML_TYPE_Q3_0,
@@ -685,14 +680,6 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
         task.opts       = opts;
         tasks.push_back(task);
     }
-    if (!params.vocoder.model.url.empty()) {
-        common_download_task task;
-        task.url        = params.vocoder.model.url;
-        task.local_path = params.vocoder.model.path;
-        task.opts       = opts;
-        tasks.push_back(task);
-    }
-
     bool had_spec_url = false;
     if (!params.speculative.draft.mparams.url.empty()) {
         common_download_task task;
@@ -749,10 +736,6 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
         }
     }
 
-    // when a sidecar type is requested, the draft repo resolves to its sidecar instead of a full model
-    const bool spec_sidecar_found = !plan_spec.mtp.local_path.empty() ||
-                                    !plan_spec.dflash.local_path.empty() ||
-                                    !plan_spec.eagle3.local_path.empty();
     // infer the speculative type from the draft GGUF metadata when none is requested
     // note: reads only the first split - sharded drafts need an explicit --spec-type
     if (spec_types_is_default(params) && !params.speculative.draft.mparams.path.empty()) {
@@ -817,11 +800,6 @@ void common_models_handler_apply(common_models_handler & handler, common_params 
     if (!plan_spec.model_files.empty() && !had_spec_url && !spec_sidecar_found) {
         add_tasks(plan_spec.model_files, plan_spec.primary, params.speculative.draft.mparams);
         had_spec_url = true;
-    }
-
-    // handle vocoder plan (e.g. --hf-repo-v)
-    if (!plan_voc.model_files.empty()) {
-        add_tasks(plan_voc.model_files, plan_voc.primary, params.vocoder.model);
     }
 
     if (!plan.model_files.empty()) {
@@ -1834,16 +1812,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP}));
     add_opt(common_arg(
         {"-t", "--threads"}, "N",
-        "number of CPU threads to use during generation (default: -1, use -1 or 0 to use math cores)",
+        string_format("number of CPU threads to use during generation (default: %d)", params.cpuparams.n_threads),
         [](common_params & params, int value) {
-            params.cpuparams.n_threads = value <= 0 ? -1 : value;
+            params.cpuparams.n_threads = value;
+            if (params.cpuparams.n_threads <= 0) {
+                params.cpuparams.n_threads = std::thread::hardware_concurrency();
+            }
         }
     ).set_env("LLAMA_ARG_THREADS"));
     add_opt(common_arg(
         {"-tb", "--threads-batch"}, "N",
         "number of threads to use during batch and prompt processing (default: same as --threads)",
         [](common_params & params, int value) {
-            params.cpuparams_batch.n_threads = value <= 0 ? -1 : value;
+            params.cpuparams_batch.n_threads = value;
+            if (params.cpuparams_batch.n_threads <= 0) {
+                params.cpuparams_batch.n_threads = std::thread::hardware_concurrency();
+            }
         }
     ));
     add_opt(common_arg(
@@ -1980,24 +1964,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_N_PREDICT"));
     add_opt(common_arg(
         {"-b", "--batch-size"}, "N",
-        string_format("logical maximum batch size (default: %d, -1 or 'auto' for auto-tune)", params.n_batch),
-        [](common_params & params, const std::string & value_str) {
-            if (value_str == "auto" || value_str == "-1") {
-                params.n_batch = -1;
-            } else {
-                params.n_batch = std::stoi(value_str);
-            }
+        string_format("logical maximum batch size (default: %d)", params.n_batch),
+        [](common_params & params, int value) {
+            params.n_batch = value;
         }
     ).set_env("LLAMA_ARG_BATCH"));
     add_opt(common_arg(
         {"-ub", "--ubatch-size"}, "N",
-        string_format("physical maximum batch size (default: %d, -1 or 'auto' for auto-tune)", params.n_ubatch),
-        [](common_params & params, const std::string & value_str) {
-            if (value_str == "auto" || value_str == "-1") {
-                params.n_ubatch = -1;
-            } else {
-                params.n_ubatch = std::stoi(value_str);
-            }
+        string_format("physical maximum batch size (default: %d)", params.n_ubatch),
+        [](common_params & params, int value) {
+            params.n_ubatch = value;
         }
     ).set_env("LLAMA_ARG_UBATCH"));
     add_opt(common_arg(
@@ -2063,19 +2039,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         string_format("whether to use context shift on infinite text generation (default: %s)", params.ctx_shift ? "enabled" : "disabled"),
         [](common_params & params, bool value) {
             params.ctx_shift = value;
-            if (value) {
-                params.prompt_truncate = true;
-            }
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LLAMA_ARG_CONTEXT_SHIFT"));
-    add_opt(common_arg(
-        {"--prompt-truncate"},
-        {"--no-prompt-truncate"},
-        string_format("whether to truncate initial prompt to fit context, keeping head + tail (default: %s). Implied by --context-shift", params.prompt_truncate ? "enabled" : "disabled"),
-        [](common_params & params, bool value) {
-            params.prompt_truncate = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PROMPT_TRUNCATE"));
     add_opt(common_arg(
         {"--chunks"}, "N",
         string_format("max number of chunks to process (default: %d, -1 = all)", params.n_chunks),
@@ -2098,47 +2063,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                                    string_format("error: unknown value for --flash-attn: '%s'\n", value.c_str()));
                            }
                        }).set_env("LLAMA_ARG_FLASH_ATTN"));
-
-    // Some ggml-level knobs are readable only through the environment. Exposing them as
-    // options lets them be set on the command line where the environment cannot be set
-    // (restricted shells, service units, preset files). ggml reads these with getenv()
-    // while creating the backend / scheduler, i.e. after option parsing, so writing the
-    // variable here is early enough.
-    //
-    // These two deliberately have no .set_env(): they exist precisely so that an
-    // environment variable is not required, and a second environment alias next to the
-    // ggml one would only confuse.
-    add_opt(common_arg(
-        {"--cuda-register-host"},
-        "pin the GPU backend's host buffers (cudaHostRegister) so transfers can skip a "
-        "staging copy; the command-line form of GGML_CUDA_REGISTER_HOST, and it also "
-        "covers the MUSA/HIP backends. Registration is best-effort and is silently "
-        "skipped when it fails",
-        [](common_params &) {
-            arg_setenv("GGML_CUDA_REGISTER_HOST", "1");
-        }
-    ));
-    add_opt(common_arg(
-        {"--sched-prefetch-experts"}, "N",
-        "prefetch offloaded MoE expert weights ahead of compute; the command-line form of "
-        "GGML_SCHED_PREFETCH_EXPERTS. N=1 uses the default slot count (3, one MoE layer's "
-        "gate/up/down tensors), a larger N sets it directly, and N=0 turns it off. More "
-        "slots let uploads run further ahead of compute at the cost of one max-sized "
-        "expert tensor of device memory per slot",
-        [](common_params &, const std::string & value) {
-            // ggml reads this with atoi(), which would turn anything non-numeric into 0
-            // (silently off); reject it here instead.
-            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) {
-                throw std::runtime_error(string_format(
-                    "error: invalid --sched-prefetch-experts: '%s' (want >= 0)\n", value.c_str()));
-            }
-            if (value == "0") {
-                arg_unsetenv("GGML_SCHED_PREFETCH_EXPERTS");
-            } else {
-                arg_setenv("GGML_SCHED_PREFETCH_EXPERTS", value.c_str());
-            }
-        }
-    ));
     add_opt(common_arg(
         {"-p", "--prompt"}, "PROMPT",
         "prompt to start generation with; for system message, use -sys",
@@ -2418,217 +2342,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sampling());
     add_opt(common_arg(
-        {"--reasoning-temp"}, "N",
-        "temperature override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_temp = std::max(std::stof(value), 0.0f);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TEMP;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-top-k"}, "N",
-        "top-k override while inside the reasoning block (default: inherit)",
-        [](common_params & params, int value) {
-            params.sampling.reasoning_top_k = value;
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TOP_K;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-top-p"}, "N",
-        "top-p override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_top_p = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TOP_P;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-min-p"}, "N",
-        "min-p override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_min_p = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIN_P;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-top-n-sigma"}, "N",
-        "top-n-sigma override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_top_n_sigma = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TOP_N_SIGMA;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-xtc-probability"}, "N",
-        "XTC probability override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_xtc_probability = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_XTC_PROBABILITY;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-xtc-threshold"}, "N",
-        "XTC threshold override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_xtc_threshold = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_XTC_THRESHOLD;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-typical-p"}, "N",
-        "locally typical sampling override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_typ_p = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TYPICAL_P;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-dynatemp-range"}, "N",
-        "dynamic temperature range override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_dynatemp_range = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_RANGE;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-dynatemp-exp", "--reasoning-dynatemp-exponent"}, "N",
-        "dynamic temperature exponent override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_dynatemp_exponent = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_EXPONENT;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-repeat-last-n"}, "N",
-        "repeat history override while inside the reasoning block (default: inherit)",
-        [](common_params & params, int value) {
-            if (value < -1) {
-                throw std::runtime_error(string_format("error: invalid reasoning-repeat-last-n = %d\n", value));
-            }
-            params.sampling.reasoning_penalty_last_n = value;
-            params.sampling.n_prev = std::max(params.sampling.n_prev, value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_LAST_N;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-repeat-penalty"}, "N",
-        "repeat-penalty override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_penalty_repeat = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_REPEAT;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-presence-penalty"}, "N",
-        "presence penalty override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_penalty_present = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_PRESENT;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-frequency-penalty"}, "N",
-        "frequency penalty override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_penalty_freq = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_FREQ;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-dry-multiplier"}, "N",
-        "DRY multiplier override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_dry_multiplier = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_MULTIPLIER;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-dry-base"}, "N",
-        "DRY base override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            const float base = std::stof(value);
-            if (base < 1.0f) {
-                return;
-            }
-            params.sampling.reasoning_dry_base = base;
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_BASE;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-dry-allowed-length"}, "N",
-        "DRY allowed length override while inside the reasoning block (default: inherit)",
-        [](common_params & params, int value) {
-            params.sampling.reasoning_dry_allowed_length = value;
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_ALLOWED_LEN;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-dry-penalty-last-n"}, "N",
-        "DRY history override while inside the reasoning block (default: inherit)",
-        [](common_params & params, int value) {
-            if (value < -1) {
-                throw std::runtime_error(string_format("error: invalid reasoning-dry-penalty-last-n = %d\n", value));
-            }
-            params.sampling.reasoning_dry_penalty_last_n = value;
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_PENALTY_LAST_N;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-mirostat"}, "N",
-        "Mirostat mode override while inside the reasoning block (default: inherit)",
-        [](common_params & params, int value) {
-            params.sampling.reasoning_mirostat = value;
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-mirostat-ent", "--reasoning-mirostat-tau"}, "N",
-        "Mirostat target entropy override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_mirostat_tau = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_TAU;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-mirostat-lr", "--reasoning-mirostat-eta"}, "N",
-        "Mirostat learning rate override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_mirostat_eta = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-adaptive-target"}, "N",
-        "adaptive sampling target override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_adaptive_target = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_TARGET;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-adaptive-decay"}, "N",
-        "adaptive sampling decay override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_adaptive_decay = std::stof(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_DECAY;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-min-keep"}, "N",
-        "minimum candidate count override while inside the reasoning block (default: inherit)",
-        [](common_params & params, int value) {
-            params.sampling.reasoning_min_keep = value;
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIN_KEEP;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--reasoning-seed"}, "SEED",
-        "RNG seed override while inside the reasoning block (default: inherit)",
-        [](common_params & params, const std::string & value) {
-            params.sampling.reasoning_seed = std::stoul(value);
-            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_SEED;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
         {"--top-nsigma", "--top-n-sigma"}, "N",
         string_format("top-n-sigma sampling (default: %.2f, -1.0 = disabled)", params.sampling.top_n_sigma),
         [](common_params & params, const std::string & value) {
@@ -2739,131 +2452,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::runtime_error(string_format("error: invalid dry-penalty-last-n = %d\n", value));
             }
             params.sampling.dry_penalty_last_n = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--repeat-line-window"}, "N",
-        string_format("set repeat-line loop detection window (default: %d, 0 = disabled)", params.sampling.repeat_line_window),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::runtime_error(string_format("error: invalid repeat-line-window = %d\n", value));
-            }
-            params.sampling.repeat_line_window = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--repeat-line-min-length"}, "N",
-        string_format("set minimum segment length for repeat-line detection (default: %d)", params.sampling.repeat_line_min_length),
-        [](common_params & params, int value) {
-            if (value < 1) {
-                throw std::runtime_error(string_format("error: invalid repeat-line-min-length = %d\n", value));
-            }
-            params.sampling.repeat_line_min_length = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--repeat-line-delimiters"}, "STRING",
-        string_format("set delimiter characters for repeat-line segments (default: \"%s\")", params.sampling.repeat_line_delimiters.c_str()),
-        [](common_params & params, const std::string & value) {
-            params.sampling.repeat_line_delimiters = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--repeat-line-temp-boost"}, "N",
-        string_format("set temperature boost for repeat-line loop detection (default: %.2f)", (double)params.sampling.repeat_line_temp_boost),
-        [](common_params & params, const std::string & value) {
-            params.sampling.repeat_line_temp_boost = std::stof(value);
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--cycle-detect-last-n"}, "N",
-        string_format("set number of recent tokens to check for cyclic patterns (default: %d, 0 = disabled)", params.sampling.cycle_detect_last_n),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::runtime_error(string_format("error: invalid cycle-detect-last-n = %d\n", value));
-            }
-            params.sampling.cycle_detect_last_n = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--cycle-detect-min-period"}, "N",
-        string_format("set minimum period length to detect (default: %d)", params.sampling.cycle_detect_min_period),
-        [](common_params & params, int value) {
-            if (value < 1) {
-                throw std::runtime_error(string_format("error: invalid cycle-detect-min-period = %d\n", value));
-            }
-            params.sampling.cycle_detect_min_period = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--cycle-detect-max-period"}, "N",
-        string_format("set maximum period length to detect (default: %d)", params.sampling.cycle_detect_max_period),
-        [](common_params & params, int value) {
-            if (value < 1) {
-                throw std::runtime_error(string_format("error: invalid cycle-detect-max-period = %d\n", value));
-            }
-            params.sampling.cycle_detect_max_period = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--cycle-detect-action"}, "TYPE",
-        string_format("set action when cyclic pattern is detected (default: \"boost\", options: boost, penalty)", "boost"),
-        [](common_params & params, const std::string & value) {
-            if (value == "boost") {
-                params.sampling.cycle_detect_action = 0;
-            } else if (value == "penalty") {
-                params.sampling.cycle_detect_action = 1;
-            } else {
-                throw std::runtime_error(string_format("error: invalid cycle-detect-action = %s (expected: boost or penalty)\n", value.c_str()));
-            }
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--cycle-boost-factor"}, "F",
-        string_format("set temperature boost factor when cyclic pattern is detected (default: %.2f)", (double)params.sampling.cycle_boost_factor),
-        [](common_params & params, const std::string & value) {
-            params.sampling.cycle_boost_factor = std::stof(value);
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--cycle-penalty-repeat"}, "F",
-        string_format("set repetition penalty factor when cyclic pattern is detected (default: %.2f)", (double)params.sampling.cycle_penalty_repeat),
-        [](common_params & params, const std::string & value) {
-            params.sampling.cycle_penalty_repeat = std::stof(value);
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--runaway-threshold"}, "N",
-        string_format("set consecutive identical token count to trigger runaway temp boost (default: %d, 0 = disabled)", params.sampling.runaway_threshold),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::runtime_error(string_format("error: invalid runaway-threshold = %d\n", value));
-            }
-            params.sampling.runaway_threshold = value;
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--runaway-boost"}, "N",
-        string_format("set mild temp boost for runaway detection (default: %.2f)", (double)params.sampling.runaway_boost),
-        [](common_params & params, const std::string & value) {
-            params.sampling.runaway_boost = std::stof(value);
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--runaway-boost-strong"}, "N",
-        string_format("set strong temp boost for runaway detection at 2x threshold (default: %.2f)", (double)params.sampling.runaway_boost_strong),
-        [](common_params & params, const std::string & value) {
-            params.sampling.runaway_boost_strong = std::stof(value);
-        }
-    ).set_sampling());
-    add_opt(common_arg(
-        {"--eog-retry-max"}, "N",
-        string_format("max EOG suppression retries when model stops without visible output after thinking (default: %d, 0 = disabled)", params.sampling.eog_retry_max),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::runtime_error(string_format("error: invalid eog-retry-max = %d\n", value));
-            }
-            params.sampling.eog_retry_max = value;
         }
     ).set_sampling());
     add_opt(common_arg(
@@ -3434,7 +3022,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--mlock"},
         "DEPRECATED in favor of `--load-mode`: force system to keep model in RAM rather than swapping or compressing",
         [](common_params & params) {
-            LOG_WRN("DEPRECATED: --mlock is deprecated. use --load-mode mlock (mmap+mlock) or --load-mode mlock-ram (read+mlock, no mmap) instead\n");
+            LOG_WRN("DEPRECATED: --mlock is deprecated. use --load-mode mlock instead\n");
             params.load_mode = LLAMA_LOAD_MODE_MLOCK;
         }
     ).set_env("LLAMA_ARG_MLOCK"));
@@ -3443,9 +3031,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--no-mmap"},
         "DEPRECATED in favor of `--load-mode`: whether to memory-map model. (if mmap disabled, slower load but may reduce pageouts if not using mlock)",
         [](common_params & params, bool value) {
-            LOG_WRN("DEPRECATED: --%s is deprecated. use --load-mode %s instead\n",
-                    value ? "mmap" : "no-mmap",
-                    value ? "mmap" : "none");
             LOG_WRN("DEPRECATED: --mmap and --no-mmap are deprecated. use --load-mode mmap instead\n");
             params.load_mode = value ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
         }
@@ -3455,16 +3040,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"-ndio", "--no-direct-io"},
         "DEPRECATED in favor of `--load-mode`: use DirectIO if available",
         [](common_params & params, bool value) {
-            LOG_WRN("DEPRECATED: --%s is deprecated. use --load-mode %s instead\n",
-                    value ? "direct-io" : "no-direct-io",
-                    value ? "dio" : "none");
             LOG_WRN("DEPRECATED: --direct-io and --no-direct-io are deprecated. use --load-mode dio instead\n");
             params.load_mode = value ? LLAMA_LOAD_MODE_DIRECT_IO : LLAMA_LOAD_MODE_NONE;
         }
     ).set_env("LLAMA_ARG_DIO"));
     add_opt(common_arg(
         {"-lm", "--load-mode"}, "MODE",
-        "model loading mode (default: mmap)\n"
         "model loading mode (default: auto)\n"
         "- auto: mmap, unless a device does not support it\n"
         "- none: no special loading mode\n"
@@ -3474,18 +3055,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "- mlock-ram: read model into RAM + mlock (no mmap); avoids mmap page-fault stalls during inference\n"
         "- dio: use DirectIO if available\n",
         [](common_params & params, const std::string & value) {
-            /**/ if (value == "none")       { params.load_mode = LLAMA_LOAD_MODE_NONE;       }
-            else if (value == "mmap")       { params.load_mode = LLAMA_LOAD_MODE_MMAP;       }
-            else if (value == "mlock")      { params.load_mode = LLAMA_LOAD_MODE_MLOCK;      }
-            else if (value == "mmap+mlock") { params.load_mode = LLAMA_LOAD_MODE_MMAP_MLOCK; }
-            else if (value == "mlock-ram")  { params.load_mode = LLAMA_LOAD_MODE_MLOCK_RAM;  }
-        "- dio: use DirectIO if available\n",
-        [](common_params & params, const std::string & value) {
             /**/ if (value == "auto")       { params.load_mode = LLAMA_LOAD_MODE_AUTO;       }
             else if (value == "none")       { params.load_mode = LLAMA_LOAD_MODE_NONE;       }
             else if (value == "mmap")       { params.load_mode = LLAMA_LOAD_MODE_MMAP;       }
             else if (value == "mlock")      { params.load_mode = LLAMA_LOAD_MODE_MLOCK;      }
             else if (value == "mmap+mlock") { params.load_mode = LLAMA_LOAD_MODE_MMAP_MLOCK; }
+            else if (value == "mlock-ram")  { params.load_mode = LLAMA_LOAD_MODE_MLOCK_RAM;  }
             else if (value == "dio")        { params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO;  }
             else { throw std::invalid_argument("invalid value"); }
         }
@@ -3540,6 +3115,399 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             parse_tensor_buffer_overrides(value, params.tensor_buft_overrides);
         }
     ).set_env("LLAMA_ARG_OVERRIDE_TENSOR"));
+    add_opt(common_arg(
+        {"--cuda-register-host"},
+        "pin the GPU backend's host buffers (cudaHostRegister) so transfers can skip a "
+        "staging copy; the command-line form of GGML_CUDA_REGISTER_HOST, and it also "
+        "covers the MUSA/HIP backends. Registration is best-effort and is silently "
+        "skipped when it fails",
+        [](common_params &) {
+            arg_setenv("GGML_CUDA_REGISTER_HOST", "1");
+        }
+    ));
+    add_opt(common_arg(
+        {"--sched-prefetch-experts"}, "N",
+        "prefetch offloaded MoE expert weights ahead of compute; the command-line form of "
+        "GGML_SCHED_PREFETCH_EXPERTS. N=1 uses the default slot count (3, one MoE layer's "
+        "gate/up/down tensors), a larger N sets it directly, and N=0 turns it off. More "
+        "slots let uploads run further ahead of compute at the cost of one max-sized "
+        "expert tensor of device memory per slot",
+        [](common_params &, const std::string & value) {
+            // ggml reads this with atoi(), which would turn anything non-numeric into 0
+            // (silently off); reject it here instead.
+            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) {
+                throw std::runtime_error(string_format(
+                    "error: invalid --sched-prefetch-experts: '%s' (want >= 0)\n", value.c_str()));
+            }
+            if (value == "0") {
+                arg_unsetenv("GGML_SCHED_PREFETCH_EXPERTS");
+            } else {
+                arg_setenv("GGML_SCHED_PREFETCH_EXPERTS", value.c_str());
+            }
+        }
+    ));
+    add_opt(common_arg(
+        {"--reasoning-temp"}, "N",
+        "temperature override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_temp = std::max(std::stof(value), 0.0f);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TEMP;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-top-k"}, "N",
+        "top-k override while inside the reasoning block (default: inherit)",
+        [](common_params & params, int value) {
+            params.sampling.reasoning_top_k = value;
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TOP_K;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-top-p"}, "N",
+        "top-p override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_top_p = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TOP_P;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-min-p"}, "N",
+        "min-p override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_min_p = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIN_P;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-top-n-sigma"}, "N",
+        "top-n-sigma override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_top_n_sigma = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TOP_N_SIGMA;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-xtc-probability"}, "N",
+        "XTC probability override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_xtc_probability = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_XTC_PROBABILITY;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-xtc-threshold"}, "N",
+        "XTC threshold override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_xtc_threshold = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_XTC_THRESHOLD;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-typical-p"}, "N",
+        "locally typical sampling override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_typ_p = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_TYPICAL_P;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-dynatemp-range"}, "N",
+        "dynamic temperature range override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_dynatemp_range = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_RANGE;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-dynatemp-exp", "--reasoning-dynatemp-exponent"}, "N",
+        "dynamic temperature exponent override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_dynatemp_exponent = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DYNATEMP_EXPONENT;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-repeat-last-n"}, "N",
+        "repeat history override while inside the reasoning block (default: inherit)",
+        [](common_params & params, int value) {
+            if (value < -1) {
+                throw std::runtime_error(string_format("error: invalid reasoning-repeat-last-n = %d\n", value));
+            }
+            params.sampling.reasoning_penalty_last_n = value;
+            params.sampling.n_prev = std::max(params.sampling.n_prev, value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_LAST_N;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-repeat-penalty"}, "N",
+        "repeat-penalty override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_penalty_repeat = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_REPEAT;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-presence-penalty"}, "N",
+        "presence penalty override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_penalty_present = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_PRESENT;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-frequency-penalty"}, "N",
+        "frequency penalty override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_penalty_freq = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_PENALTY_FREQ;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-dry-multiplier"}, "N",
+        "DRY multiplier override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_dry_multiplier = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_MULTIPLIER;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-dry-base"}, "N",
+        "DRY base override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            const float base = std::stof(value);
+            if (base < 1.0f) {
+                return;
+            }
+            params.sampling.reasoning_dry_base = base;
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_BASE;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-dry-allowed-length"}, "N",
+        "DRY allowed length override while inside the reasoning block (default: inherit)",
+        [](common_params & params, int value) {
+            params.sampling.reasoning_dry_allowed_length = value;
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_ALLOWED_LEN;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-dry-penalty-last-n"}, "N",
+        "DRY history override while inside the reasoning block (default: inherit)",
+        [](common_params & params, int value) {
+            if (value < -1) {
+                throw std::runtime_error(string_format("error: invalid reasoning-dry-penalty-last-n = %d\n", value));
+            }
+            params.sampling.reasoning_dry_penalty_last_n = value;
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_DRY_PENALTY_LAST_N;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-mirostat"}, "N",
+        "Mirostat mode override while inside the reasoning block (default: inherit)",
+        [](common_params & params, int value) {
+            params.sampling.reasoning_mirostat = value;
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-mirostat-ent", "--reasoning-mirostat-tau"}, "N",
+        "Mirostat target entropy override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_mirostat_tau = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_TAU;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-mirostat-lr", "--reasoning-mirostat-eta"}, "N",
+        "Mirostat learning rate override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_mirostat_eta = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-adaptive-target"}, "N",
+        "adaptive sampling target override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_adaptive_target = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_TARGET;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-adaptive-decay"}, "N",
+        "adaptive sampling decay override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_adaptive_decay = std::stof(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_ADAPTIVE_DECAY;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-min-keep"}, "N",
+        "minimum candidate count override while inside the reasoning block (default: inherit)",
+        [](common_params & params, int value) {
+            params.sampling.reasoning_min_keep = value;
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_MIN_KEEP;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-seed"}, "SEED",
+        "RNG seed override while inside the reasoning block (default: inherit)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_seed = std::stoul(value);
+            params.sampling.reasoning_sampling |= COMMON_PARAMS_SAMPLING_CONFIG_SEED;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-window"}, "N",
+        string_format("set repeat-line loop detection window (default: %d, 0 = disabled)", params.sampling.repeat_line_window),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid repeat-line-window = %d\n", value));
+            }
+            params.sampling.repeat_line_window = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-min-length"}, "N",
+        string_format("set minimum segment length for repeat-line detection (default: %d)", params.sampling.repeat_line_min_length),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::runtime_error(string_format("error: invalid repeat-line-min-length = %d\n", value));
+            }
+            params.sampling.repeat_line_min_length = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-delimiters"}, "STRING",
+        string_format("set delimiter characters for repeat-line segments (default: \"%s\")", params.sampling.repeat_line_delimiters.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.sampling.repeat_line_delimiters = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--repeat-line-temp-boost"}, "N",
+        string_format("set temperature boost for repeat-line loop detection (default: %.2f)", (double)params.sampling.repeat_line_temp_boost),
+        [](common_params & params, const std::string & value) {
+            params.sampling.repeat_line_temp_boost = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-last-n"}, "N",
+        string_format("set number of recent tokens to check for cyclic patterns (default: %d, 0 = disabled)", params.sampling.cycle_detect_last_n),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-last-n = %d\n", value));
+            }
+            params.sampling.cycle_detect_last_n = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-min-period"}, "N",
+        string_format("set minimum period length to detect (default: %d)", params.sampling.cycle_detect_min_period),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-min-period = %d\n", value));
+            }
+            params.sampling.cycle_detect_min_period = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-max-period"}, "N",
+        string_format("set maximum period length to detect (default: %d)", params.sampling.cycle_detect_max_period),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-max-period = %d\n", value));
+            }
+            params.sampling.cycle_detect_max_period = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--cycle-detect-action"}, "TYPE",
+        string_format("set action when cyclic pattern is detected (default: \"boost\", options: boost, penalty)", "boost"),
+        [](common_params & params, const std::string & value) {
+            if (value == "boost") {
+                params.sampling.cycle_detect_action = 0;
+            } else if (value == "penalty") {
+                params.sampling.cycle_detect_action = 1;
+            } else {
+                throw std::runtime_error(string_format("error: invalid cycle-detect-action = %s (expected: boost or penalty)\n", value.c_str()));
+            }
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--runaway-threshold"}, "N",
+        string_format("set consecutive identical token count to trigger runaway temp boost (default: %d, 0 = disabled)", params.sampling.runaway_threshold),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid runaway-threshold = %d\n", value));
+            }
+            params.sampling.runaway_threshold = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--runaway-boost"}, "N",
+        string_format("set mild temp boost for runaway detection (default: %.2f)", (double)params.sampling.runaway_boost),
+        [](common_params & params, const std::string & value) {
+            params.sampling.runaway_boost = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--runaway-boost-strong"}, "N",
+        string_format("set strong temp boost for runaway detection at 2x threshold (default: %.2f)", (double)params.sampling.runaway_boost_strong),
+        [](common_params & params, const std::string & value) {
+            params.sampling.runaway_boost_strong = std::stof(value);
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--eog-retry-max"}, "N",
+        string_format("max EOG suppression retries when model stops without visible output after thinking (default: %d, 0 = disabled)", params.sampling.eog_retry_max),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error(string_format("error: invalid eog-retry-max = %d\n", value));
+            }
+            params.sampling.eog_retry_max = value;
+        }
+    ).set_sampling());
+    add_opt(common_arg(
+        {"--reasoning-format"}, "FORMAT",
+        "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of:\n"
+        "- none: leaves thoughts unparsed in `message.content`\n"
+        "- deepseek: puts thoughts in `message.reasoning_content`\n"
+        "- deepseek-legacy: keeps `<think>` tags in `message.content` while also populating `message.reasoning_content`\n"
+        "(default: auto)",
+        [](common_params & params, const std::string & value) {
+            params.reasoning_format = common_reasoning_format_from_name(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK"));
+    add_opt(common_arg(
+        {"--reasoning-budget"}, "N",
+        "token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1)",
+        [](common_params & params, int value) {
+            if (value < -1) { throw std::invalid_argument("invalid value"); }
+            params.sampling.reasoning_budget_tokens = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET"));
+    add_opt(common_arg(
+        {"--reasoning-budget-message"}, "MESSAGE",
+        "message injected before the end-of-thinking tag when reasoning budget is exhausted (default: none)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_budget_message = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET_MESSAGE"));
+    add_opt(common_arg(
+        {"--reasoning-preserve"},
+        {"--no-reasoning-preserve"},
+        "preserve reasoning trace in the full history, not just the last assistant message (default: template default)\n"
+        "compatible with certain templates having 'supports_preserve_reasoning' capability\n"
+        "example: https://docs.z.ai/guides/capabilities/thinking-mode#preserved-thinking",
+        [](common_params & params, bool value) {
+            if (value) {
+                params.default_template_kwargs["preserve_reasoning"] = "true";
+            } else {
+                params.default_template_kwargs["preserve_reasoning"] = "false";
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_PRESERVE"));
     add_opt(common_arg(
         {"--kvmem"}, "enable the KVMem tiered/sparse KV memory (needs a LLAMA_KVMEM build)",
         [](common_params & params) {
@@ -3937,26 +3905,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_HF_FILE"));
     add_opt(common_arg(
-        {"-hfv", "-hfrv", "--hf-repo-v"}, "<user>/<model>[:quant]",
-        "Hugging Face model repository for the vocoder model (default: unused)",
-        [](common_params & params, const std::string & value) {
-            params.vocoder.model.hf_repo = value;
-        }
-    ).set_env("LLAMA_ARG_HF_REPO_V"));
-    add_opt(common_arg(
-        {"-hffv", "--hf-file-v"}, "FILE",
-        "Hugging Face model file for the vocoder model (default: unused)",
-        [](common_params & params, const std::string & value) {
-            params.vocoder.model.hf_file = value;
-        }
-    ).set_env("LLAMA_ARG_HF_FILE_V"));
-    add_opt(common_arg(
         {"-hft", "--hf-token"}, "TOKEN",
         "Hugging Face access token (default: value from HF_TOKEN environment variable)",
         [](common_params & params, const std::string & value) {
             params.hf_token = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("HF_TOKEN"));
     ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("HF_TOKEN").set_sensitive());
     add_opt(common_arg(
         {"--mtp"},
@@ -4302,7 +4255,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--tools"}, "TOOL1,TOOL2,...",
         "experimental: whether to enable built-in tools for AI agents - do not enable in untrusted environments (default: no tools)\n"
         "specify \"all\" to enable all tools\n"
-        "available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, apply_diff, get_datetime\n"
         "available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, get_info\n"
         "note: for security reasons, this will limit --cors-origins to localhost by default",
         [](common_params & params, const std::string & value) {
@@ -4919,14 +4871,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--spec-draft-threads", "-td", "--threads-draft"}, "N",
         "number of threads to use during generation (default: same as --threads)",
         [](common_params & params, int value) {
-            params.speculative.draft.cpuparams.n_threads = value <= 0 ? -1 : value;
+            params.speculative.draft.cpuparams.n_threads = value;
+            if (params.speculative.draft.cpuparams.n_threads <= 0) {
+                params.speculative.draft.cpuparams.n_threads = std::thread::hardware_concurrency();
+            }
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"--spec-draft-threads-batch", "-tbd", "--threads-batch-draft"}, "N",
         "number of threads to use during batch and prompt processing (default: same as --threads-draft)",
         [](common_params & params, int value) {
-            params.speculative.draft.cpuparams_batch.n_threads = value <= 0 ? -1 : value;
+            params.speculative.draft.cpuparams_batch.n_threads = value;
+            if (params.speculative.draft.cpuparams_batch.n_threads <= 0) {
+                params.speculative.draft.cpuparams_batch.n_threads = std::thread::hardware_concurrency();
+            }
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(

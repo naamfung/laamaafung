@@ -215,7 +215,8 @@ int64_t stream_session::completed_at() const {
 }
 
 void stream_session::cancel() {
-    // flipping this is the only signal needed to unwind both sides
+    // the should_stop closure on both the producer and any HTTP reader polls is_cancelled()
+    // so flipping this is the only signal needed to unwind both sides
     cancelled.store(true, std::memory_order_release);
 }
 
@@ -600,16 +601,17 @@ static stream_pipe_producer * server_stream_create_spipe(const std::map<std::str
         return nullptr;
     }
     auto session = g_stream_sessions.create_or_replace(conversation_id);
-    return stream_pipe_producer::create(std::move(session));
+    return stream_pipe_producer::create(session);
 }
 
+//
 // server_res_spipe
+//
 
-void server_res_spipe::set_req(const server_http_req * req_) {
-    req = req_;
-    if (req) {
-        spipe.reset(server_stream_create_spipe(req->headers));
-    }
+void server_res_spipe::set_req(const server_http_req * req) {
+    this->req = req;
+    // optionally attach spipe to the response when X-Conversation-Id is present
+    spipe.reset(server_stream_create_spipe(req->headers));
 }
 
 bool server_res_spipe::conn_alive() {
@@ -621,43 +623,42 @@ bool server_res_spipe::should_stop() {
     if (spipe) {
         // note: if DELETE /v1/stream is called for this conv, is_cancelled() will be true
         return spipe->is_cancelled();
+    } else {
+        return !conn_alive();
     }
-    return !conn_alive();
 }
 
 void server_res_spipe::on_complete() {
-    if (spipe && !next_finished) {
-        if (!next_orig) {
-            // set_next() never ran: request failed before streaming started; evict the
-            // session installed by set_req() so the failed request leaves nothing behind
-            g_stream_sessions.evict(server_stream_conv_id_from_headers(req->headers));
-        } else {
-            // peer dropped, drain the rest of the generation into the ring buffer
-            SRV_TRC("%s", "spipe on_complete: draining\n");
-            size_t drained = 0;
-            std::string chunk;
-            while (!spipe->is_cancelled()) {
-                chunk.clear();
-                bool has_next = next_orig(chunk);
-                if (!chunk.empty()) {
-                    spipe->write(chunk.data(), chunk.size());
-                    drained += chunk.size();
-                }
-                if (!has_next) {
-                    break;
-                }
-            }
-            SRV_TRC("spipe on_complete: drain ended bytes=%zu\n", drained);
+    if (!spipe || next_finished) {
+        return;
+    }
+    // an empty next_orig means set_next() never ran: the request failed before streaming
+    // started, typically a params validation throw. evict the session installed by set_req()
+    // so the failed request leaves nothing behind for discovery or replay
+    if (!next_orig) {
+        g_stream_sessions.evict(server_stream_conv_id_from_headers(req->headers));
+        return;
+    }
+    std::string chunk;
+    while (!spipe->is_cancelled()) {
+        chunk.clear();
+        bool has_next = next_orig(chunk);
+        if (!chunk.empty()) {
+            spipe->write(chunk.data(), chunk.size());
+        }
+        if (!has_next) {
+            break;
         }
     }
 }
 
 void server_res_spipe::set_next(std::function<bool(std::string &)> next_fn) {
     next_orig = std::move(next_fn);
-    next = [this](std::string & output) -> bool {
-        bool has_next = next_orig(output);
-        if (spipe && !output.empty()) {
-            spipe->write(output.data(), output.size());
+    next = [this](std::string & out) {
+        bool has_next = next_orig(out);
+        if (spipe) {
+            // if spipe is set, tee-style pipe input to both HTTP and spipe
+            spipe->write(out.data(), out.size());
         }
         if (!has_next) {
             next_finished = true;

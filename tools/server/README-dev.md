@@ -130,9 +130,11 @@ The feature lives entirely in `server-stream.{h,cpp}` and rests on three types:
 - `stream_session_manager`: a file-static singleton (`g_stream_sessions`) inside `server-stream.cpp`, owns all sessions keyed by conv id, enforces the one conv one session invariant via `create_or_replace`, and runs a GC thread that drops completed sessions past their TTL. Exposed to main only through `server_stream_session_manager_start/stop`.
 - `stream_pipe_producer` / `stream_pipe_consumer`: the write and read ends. The producer owns the session lifetime and finalizes it on destruction; the consumer is read only and never finalizes, so a reader detaching cannot kill a running generation.
 
-Producer side: `server_res_generator` extends `server_res_spipe`, which wraps the response with stream-replay support. `set_req` attaches a producer pipe when the `X-Conversation-Id` header is present. `set_next` wraps the response generator so each chunk is teed into the ring buffer transparently. `should_stop()` reports the session cancel state when a pipe is attached, so a dropped socket does not stop generation: only an explicit `DELETE` does. When the peer leaves early, `on_complete` drains the rest of the generation into the ring on the http worker.
+The implementation is hidden in `server-stream.cpp` (pimpl). The header exposes only the route handler factories, the `server_res_spipe` response base, `server_stream_conv_id_from_headers` and the GC lifecycle; the session, manager, consumer and the `server_stream_create_spipe` factory stay in the `.cpp`.
 
-Lifetime safety: the producer pipe is owned by `server_res_spipe` via `unique_ptr`. `cancel()` on the session is a pure atomic flag flip, polled by `should_stop()` - no stop hook or alive guard is needed, so teardown ordering is no longer fragile.
+Producer side: `server_res_generator` extends `server_res_spipe`, which keeps all spipe logic out of the generic `server_http_res`. `set_req` attaches a producer when the header is present, and the wrapped `next` tees each chunk into the ring before the socket, so a chunk lost to a dead wire is already buffered. While attached, `should_stop` ignores peer disconnect: only a `DELETE` stops generation. On an early peer drop, `on_complete` drains the tail into the ring on the http worker.
+
+Lifetime safety: the session holds no back reference to the response, so `spipe` is a plain `unique_ptr` touched only by the http worker. `cancel` raises an atomic the producer polls; the producer finalizes the session from its destructor, which also runs `~server_response_reader::stop()` to cancel the generation at the queue level. A `DELETE` stops work by raising the flag and letting the worker unwind.
 
 Consumer side: `GET /v1/stream?conv_id=<id>&from=N` opens a `text/event-stream` that replays buffered bytes from offset `N` and blocks for live bytes, so the browser reattaches like a fresh EventSource. An offset below the dropped prefix returns 400.
 
@@ -187,7 +189,7 @@ This endpoint is intended to be used internally by the Web UI and subject to cha
 Get a list of tools, each tool has these fields:
 - `tool` (string): the ID name of the tool, to be used in POST call. Example: `read_file`
 - `display_name` (string): the name to be displayed on UI. Example: `Read file`
-- `type` (string): `"builtin"` for a built-in tool, or `"mcp"` for a tool exposed by an MCP server
+- `type` (string): `"server"` for a server tool, or `"mcp"` for a tool exposed by an MCP server
 - `permissions` (object): a mapping string --> boolean that indicates the permission required by this tool. This is useful for the UI to ask the user before calling the tool. For now, the only permission supported is `"write"`
 - `definition` (object): the OAI-compat definition of this tool
 
@@ -196,6 +198,10 @@ Get a list of tools, each tool has these fields:
 Invoke a tool call, request body is a JSON object with:
 - `tool` (string): the name of the tool
 - `params` (object): a mapping from argument name (string) to argument value
+
+Headers:
+- `x-tool-cwd`: optional; if set, use as the CWD for tool; this is not part of tool's params because it's meant to be set by the runtime, not the LLM itself
+- `x-tool-runtime`: optional; if set, run the tool inside this isolate instead of on the host. Either `docker-container:<id>` or `podman-container:<id>`, using an already-running container, or `ssh:<target>`, running the tool on a remote host
 
 Returns JSON object. There are two response formats (MCP tools use the same two formats: their result content is concatenated into `plain_text_response`, and RPC or tool errors are surfaced as the `error` string):
 
@@ -284,6 +290,36 @@ The flow for downloading a new model:
 - Child process runs the download and report status back to router via stdin/out
 - If a stop request comes in, the router asks the child process to stop (same mechanism as running a model in child process)
 - Otherwise, upon completion, we call `load_models()` to refresh the list of models
+
+### Sleep mode
+
+Sleep mode was initially introduced in PR [#18228](https://github.com/ggml-org/llama.cpp/pull/18228). The main idea is to have:
+- `server_queue` keeping track of the idle timeout
+- When the timeout is detected, `server_queue` signals to `server_context_impl` that it should go into sleep
+- `server_context_impl` frees all `llama_context` and `mtmd_context`
+
+Compared to simply exiting the whole process, this approach allows accessing some read-only endpoints during sleep, while also handling wakeup-on-request. Any inference request will wake the server up.
+
+Call stack on entering sleeping:
+- `server_queue::start_loop` (main thread) sees no task for `idle_sleep_ms` --> `sleeping = true`
+- `cb0(true)` --> `server_routes::update_cached_responses`
+    - snapshots `/props`, `/models` and metrics; the model is still alive here
+- `cb1(true)` --> `server_context_impl::handle_sleeping_state`
+    - `callback_state(SERVER_STATE_SLEEPING)` --> reported to router in child mode
+    - `destroy()` --> frees `llama_context` and `mtmd_context`
+- `condition_tasks.wait` until `req_stop_sleeping`
+
+Call stack on waking up:
+- `server_res_generator` constructor (HTTP thread) --> `server_queue::wait_until_no_sleep`
+    - sets `req_stop_sleeping = true`, then waits until `sleeping == false`
+- `server_queue::start_loop` (main thread) wakes up
+- `cb1(false)` --> `server_context_impl::handle_sleeping_state`
+    - `load_model()`, which then emits `callback_state(SERVER_STATE_READY)`
+- `cb0(false)` --> `server_routes::update_cached_responses`
+    - nothing to do, the cache is only read during sleep
+- `sleeping = false` --> `notify_all` unblocks the HTTP thread, the request is handled as usual
+
+Endpoints created with `create_response(true)` (`/health`, `/props`, `/models`, `/metrics`) skip `wait_until_no_sleep`, so they answer from the cached responses instead of waking the server.
 
 ### Notable Related PRs
 

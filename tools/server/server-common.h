@@ -190,12 +190,6 @@ public:
     // returns a pair of pointer to the chunk (nullptr if not found) and its start index in tokens
     std::pair<const mtmd::input_chunk_ptr *, size_t> find_next_media_chunk(size_t idx) const;
 
-    // all media chunks in token order, each with the index where it starts
-    // note: consecutive media chunks are adjacent in the token list (see the example
-    //       above: img0 occupies 5..7, so img1 starts exactly at 8), so iterating with
-    //       find_next_media_chunk(at + n) skips every other chunk. Use this instead.
-    std::vector<std::pair<const mtmd::input_chunk_ptr *, size_t>> get_media_chunks() const;
-
     void push_back(llama_token tok);
 
     // will create a copy of the chunk if it contains non-text data
@@ -214,9 +208,6 @@ public:
     // for compatibility with speculative decoding, ctx shift
     const llama_tokens & get_tokens() const;
 
-    // indexed access that stays valid for media prompts too (get_tokens() asserts on media)
-    llama_token token_at(size_t i) const { return tokens[i]; }
-
     llama_tokens get_text_tokens() const;
 
     std::vector<char> serialize() const;
@@ -228,9 +219,6 @@ public:
     size_t size() const { return tokens.size(); }
 
     bool empty() const { return tokens.empty(); }
-
-    // true if the sequence actually contains image/audio chunks.
-    bool has_media() const { return !map_idx_to_media.empty(); }
 
     void clear() {
         map_idx_to_media.clear();
@@ -282,7 +270,12 @@ size_t validate_utf8(const std::string& text);
 
 // process mtmd prompt, return the server_tokens containing both text tokens and media chunks
 // if is_placeholder is true, the media chunk will be treated as placeholder for counting tokens; the output tokens are not usable for actual inference (e.g. for submitting a task to server_queue)
-server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, const mtmd_helper_init_opt & init_opt, bool is_placeholder = false);
+server_tokens process_mtmd_prompt(
+                                        mtmd_context * mctx,
+                                        const std::string & prompt,
+                                        const std::vector<raw_buffer> & files,
+                                        const mtmd_helper_init_opt & init_opt,
+                                        bool is_placeholder = false);
 
 /**
  * break the input "prompt" object into multiple prompt if needed, then tokenize them
@@ -330,9 +323,6 @@ struct server_chat_params {
 json oaicompat_completion_params_parse(const json & body);
 
 // used by /chat/completions endpoint
-void oaicompat_chat_process_media(json & body, const server_chat_params & opt,
-                                 std::vector<raw_buffer> & out_files);
-
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
@@ -578,7 +568,8 @@ server_tokens format_prompt_rerank(
         const struct llama_vocab * vocab,
         mtmd_context * mctx,
         const std::string & query,
-        const std::string & doc);
+        const std::string & doc,
+        const mtmd_helper_init_opt & init_opt);
 
 // simple implementation of a pipe
 // used for streaming data between threads

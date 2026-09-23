@@ -1,4 +1,7 @@
 #include "server-context.h"
+#if defined(LLAMA_KVMEM)
+#include "llama-kvmem-hooks.h"
+#endif
 #include "server-chat.h"
 #include "server-adaptive-dm.h"
 #include "server-common.h"
@@ -16,9 +19,6 @@
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
-#if defined(LLAMA_KVMEM)
-#include "llama-kvmem-hooks.h"
-#endif
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
@@ -26,8 +26,6 @@
 #include <cstddef>
 #include <cinttypes>
 #include <exception>
-#include <iterator>
-#include <limits>
 #include <memory>
 #include <filesystem>
 #include <random>
@@ -200,7 +198,6 @@ struct server_batch {
         tokens.reserve(n_tokens_alloc);
     }
 
-    bool add(int32_t id_slot, llama_token token, llama_pos pos, bool output) {
     bool add(int32_t id_slot, llama_token token, llama_pos pos, bool output, bool is_prompt) {
         GGML_ASSERT(!has_embd); // cannot mix tokens + embd in same batch
         GGML_ASSERT(batch.pos != nullptr);
@@ -217,17 +214,6 @@ struct server_batch {
             return false;
         }
         tokens.push_back({ id_slot, LLAMA_TOKEN_NULL, pos, output, is_prompt });
-        has_embd = true;
-        embd.insert(embd.end(), embd_in.begin(), embd_in.end());
-        return true;
-    }
-
-    bool add(int32_t id_slot, const std::vector<float> & embd_in, llama_pos pos, bool output) {
-        GGML_ASSERT(batch.pos != nullptr);
-        if ((int32_t)tokens.size() >= n_tokens_alloc) {
-            return false;
-        }
-        tokens.push_back({ id_slot, LLAMA_TOKEN_NULL, pos, output });
         has_embd = true;
         embd.insert(embd.end(), embd_in.begin(), embd_in.end());
         return true;
@@ -295,19 +281,100 @@ struct server_batch {
     }
 };
 
+#if defined(LLAMA_KVMEM)
+static std::pair<int32_t, int32_t> kvmem_last_user_span(
+        const task_params   & tparams,
+        const server_tokens & toks,
+        int32_t               max_tokens) {
+    const auto & spans = tparams.message_spans.spans;
+
+    // The spans were computed on the task's original tokens. prompt_truncate can
+    // rewrite that array later (erasing a middle block), which would silently shift
+    // every offset - split() always closes its span list at the token count it saw,
+    // so compare that with the array we are about to index.
+    if (spans.empty() || spans.back().pos + spans.back().len != toks.size()) {
+        return { 0, 0 };
+    }
+
+    int32_t begin = -1;
+    int32_t end   = -1;
+    for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
+        if (it->role == COMMON_CHAT_ROLE_USER && it->len > 0) {
+            begin = (int32_t) it->pos;
+            end   = (int32_t) (it->pos + it->len);
+            break;
+        }
+    }
+    if (begin < 0) {
+        return { 0, 0 };
+    }
+
+    // a span starts at the role marker (e.g. "<|im_start|>user\n"); the content
+    // starts after it. Compare through the indexed accessor - get_tokens() asserts
+    // on media prompts and the delimiters are plain text tokens anyway.
+    for (const auto & d : tparams.message_delimiters.delimiters) {
+        if (d.role != COMMON_CHAT_ROLE_USER || d.tokens.empty()) {
+            continue;
+        }
+        if ((size_t) begin + d.tokens.size() > toks.size()) {
+            continue;
+        }
+        bool match = true;
+        for (size_t i = 0; i < d.tokens.size(); i++) {
+            if (toks[(size_t) begin + i] != d.tokens[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            begin += (int32_t) d.tokens.size();
+            break;
+        }
+    }
+
+    // the text question follows the media chunks of this turn: never score image
+    // tokens as part of the query
+    if (toks.has_mtmd) {
+        // beellama exposes the media chunks through find_next_media_chunk()
+        size_t cursor = 0;
+        while (cursor < toks.size()) {
+            const auto [chunk, at] = toks.find_next_media_chunk(cursor);
+            if (chunk == nullptr || (int32_t) at >= end) {
+                break;
+            }
+            const size_t n = mtmd_input_chunk_get_n_tokens((*chunk)->get());
+            if ((int32_t) (at + n) > begin) {
+                begin = (int32_t) std::min<size_t>(at + n, (size_t) end);
+            }
+            cursor = at + 1;
+        }
+    }
+
+    if (end > (int32_t) toks.size()) {
+        end = (int32_t) toks.size();
+    }
+    if (begin >= end) {
+        return { 0, 0 };
+    }
+    // cap the query, keeping the tail (the actual question)
+    if (max_tokens > 0 && end - begin > max_tokens) {
+        begin = end - max_tokens;
+    }
+    return { begin, end };
+}
+#endif
+
+
+
+//
+// server_metrics
+
 struct server_slot {
     int id;
 
     llama_context * ctx_tgt = nullptr;
     llama_context * ctx_dft = nullptr;
     bool draft_owns_state = false;
-
-    common_memory mem;
-
-    // True when this slot's speculative impl is MTP (ctx_dft is the MTP head).
-    // MTP needs every prefill position to carry logits=1 so the streaming
-    // hook in common_speculative_impl_draft_mtp::process() can read t_h_nextn.
-    bool is_mtp_enabled = false;
 
     common_memory mem;
 
@@ -338,57 +405,7 @@ struct server_slot {
     int32_t n_keep  = 0;
     int32_t i_batch = -1;
 
-    llama_token last_repeated_tok    = LLAMA_TOKEN_NULL;
-    int32_t     n_consecutive_repeat = 0;
-    float       sampling_temp_boost  = 0.0f;
-
-    int32_t eog_retry_count = 0;
-    bool    suppress_eog    = false;
-
-    // tokens generated after reasoning was force-ended (-1 = not forced)
-    int32_t n_tokens_after_reasoning = -1;
-
-    // monitoring state (persists across requests, not reset by reset())
-    int monitoring_turns = 0;
-
-    // cached original chat messages + jinja flag, used to construct a hidden
-    // self-check turn when early-stop monitoring triggers. Populated at launch,
-    // cleared at reset(). tmpls pointer is NOT stored here: it lives on the
-    // server_context (chat_params.tmpls) and is accessed via the outer object.
-    std::vector<common_chat_msg> cached_messages;
-    bool                         chat_use_jinja = false;
-
-    // hidden self-check turn state (see SELF_CHECK_* phases below)
-    //   NONE        -> inactive
-    //   PREFILL     -> self-check prompt tokens queued, will be batched in
-    //                  handle_last_sampled_token() alongside the triggering EOS
-    //   GENERATING  -> self-check reply being sampled; tokens are hidden from
-    //                  the client (text_to_send cleared) until the reply ends
-    //   ROLLBACK    -> self-check ended with "incomplete"; handle_last_sampled_token()
-    //                  must truncate the self-check turn from the KV cache and
-    //                  prompt, then re-evaluate the triggering EOS with output=true
-    //                  so the model can resume the original reply under EOG suppression
-    enum self_check_phase_t {
-        SELF_CHECK_NONE,
-        SELF_CHECK_PREFILL,
-        SELF_CHECK_GENERATING,
-        SELF_CHECK_ROLLBACK,
-    };
-    self_check_phase_t self_check_phase   = SELF_CHECK_NONE;
-    llama_tokens       self_check_prefill;      // prompt tokens to prefill
-    std::string        self_check_text;         // accumulated hidden reply
-    bool               self_check_complete = false; // parsed result of last check
-    std::string        self_check_reason;       // why self-check was armed (drives prompt wording)
-
-    // rollback bookkeeping (populated when SELF_CHECK_PREFILL is entered,
-    // consumed when SELF_CHECK_ROLLBACK is processed in handle_last_sampled_token)
-    size_t      self_check_rollback_size = 0;   // prompt.tokens.size() including the triggering EOS, before prefill
-    llama_pos   self_check_rollback_pos  = -1;  // KV position of the triggering EOS
-    llama_token self_check_eos_token     = LLAMA_TOKEN_NULL;  // the EOS token to re-evaluate
-
     int32_t n_prompt_tokens_cache     = 0;
-    int32_t n_prompt_tokens_processed = 0;
-    int32_t n_prompt_tokens_prefix    = -1;
     int32_t n_prompt_tokens_lcp       = 0;
     int32_t n_prompt_tokens_planned   = 0;
     std::string prompt_cache_source   = "none";
@@ -441,8 +458,6 @@ struct server_slot {
             return false;
         }
 
-        const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
-        const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
         std::vector<uint8_t> speculative_state;
         common_speculative_get_state(spec, id, speculative_state);
         constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_SELF_CONTAINED;
@@ -504,7 +519,6 @@ struct server_slot {
 
         mem.seq_rm(id, -1, -1);
 
-        prompt.clear();
         prompt_reset_after_memory_clear();
     }
 
@@ -521,9 +535,6 @@ struct server_slot {
     // for TTS models, this is the embd generated from prev step, decode this to generate next hidden state
     // corresponding to one token position (size = n_embd)
     std::vector<float> inp_embd;
-
-    // stats
-    size_t n_sent_text = 0; // number of sent text character
 
     server_slot_stats stats;
 
@@ -568,36 +579,6 @@ struct server_slot {
         visible_output_tokens = 0;
         stopping_word  = "";
         n_sent_text    = 0;
-
-        last_repeated_tok    = LLAMA_TOKEN_NULL;
-        n_consecutive_repeat = 0;
-        sampling_temp_boost  = 0.0f;
-
-        eog_retry_count = 0;
-        suppress_eog    = false;
-
-        n_tokens_after_reasoning = -1;
-
-        if (monitoring_turns > 0) {
-            monitoring_turns--;
-            if (monitoring_turns > 0) {
-                SLT_INF(*this, "slot under high monitoring, %d turns remaining\n", monitoring_turns);
-            } else {
-                SLT_INF(*this, "%s", "slot monitoring period ended\n");
-            }
-        }
-
-        cached_messages.clear();
-        chat_use_jinja = false;
-
-        self_check_phase      = SELF_CHECK_NONE;
-        self_check_prefill.clear();
-        self_check_text.clear();
-        self_check_complete   = false;
-        self_check_reason.clear();
-        self_check_rollback_size = 0;
-        self_check_rollback_pos  = -1;
-        self_check_eos_token     = LLAMA_TOKEN_NULL;
 
         if (can_speculate()) {
             spec_draft.clear();
@@ -683,21 +664,6 @@ struct server_slot {
         return n_predict_max == -1 || n_remaining() > 0;
     }
 
-#if defined(LLAMA_KVMEM)
-    // KVMem keeps a tiered store next to the KV cache. Its GPU slot pool is
-    // budget (pinned retrieval working set) + gen_reserve (decode slack), so
-    // slot.n_ctx - which is the whole context - says nothing about whether the
-    // *next* decode step still fits. Ask the adapter directly: can it still
-    // append one more token at the current store end? A false here is the same
-    // condition that used to surface as "no free GPU slot" -> rc=1 ->
-    // "Context size has been exceeded", except now it stops cleanly first.
-    bool kvmem_can_append_one() {
-        std::string reason;
-        const uint32_t end = llama_kvmem_store_n_tokens();
-        return llama_kvmem_can_append(end, /*generation_rows=*/1, /*all_history=*/false, reason);
-    }
-#endif
-
     bool is_processing() const {
         return state != SLOT_STATE_IDLE;
     }
@@ -754,90 +720,18 @@ struct server_slot {
     // add sampled token of this slot to the batch, optionally add the speculative draft tokens if any
     void handle_last_sampled_token(server_batch & batch) {
         bool add_ok = true;
-        // when true, this branch has already pushed the sampled token (and the
-        // self-check prefill) into prompt.tokens, so the trailing unified
-        // push_back/insert must be skipped.
-        bool self_check_managed = false;
         if (spec_draft.empty()) {
             // no speculative decoding
-            if (self_check_phase == SELF_CHECK_PREFILL && !self_check_prefill.empty()) {
-                // Hidden self-check turn: the triggering EOS is kept in the
-                // context (output=false, no logits needed), then the prefill
-                // tokens are appended; the last prefill token carries output
-                // =true so the next sample produces the self-check reply.
-                self_check_managed = true;
+            i_batch = batch.size();
 
-                // save rollback bookkeeping BEFORE mutating prompt.tokens
-                self_check_rollback_pos = prompt.tokens.pos_next(); // position where EOS will land
-                self_check_eos_token    = sampled;
-
-                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), false);
-                prompt.tokens.push_back(sampled);
-                self_check_rollback_size = prompt.n_tokens(); // includes EOS, before prefill
-
-                for (auto token : self_check_prefill) {
-                    add_ok &= batch.add(id, token, prompt.tokens.pos_next(), false);
-                    prompt.tokens.push_back(token);
-                    // keep the sampler in sync with the injected tokens so
-                    // penalties/repeat state stay consistent
-                    if (smpl) {
-                        common_sampler_accept(smpl.get(), token, false);
-                    }
-                }
-                batch.set_output(batch.size() - 1, true);
-                i_batch = batch.size() - 1;
-
-                SLT_INF(*this, "self-check prefill appended (%zu tokens), entering hidden generation\n",
-                        self_check_prefill.size());
-                self_check_phase = SELF_CHECK_GENERATING;
-                self_check_prefill.clear();
-            } else if (self_check_phase == SELF_CHECK_ROLLBACK) {
-                // Self-check ended with "incomplete": truncate the entire
-                // self-check turn (EOS + prefill + reply) from KV cache and
-                // prompt.tokens, then re-add the triggering EOS with output=true
-                // so the next sample produces a continuation token under EOG
-                // suppression.  This mirrors the "force re-evaluation of last
-                // token" pattern used elsewhere in the file.
-                self_check_managed = true;
-
-                common_context_seq_rm(ctx_tgt, id, self_check_rollback_pos, -1);
-                if (ctx_dft) {
-                    common_context_seq_rm(ctx_dft, id, self_check_rollback_pos, -1);
-                }
-#if defined(LLAMA_KVMEM)
-                // KVMem's tiered store keeps per-row position metadata next to the KV cache, so
-                // every row that just left the cache must leave the store too. The hook is a
-                // no-op unless KVMem is the active memory (and params_base is not reachable from
-                // the slot here), so it is called unconditionally.
-                llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) self_check_rollback_pos));
-#endif
-                prompt.tokens.keep_first(self_check_rollback_size - 1);
-
-                i_batch = batch.size();
-                add_ok &= batch.add(id, self_check_eos_token, self_check_rollback_pos, true);
-                prompt.tokens.push_back(self_check_eos_token);
             if (!inp_embd.empty()) {
                 add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true, false);
             } else {
                 add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true, false);
             }
 
-                SLT_INF(*this, "%s", "self-check rollback complete, re-evaluating EOS with output=true\n");
-                self_check_phase     = SELF_CHECK_NONE;
-                self_check_complete  = false;
-                self_check_eos_token = LLAMA_TOKEN_NULL;
-            } else {
-                i_batch = batch.size();
-
-                if (!inp_embd.empty()) {
-                    add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true);
-                } else {
-                    add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true);
-                }
-
-                SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
-                        sampled, n_ctx, prompt.n_tokens(), truncated);
-            }
+            SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
+                    sampled, n_ctx, prompt.n_tokens(), truncated);
         } else {
             SLT_DBG(*this, "generate_draft: id=%d, #tokens=%zu, #draft=%zu, pos_next=%d\n",
                     sampled, prompt.tokens.size(), spec_draft.size(), prompt.tokens.pos_next());
@@ -859,10 +753,8 @@ struct server_slot {
 
         GGML_ASSERT(add_ok && "batch must be large enough to hold the sampled and draft tokens");
 
-        if (!self_check_managed) {
-            prompt.tokens.push_back(sampled);
-            prompt.tokens.insert(spec_draft);
-        }
+        prompt.tokens.push_back(sampled);
+        prompt.tokens.insert(spec_draft);
     }
 
     void release() {
@@ -879,16 +771,7 @@ struct server_slot {
             }
 #endif
 
-            const char * stop_reason_str = "none";
-            switch (stop) {
-                case STOP_TYPE_NONE:  stop_reason_str = "none";  break;
-                case STOP_TYPE_EOS:   stop_reason_str = "eos";   break;
-                case STOP_TYPE_WORD:  stop_reason_str = "word";  break;
-                case STOP_TYPE_LIMIT: stop_reason_str = "limit"; break;
-            }
-
-            SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d, stop = %s, n_sent_text = %zu, n_decoded = %d\n",
-                    prompt.n_tokens(), truncated, stop_reason_str, n_sent_text, n_decoded);
+            SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d\n", prompt.n_tokens(), truncated);
 
             t_last_used = ggml_time_us();
 
@@ -897,24 +780,6 @@ struct server_slot {
             // do not keep context of the child slots - the parent's context is enough
             if (task->is_child()) {
                 prompt_clear();
-            }
-
-            // erase generation-phase checkpoints (pos > prompt) to free slots for next request's input-phase checkpoints
-            if (!task->is_child()) {
-                auto prompt_end = task->n_tokens();
-                int erased = 0;
-                for (auto it = prompt.checkpoints.begin(); it != prompt.checkpoints.end();) {
-                    if (it->pos_min > prompt_end) {
-                        SLT_DBG(*this, "release: erasing generation checkpoint (pos_min=%d > prompt_end=%d)\n", it->pos_min, prompt_end);
-                        it = prompt.checkpoints.erase(it);
-                        erased++;
-                    } else {
-                        ++it;
-                    }
-                }
-                if (erased > 0) {
-                    SLT_INF(*this, "release: erased %d generation checkpoints (prompt_end=%d)\n", erased, prompt_end);
-                }
             }
 
             callback_on_reset(*this);
@@ -1158,133 +1023,6 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
         return 1; // (non-error) need to create & encode batch
     };
 
-        // TODO @ngxson : move this log line to debug when it become more stable
-        SLT_TRC(*this, "encoding mtmd batch from idx = %zu, n_chunks = %d\n", idx, n_added);
-
-        res = mtmd_batch_encode(mbatch.get());
-        if (res != 0) {
-            SLT_ERR(*this, "failed to encode mtmd batch for chunk idx = %zu, res = %d\n", idx, res);
-            return -1;
-        }
-
-        return try_decode();
-    }
-};
-
-#if defined(LLAMA_KVMEM)
-// KVMem: the retrieval query is the *last user turn* of the prompt. The server
-// already splits every prompt into chat-message spans (from the template's
-// message delimiters, media chunks skipped - see server_tokens::find_message_spans),
-// so the query span can be taken exactly rather than guessing "the last N tokens".
-//
-// Returns [begin, end) in prompt-token coordinates, or {0, 0} when it cannot be
-// determined (raw /completion prompts carry no delimiters) so the caller can fall
-// back to the last-N heuristic.
-static std::pair<int32_t, int32_t> kvmem_last_user_span(
-        const task_params   & tparams,
-        const server_tokens & toks,
-        int32_t               max_tokens) {
-    const auto & spans = tparams.message_spans.spans;
-
-    // The spans were computed on the task's original tokens. prompt_truncate can
-    // rewrite that array later (erasing a middle block), which would silently shift
-    // every offset - split() always closes its span list at the token count it saw,
-    // so compare that with the array we are about to index.
-    if (spans.empty() || spans.back().pos + spans.back().len != toks.size()) {
-        return { 0, 0 };
-    }
-
-    int32_t begin = -1;
-    int32_t end   = -1;
-    for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
-        if (it->role == COMMON_CHAT_ROLE_USER && it->len > 0) {
-            begin = (int32_t) it->pos;
-            end   = (int32_t) (it->pos + it->len);
-            break;
-        }
-    }
-    if (begin < 0) {
-        return { 0, 0 };
-    }
-
-    // a span starts at the role marker (e.g. "<|im_start|>user\n"); the content
-    // starts after it. Compare through the indexed accessor - get_tokens() asserts
-    // on media prompts and the delimiters are plain text tokens anyway.
-    for (const auto & d : tparams.message_delimiters.delimiters) {
-        if (d.role != COMMON_CHAT_ROLE_USER || d.tokens.empty()) {
-            continue;
-        }
-        if ((size_t) begin + d.tokens.size() > toks.size()) {
-            continue;
-        }
-        bool match = true;
-        for (size_t i = 0; i < d.tokens.size(); i++) {
-            if (toks.token_at((size_t) begin + i) != d.tokens[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            begin += (int32_t) d.tokens.size();
-            break;
-        }
-    }
-
-    // the text question follows the media chunks of this turn: never score image
-    // tokens as part of the query
-    if (toks.has_media()) {
-        for (const auto & [chunk, at] : toks.get_media_chunks()) {
-            if ((int32_t) at >= end) {
-                break;
-            }
-            const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
-            if ((int32_t) (at + n) > begin) {
-                begin = (int32_t) std::min<size_t>(at + n, (size_t) end);
-            }
-        }
-    }
-
-    if (end > (int32_t) toks.size()) {
-        end = (int32_t) toks.size();
-    }
-    if (begin >= end) {
-        return { 0, 0 };
-    }
-    // cap the query, keeping the tail (the actual question)
-    if (max_tokens > 0 && end - begin > max_tokens) {
-        begin = end - max_tokens;
-    }
-    return { begin, end };
-}
-#endif
-
-
-
-//
-// server_metrics
-//
-
-struct server_metrics {
-    int64_t t_start = 0;
-
-    uint64_t n_prompt_tokens_processed_total = 0;
-    uint64_t t_prompt_processing_total       = 0;
-    uint64_t n_tokens_predicted_total        = 0;
-    uint64_t t_tokens_generation_total       = 0;
-
-    uint64_t n_tokens_max = 0;
-
-    uint64_t n_prompt_tokens_processed = 0;
-    uint64_t t_prompt_processing       = 0;
-
-    uint64_t n_tokens_predicted  = 0;
-    uint64_t t_tokens_generation = 0;
-
-    uint64_t n_decode_total     = 0;
-    uint64_t n_busy_slots_total = 0;
-
-    void init() {
-        t_start = ggml_time_us();
     // if the batch is already exist, try searching & encode
     res = try_decode();
     if (res == 0) {
@@ -1465,8 +1203,6 @@ private:
         spec.reset();
         spec_init.reset();
 
-        ctx_dft   = nullptr;
-        model_dft = nullptr;
         ctx_dft          = nullptr;
         model_dft        = nullptr;
         draft_owns_state = false;
@@ -1623,62 +1359,6 @@ private:
             }
         }
 
-        // optionally reserve VRAM for the draft / MTP context before fitting the target model
-        if (params_base.fit_params) {
-            if (has_spec) {
-                // MTP draft context lives on the target model, only context+compute are new
-                bool measure_model_bytes = has_draft;
-
-                common_params params_dft = common_base_params_to_speculative(params_base);
-
-                auto mparams_dft = common_model_params_to_llama(params_dft);
-                auto cparams_dft = common_context_params_to_llama(params_dft);
-                if (spec_mtp) {
-                    cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
-                }
-                cparams_dft.n_rs_seq = 0;
-
-                std::vector<ggml_backend_dev_t> devs;
-                uint32_t hp_ngl = 0;
-                uint32_t hp_nct = 0;
-                uint32_t hp_nex = 0;
-                try {
-                    auto dmd = common_get_device_memory_data(
-                        params_dft.model.path.c_str(), &mparams_dft, &cparams_dft,
-                        devs, hp_ngl, hp_nct, hp_nex, GGML_LOG_LEVEL_ERROR);
-
-                    GGML_ASSERT(!params_base.fit_params_target.empty());
-                    size_t total = 0;
-
-                    std::vector<ggml_backend_dev_t> tgt_devices = params.devices;
-
-                    if (tgt_devices.empty()) {
-                        for(size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-                           tgt_devices.push_back(ggml_backend_dev_get(i));
-                        }
-                    }
-
-                    for (size_t j = 0; j < devs.size(); ++j) {
-                        const size_t bytes = (measure_model_bytes ? dmd[j].model : 0) + dmd[j].context + dmd[j].compute;
-                        total += bytes;
-                        for (size_t i = 0; i < tgt_devices.size(); i++) {
-                            if (tgt_devices[i] == devs[j]) {
-                                SRV_DBG("[spec] adding %.2f MiB to fit_params_target for device %s\n",
-                                        bytes / (1024.0 * 1024.0), ggml_backend_dev_name(devs[j]));
-                                params_base.fit_params_target[i] += bytes;
-                                break;
-                            }
-                        }
-                    }
-                    SRV_TRC("[spec] estimated memory usage of %s is %.2f MiB\n",
-                            has_draft ? "draft model" : "MTP context",
-                            total / (1024.0 * 1024.0));
-                } catch (const std::exception & e) {
-                    SRV_WRN("[spec] failed to measure %s memory: %s\n",
-                            has_draft ? "draft model" : "MTP context", e.what());
-                }
-            }
-        }
         // note: the draft / MTP context is fitted together with the target model, see common_fit_extra_model
 
         // attach a progress callback
@@ -1687,35 +1367,34 @@ private:
             params_base.load_progress_callback_user_data = &load_progress_text;
         }
 
+
 #if defined(LLAMA_KVMEM)
-        // KVMem reads its configuration from a process-global, so it must be set
-        // before the context (and therefore its memory) is created. The K/V cache
-        // types come from the usual -ctk/-ctv options (llama_memory_params).
-        if (params_base.kvmem) {
-            llama_kvmem_params kp = {};
-            kp.enabled          = true;
-            kp.block_tokens     = (uint32_t) std::max(0, params_base.kvmem_block_tokens);
-            kp.budget           = (uint32_t) std::max(0, params_base.kvmem_budget);
-            kp.gen_reserve      = (uint32_t) std::max(0, params_base.kvmem_gen_reserve);
-            kp.sink_tokens      = 0;
-            kp.recent_tokens    = 0;
-            kp.method           = params_base.kvmem_retrieval ? 1 : 0;
-            kp.query_begin      = -1;
-            kp.query_end        = -1;
-            kp.force_pos        = -1;
-            kp.gpu_memory_ratio = params_base.kvmem_gpu_ratio;
-            kp.harvest_v        = params_base.kvmem_harvest_v;
-            kp.mtp_state        = 1;
-            kp.image_autoscale  = params_base.kvmem_image_autoscale;
-            llama_kvmem_set_params(&kp);
-            SRV_INF("%s", "KVMem memory requested (tiered/sparse KV)\n");
-        }
+    // KVMem parameters are process-wide and must be installed before the
+    // context is created (the memory object is built during context init).
+    if (params_base.kvmem) {
+                llama_kvmem_params kp = {};
+                kp.enabled          = true;
+                kp.block_tokens     = (uint32_t) std::max(0, params_base.kvmem_block_tokens);
+                kp.budget           = (uint32_t) std::max(0, params_base.kvmem_budget);
+                kp.gen_reserve      = (uint32_t) std::max(0, params_base.kvmem_gen_reserve);
+                kp.sink_tokens      = 0;
+                kp.recent_tokens    = 0;
+                kp.method           = params_base.kvmem_retrieval ? 1 : 0;
+                kp.query_begin      = -1;
+                kp.query_end        = -1;
+                kp.force_pos        = -1;
+                kp.gpu_memory_ratio = params_base.kvmem_gpu_ratio;
+                kp.harvest_v        = params_base.kvmem_harvest_v;
+                kp.mtp_state        = 1;
+                kp.image_autoscale  = params_base.kvmem_image_autoscale;
+                llama_kvmem_set_params(&kp);
 #endif
 
         llama_init = common_init_from_params(params_base);
 
         model_tgt = llama_init->model();
         ctx_tgt   = llama_init->context();
+
         if (model_tgt == nullptr) {
             SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
             return false;
@@ -1791,42 +1470,21 @@ private:
                 SRV_WRN("%s\n", "ctx_shift is not supported by multimodal, it will be disabled");
             }
 
-            if (params_base.prompt_truncate) {
-                params_base.prompt_truncate = false;
-                SRV_WRN("%s\n", "prompt_truncate is not supported by multimodal, it will be disabled");
-            }
-
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
                 SRV_WRN("%s\n", "cache_reuse is not supported by multimodal, it will be disabled");
             }
         }
 
-        // ctx_shift (runtime K-shift) is already disabled by common_init_from_params
-        // when llama_memory_can_shift() returns false; prompt_truncate (initial prompt
-        // truncation) is a separate feature and stays enabled for such a context.
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
+            if (params_base.ctx_shift) {
+                params_base.ctx_shift = false;
+                SRV_WRN("%s\n", "ctx_shift is not supported by this context, it will be disabled");
+            }
+
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
                 SRV_WRN("%s\n", "cache_reuse is not supported by this context, it will be disabled");
-            }
-        }
-
-        if (params_base.kvmem) {
-            // KVMem keeps a tiered index (block original positions + per-row metadata) built from
-            // the position numbering of the tokens it was fed, so nothing in the server may remap
-            // or rewrite that numbering afterwards. --context-shift implies --prompt-truncate
-            // (see common/arg.cpp), and truncation erases a *middle* block of the prompt while
-            // rewriting the token array: every offset derived from the original array is then
-            // silently wrong - the KVMem retrieval query span (kvmem_last_user_span) and the chat
-            // message spans that drive --ctx-checkpoints (last_user_message_pos / is_user_start).
-            // Silently losing the middle of a conversation is worse than a clear error, so refuse
-            // truncation and let the client trim the prompt, or raise --ctx-size.
-            if (params_base.prompt_truncate) {
-                params_base.prompt_truncate = false;
-                SRV_WRN("%s\n", "prompt truncate is not supported by KVMem (it erases a middle block and "
-                                "desynchronises the retrieval query and checkpoint message spans), it will be "
-                                "disabled - raise --ctx-size instead");
             }
         }
 
@@ -1844,10 +1502,6 @@ private:
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
 
-        int n_ctx_slot = llama_n_ctx_seq(ctx_tgt);
-        if (n_ctx_slot > n_ctx_train) {
-            SRV_WRN("the slot context (%d) exceeds the training context of the model (%d) - using rope scaling to extend\n", n_ctx_slot, n_ctx_train);
-            // Do not cap: caller has configured rope scaling (--rope-scale / --rope-scaling yarn) to handle extended context.
         {
             // note: the capping itself is done in n_ctx_slot(), here we only report it
             const int n_ctx_seq = llama_n_ctx_seq(ctx_tgt);
@@ -1907,10 +1561,6 @@ private:
             }
         }
 
-        if (ctx_dft) {
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
-        }
-
         if (spec) {
             SRV_TRC("%s", "speculative decoding context initialized\n");
         } else {
@@ -1935,12 +1585,6 @@ private:
             slot.id      = i;
             slot.ctx_tgt = ctx_tgt;
             slot.ctx_dft = ctx_dft;
-            slot.mem.init(ctx_tgt, ctx_dft);
-            slot.spec    = spec.get();
-            slot.is_mtp_enabled = (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
-                                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end())
-                                  && (ctx_dft != nullptr);
-            slot.n_ctx   = n_ctx_slot;
             slot.draft_owns_state = draft_owns_state;
             slot.mem.init(ctx_tgt, slot.draft_owns_state ? ctx_dft : nullptr);
             slot.spec    = spec.get();
@@ -2238,15 +1882,6 @@ private:
                     continue;
                 }
 
-                // fraction of the Longest Common Prefix length with respect to the input prompt length
-                const size_t lcp_len = tokens.get_common_prefix(task.tokens);
-                const float f_sim_cur = float(lcp_len) / task.tokens.size();
-
-                SLT_TRC(slot, " - checking sim = %.3f (%zu/%zu) > %.3f\n", f_sim_cur, lcp_len, task.tokens.size(), slot_prompt_similarity);
-
-                // select the current slot if the criteria match
-                if (f_sim_cur > f_sim_best && f_sim_cur > slot_prompt_similarity) {
-                    f_sim_best = f_sim_cur;
                 const auto reuse = server_prompt_plan_reuse(
                         slot.prompt, task.tokens, prompt_reuse_alignment(),
                         prompt_live_native_restorable(slot, task.tokens), false);
@@ -2273,8 +1908,6 @@ private:
                 const float f_keep = (f_sim_best*task.tokens.size()) / ret->prompt.tokens.size();
 
                 if (task.id_slot == -1) {
-                    SLT_INF(*ret, "selected slot by LCP similarity, f_sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
-                            f_sim_best, slot_prompt_similarity, f_keep);
                     SLT_INF(*ret,
                             "selected slot by restorable prefix, n_restorable = %zu, f_sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
                             restorable_best, f_sim_best, slot_prompt_similarity, f_keep);
@@ -2325,7 +1958,6 @@ private:
 
                 ret->prompt_save(*prompt_cache);
 
-                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
                 if (!ret->prompt_load(
                             *prompt_cache, task.tokens,
                             prompt_live_native_restorable(*ret, task.tokens),
@@ -2387,87 +2019,6 @@ private:
         return output;
     }
 
-// Given a token sequence and a junction position, check if the junction
-// splits a multi-token tag sequence. Returns the number of tokens to shift
-// the junction: positive = move right, negative = move left, 0 = no change.
-static int check_tag_boundary(
-        const llama_context * ctx,
-        const llama_tokens & tokens,
-        int junction) {
-    const int radius = 12;
-
-    if (junction <= 0 || junction >= (int)tokens.size()) {
-        return 0;
-    }
-
-    int left_start = std::max(0, junction - radius);
-
-    llama_tokens left_tok(tokens.begin() + left_start, tokens.begin() + junction);
-    if (left_tok.empty()) {
-        return 0;
-    }
-
-    std::string left_text = common_detokenize(ctx, left_tok, true);
-
-    auto last_lt = left_text.rfind('<');
-    if (last_lt == std::string::npos) {
-        return 0;
-    }
-
-    if (left_text.find('>', last_lt) != std::string::npos) {
-        return 0;
-    }
-
-    // Unclosed '<' found. Try to include the full tag by moving junction right.
-    int right_end = std::min((int)tokens.size(), junction + radius);
-    for (int shift = 1; shift <= radius && junction + shift <= right_end; shift++) {
-        llama_tokens probe(tokens.begin() + left_start, tokens.begin() + junction + shift);
-        std::string probe_text = common_detokenize(ctx, probe, true);
-        auto lt = probe_text.rfind('<');
-        if (lt != std::string::npos && probe_text.find('>', lt) != std::string::npos) {
-            return shift;
-        }
-    }
-
-    // Could not find closing '>'. Remove the broken fragment by moving junction left.
-    for (int shift = 1; shift <= radius && junction - shift > left_start; shift++) {
-        llama_tokens probe(tokens.begin() + left_start, tokens.begin() + junction - shift);
-        std::string probe_text = common_detokenize(ctx, probe, true);
-        auto lt = probe_text.rfind('<');
-        if (lt == std::string::npos || probe_text.find('>', lt) != std::string::npos) {
-            return -shift;
-        }
-    }
-
-    return 0;
-}
-
-// returns true if text has more occurrences of open_tag than close_tag
-static bool has_unclosed_tag(const std::string & text, const std::string & open_tag, const std::string & close_tag) {
-    size_t pos = 0;
-    int depth = 0;
-    while ((pos = text.find(open_tag, pos)) != std::string::npos) {
-        depth++;
-        pos += open_tag.size();
-    }
-    pos = 0;
-    while ((pos = text.find(close_tag, pos)) != std::string::npos) {
-        depth--;
-        pos += close_tag.size();
-    }
-    return depth > 0;
-}
-
-// returns true if there is non-whitespace after the given offset
-static bool has_visible_after(const std::string & text, size_t offset) {
-    for (size_t i = offset; i < text.size(); i++) {
-        if (!std::isspace((unsigned char) text[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
@@ -2484,47 +2035,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             }
         } else {
             slot.lora = params_base.lora_adapters;
-        }
-
-        // if prompt truncation is enabled and the prompt is larger than the context, truncate the middle
-        // and keep the first n_keep tokens; otherwise the request is rejected in update_slots()
-        if (params_base.prompt_truncate && !mctx && task.n_tokens() >= slot.n_ctx) {
-            int n_keep = task.params.n_keep < 0 ? task.n_tokens() : task.params.n_keep;
-            n_keep = std::min(slot.n_ctx - 4, n_keep);
-
-            const int n_left        = slot.n_ctx - n_keep;
-            const int n_block_size  = n_left / 2;
-            const int erased_blocks = (task.n_tokens() - n_keep - n_block_size) / n_block_size;
-
-            const llama_tokens & curr_tokens = task.tokens.get_text_tokens();
-
-            int junction = n_keep + erased_blocks * n_block_size;
-            int shift = check_tag_boundary(ctx_tgt, curr_tokens, junction);
-            if (shift != 0) {
-                SLT_WRN(slot, "adjusted truncation boundary by %d tokens to avoid splitting a tag\n", shift);
-                junction += shift;
-            }
-
-            llama_tokens new_tokens(curr_tokens.begin(), curr_tokens.begin() + n_keep);
-            new_tokens.insert(new_tokens.end(), curr_tokens.begin() + junction, curr_tokens.end());
-
-            task.tokens.clear();
-            task.tokens.insert(new_tokens);
-
-            // The token array was just rewritten, so every offset derived from its original
-            // numbering is stale. Recompute the chat message spans against the array we are about
-            // to decode: they place the --ctx-checkpoints boundaries (last_user_message_pos /
-            // is_user_start) and, when KVMem is enabled, they define the retrieval query span.
-            // Truncation requires !mctx, so there can be no media chunks whose offsets would need
-            // remapping here.
-            task.params.message_spans = task.tokens.find_message_spans(task.params.message_delimiters);
-
-            slot.truncated = true;
-
-            SLT_WRN(slot, "input truncated, n_ctx = %d, n_keep = %d, n_left = %d, n_tokens = %d\n",
-                    slot.n_ctx, n_keep, n_left, task.n_tokens());
-
-            GGML_ASSERT(task.n_tokens() < slot.n_ctx);
         }
 
         // if using alora, make sure it's only a single one requested and active
@@ -2619,18 +2129,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             slot.smpl.reset();
         }
 
-        // cache original chat messages for hidden self-check turn construction
-        if (!task.params.original_messages.is_null() && task.params.original_messages.is_array()) {
-            try {
-                slot.cached_messages  = common_chat_msgs_parse_oaicompat(task.params.original_messages);
-                slot.chat_use_jinja   = task.params.chat_use_jinja;
-            } catch (const std::exception & e) {
-                SLT_WRN(slot, "failed to parse original_messages for self-check: %s\n", e.what());
-                slot.cached_messages.clear();
-                slot.chat_use_jinja = false;
-            }
-        }
-
         slot.loop_guard.configure(task.params.reasoning_loop_guard);
 
         const bool task_uses_dflash = std::find(
@@ -2671,160 +2169,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         return true;
     }
 
-    // Build the hidden self-check prompt as a chat-template *increment*.
-    //
-    // past_msg = cached_messages + an assistant message carrying the text the
-    //            model has produced so far this turn (generated_text)
-    // new_msg  = a user message asking the model to judge whether its prior
-    //            reply is complete
-    //
-    // We render the template twice and return the delta, so the result is short
-    // (just the user question + the assistant generation prompt) and can be
-    // appended to the current context without re-evaluating the whole history.
-    //
-    // We pass preserve_reasoning=true so the template always includes the
-    // assistant's reasoning content regardless of message position.  Without
-    // this, templates that conditionally hide thinking based on the last user
-    // query index would strip it when a new user message is added, causing the
-    // two renders to diverge and the diff to be incorrect.
-    //
-    // The <complete>/<incomplete> markers are an internal protocol and do not
-    // depend on any vendor-specific tags (e.g. <think>, <tool_call>), so the
-    // self-check works uniformly across Qwen, Gemma, etc.
-    std::string build_self_check_prompt(const server_slot & slot) {
-        if (slot.cached_messages.empty()) {
-            return "";
-        }
-
-        std::vector<common_chat_msg> past_msg = slot.cached_messages;
-
-        common_chat_msg assistant_msg;
-        assistant_msg.role    = "assistant";
-        assistant_msg.content = slot.generated_text;
-        past_msg.push_back(std::move(assistant_msg));
-
-        common_chat_msg user_msg;
-        user_msg.role    = "user";
-        if (slot.self_check_reason == "multiple_think_close") {
-            user_msg.content =
-                "Your previous response contains multiple </think> tags, "
-                "but only one is allowed. If the response is otherwise complete "
-                "and not truncated, output <complete>. Otherwise output <incomplete>. "
-                "Output only the tag.";
-        } else {
-            user_msg.content =
-                "Review your previous response for completeness. "
-                "If it is complete and not truncated, output <complete>. "
-                "If it is incomplete, truncated, or missing an intended tool call, "
-                "output <incomplete>. Output only the tag.";
-        }
-        if (!slot.chat_use_jinja) {
-            return common_chat_format_single(chat_params.tmpls.get(),
-                                             past_msg,
-                                             user_msg,
-                                             /*add_ass=*/true,
-                                             /*use_jinja=*/false);
-        }
-
-        // Jinja path: render the template ourselves so we can inject
-        // preserve_reasoning=true, which triggers caps_apply_preserve_reasoning
-        // and ensures the template includes reasoning content in both renders.
-        auto kwargs = chat_params.chat_template_kwargs;
-        kwargs["preserve_reasoning"] = "true";
-
-        common_chat_templates_inputs inputs;
-        inputs.use_jinja            = true;
-        inputs.chat_template_kwargs = kwargs;
-
-        // Render 1: past_msg only (no generation prompt)
-        inputs.messages              = past_msg;
-        inputs.add_generation_prompt = false;
-        std::string fmt_past = common_chat_templates_apply(chat_params.tmpls.get(), inputs).prompt;
-
-        // Render 2: past_msg + user_msg (with generation prompt)
-        inputs.messages.push_back(user_msg);
-        inputs.add_generation_prompt = true;
-        std::string fmt_full = common_chat_templates_apply(chat_params.tmpls.get(), inputs).prompt;
-
-        // Find common prefix and return the delta
-        size_t prefix_len = 0;
-        const size_t min_len = std::min(fmt_past.size(), fmt_full.size());
-        while (prefix_len < min_len && fmt_past[prefix_len] == fmt_full[prefix_len]) {
-            prefix_len++;
-        }
-
-        std::ostringstream ss;
-        if (!fmt_past.empty() && fmt_past.back() == '\n') {
-            ss << "\n";
-        }
-        ss << fmt_full.substr(prefix_len);
-        return ss.str();
-    }
-
-    // Process one token of a hidden self-check reply. Tokens are hidden from
-    // the client (text_to_send cleared). When a <complete>/<incomplete> marker
-    // is seen, or the model emits EOS, the self-check phase ends:
-    //   - complete  -> end generation normally (STOP_TYPE_EOS); the self-check
-    //                  turn stays in cache but will be overwritten by the next
-    //                  request's prompt
-    //   - incomplete -> transition to SELF_CHECK_ROLLBACK; handle_last_sampled_token()
-    //                  will truncate the entire self-check turn (EOS + prefill +
-    //                  reply) from the KV cache and prompt, re-evaluate the EOS
-    //                  with output=true, and arm EOG suppression so the model
-    //                  resumes the original reply
-    // If no marker is found before EOS, default to incomplete (conservative).
-    bool handle_self_check_token(completion_token_output & result, server_slot & slot) {
-        const std::string token_str = result.text_to_send;
-        slot.self_check_text += token_str;
-        // hidden from the client
-        result.text_to_send = "";
-        slot.has_next_token = true;
-
-        bool got_result = false;
-        if (slot.self_check_text.find("<complete>") != std::string::npos) {
-            slot.self_check_complete = true;
-            got_result = true;
-        } else if (slot.self_check_text.find("<incomplete>") != std::string::npos) {
-            slot.self_check_complete = false;
-            got_result = true;
-        }
-
-        // safety valve: if the model rambles without producing a marker,
-        // cut it short and default to incomplete (conservative). 64 chars is
-        // ample for "<complete>" / "<incomplete>" plus a few tokens of preamble.
-        if (!got_result && slot.self_check_text.size() > 64) {
-            got_result = true;
-            slot.self_check_complete = false;
-            SLT_WRN(slot, "%s", "self-check reply exceeded 64 chars without marker, defaulting to incomplete\n");
-        }
-
-        if (got_result || llama_vocab_is_eog(vocab, result.tok)) {
-            slot.self_check_text.clear();
-
-            if (!got_result) {
-                // no marker found - be conservative, treat as incomplete
-                slot.self_check_complete = false;
-            }
-
-            if (slot.self_check_complete) {
-                SLT_INF(slot, "%s", "self-check result: complete, allowing EOS\n");
-                slot.self_check_phase = server_slot::SELF_CHECK_NONE;
-                slot.stop           = STOP_TYPE_EOS;
-                slot.has_next_token = false;
-            } else {
-                SLT_WRN(slot, "%s", "self-check result: incomplete, will rollback and resume under EOG suppression\n");
-                // Defer the actual truncation to handle_last_sampled_token(),
-                // which runs next and owns the batch + KV cache.
-                // suppress_eog is armed here so the sampler (restored or not)
-                // has it set before the next sample.
-                slot.suppress_eog = true;
-                common_sampler_set_suppress_eog(slot.smpl.get(), true);
-                slot.self_check_phase = server_slot::SELF_CHECK_ROLLBACK;
-                slot.has_next_token = true;
-            }
-        }
-
-        return slot.has_next_token;
     bool loop_guard_accept_enabled(const server_slot & slot) const {
         return slot.task &&
                slot.smpl &&
@@ -2936,53 +2280,11 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
 
-        // Hidden self-check reply: route tokens through a dedicated handler that
-        // accumulates them internally (hidden from the client) and watches for
-        // <complete>/<incomplete> markers. Skip all normal processing so the
-        // self-check reply never pollutes generated_text, stop-word detection,
-        // partial responses, or the EOS early-stop logic.
-        if (slot.self_check_phase == server_slot::SELF_CHECK_GENERATING) {
-            return handle_self_check_token(result, slot);
-        }
-
-        if (result.tok == slot.last_repeated_tok) {
-            slot.n_consecutive_repeat++;
-        } else {
-            if (slot.sampling_temp_boost > 0.0f) {
-                slot.sampling_temp_boost = 0.0f;
-                common_sampler_set_temp_boost(slot.smpl.get(), 0.0f);
-            }
-            slot.last_repeated_tok    = result.tok;
-            slot.n_consecutive_repeat = 1;
-        }
-
-        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold && slot.sampling_temp_boost < params_base.sampling.runaway_boost) {
-            slot.sampling_temp_boost = params_base.sampling.runaway_boost;
-            common_sampler_set_temp_boost(slot.smpl.get(), params_base.sampling.runaway_boost);
-            SLT_WRN(slot, "runaway repetition detected, token %d repeated %d times, mild temp boost %.2f\n",
-                    slot.last_repeated_tok, slot.n_consecutive_repeat, params_base.sampling.runaway_boost);
-        }
-
-        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold * 2 && slot.sampling_temp_boost < params_base.sampling.runaway_boost_strong) {
-            slot.sampling_temp_boost = params_base.sampling.runaway_boost_strong;
-            common_sampler_set_temp_boost(slot.smpl.get(), params_base.sampling.runaway_boost_strong);
-            SLT_WRN(slot, "runaway repetition persists, token %d repeated %d times, strong temp boost %.2f\n",
-                    slot.last_repeated_tok, slot.n_consecutive_repeat, params_base.sampling.runaway_boost_strong);
-        }
-
         slot.generated_text += token_str;
         if (slot.task->params.return_tokens) {
             slot.generated_tokens.push_back(result.tok);
         }
         slot.has_next_token = !stopped_before_process;
-
-        // track tokens generated after reasoning is force-ended
-        if (common_sampler_reasoning_was_forced(slot.smpl.get())) {
-            if (slot.n_tokens_after_reasoning < 0) {
-                slot.n_tokens_after_reasoning = 0;
-            }
-            slot.n_tokens_after_reasoning++;
-        }
 
         // check if there is incomplete UTF-8 character at the end
         bool incomplete = validate_utf8(slot.generated_text) < slot.generated_text.size();
@@ -3021,61 +2323,12 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             }
         }
 
-        // clear EOG suppression once visible content appears
-        if (slot.suppress_eog) {
-            const auto & gt = slot.generated_text;
-            bool has_think_open  = gt.find("<think>")     != std::string::npos;
-            bool has_think_close = gt.find("</think>")    != std::string::npos;
-            bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
-
-            // <think> may have been pre-injected into the prompt (via --reasoning on
-            // or preserve_thinking template), so generated_text lacks the opening tag;
-            // rbudget COUNTING means we are still inside a reasoning block
-            if (!has_think_open && common_sampler_is_reasoning_active(slot.smpl.get())) {
-                has_think_open = true;
-            }
-
-            bool has_visible_content = false;
-            if (has_tool_call) {
-                // require all tool_call tags to be closed
-                if (!has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
-                    has_visible_content = true;
-                }
-            } else if (has_think_close) {
-                // </think> present (whether or not <think> is in generated_text or was
-                // pre-injected by chat template): require visible content after it
-                if (has_visible_after(gt, gt.rfind("</think>") + 8)) {
-                    has_visible_content = true;
-                }
-            } else if (has_think_open) {
-                // <think> opened but not yet closed: keep suppressing
-            } else if (slot.n_sent_text > 0) {
-                // plain text output, no think/tool tags
-                has_visible_content = true;
-            }
-
-            if (has_visible_content) {
-                // when reasoning was force-ended, require a minimum number of tokens
-                // before clearing suppression, to avoid premature EOG on brief transition text
-                if (slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
-                    SLT_INF(slot, "visible content detected but reasoning was forced, keeping EOG suppression (%d/20 tokens)\n",
-                            slot.n_tokens_after_reasoning);
-                } else {
-                    slot.suppress_eog = false;
-                    common_sampler_set_suppress_eog(slot.smpl.get(), false);
-                    SLT_INF(slot, "%s", "visible content detected, clearing EOG suppression\n");
-                }
-            }
-        }
-
-        if (incomplete) {
         if (incomplete && !stopped_before_process) {
             slot.has_next_token = true;
         }
 
-        // if context shifting is disabled (no K-shift), make sure that we don't run out of context
-        if (!params_base.ctx_shift &&
-                slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+        // if context shifting is disabled, make sure that we don't run out of context
+        if (!params_base.ctx_shift && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
             slot.truncated      = true;
             slot.stop           = STOP_TYPE_LIMIT;
             slot.stop_detail    = "context_limit";
@@ -3084,21 +2337,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             SLT_DBG(slot, "stopped due to running out of context capacity, prompt.n_tokens() = %d, task.n_tokens = %d, n_gen = %d, n_ctx = %d\n",
                     slot.prompt.n_tokens(), slot.task->n_tokens(), (int) slot.stats.n_gen, slot.n_ctx);
         }
-
-#if defined(LLAMA_KVMEM)
-        // KVMem: gen_reserve, not n_ctx, is what caps a single turn's output.
-        // Stop before the decode that would fail, so the client gets a normal
-        // finish_reason=length instead of a torn-down request.
-        if (params_base.kvmem && slot.has_next_token && !slot.kvmem_can_append_one()) {
-            slot.truncated      = true;
-            slot.stop           = STOP_TYPE_LIMIT;
-            slot.has_next_token = false;
-
-            SLT_WRN(slot, "stopped: KVMem generation reserve exhausted, n_decoded = %d, "
-                    "store_n_tokens = %u (raise --kvmem-gen-reserve for longer turns)\n",
-                    slot.n_decoded, llama_kvmem_store_n_tokens());
-        }
-#endif
 
         // check the limits
         if (slot.stats.n_gen > 0 && slot.has_next_token && !slot.has_budget()) {
@@ -3161,127 +2399,11 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         }
 
         if (llama_vocab_is_eog(vocab, result.tok)) {
-            // check for early stop without output
-            bool early_stop_no_output = false;
-            if (params_base.sampling.eog_retry_max > 0 && slot.eog_retry_count < params_base.sampling.eog_retry_max) {
-                if (slot.n_sent_text == 0) {
-                    early_stop_no_output = true;
-                } else {
-                    const auto & gt = slot.generated_text;
-                    bool has_think_open  = gt.find("<think>")     != std::string::npos;
-                    bool has_think_close = gt.find("</think>")    != std::string::npos;
-                    bool has_tool_call   = gt.find("<tool_call>") != std::string::npos;
-
-                    // <think> may have been pre-injected into the prompt (via --reasoning on
-                    // or preserve_thinking template), so generated_text lacks the opening tag;
-                    // rbudget COUNTING means we are still inside a reasoning block
-                    if (!has_think_open && common_sampler_is_reasoning_active(slot.smpl.get())) {
-                        has_think_open = true;
-                    }
-
-                    // thinking opened but not closed (no </think> and no <tool_call>)
-                    if (has_think_open && !has_think_close && !has_tool_call) {
-                        early_stop_no_output = true;
-                    }
-
-                    // </think> present but only whitespace after it
-                    if (!early_stop_no_output) {
-                        size_t think_end = gt.rfind("</think>");
-                        if (think_end != std::string::npos && !has_visible_after(gt, think_end + 8)) {
-                            early_stop_no_output = true;
-                        }
-                    }
-
-                    // tool_call opened but not closed
-                    if (!early_stop_no_output && has_tool_call) {
-                        if (has_unclosed_tag(gt, "<tool_call>", "</tool_call>")) {
-                            early_stop_no_output = true;
-                        }
-                    }
-
-                    // reasoning was force-ended (budget exhausted) but model produced too
-                    // few tokens after </think> - likely about to call a tool or produce
-                    // a full answer but stopped prematurely
-                    if (!early_stop_no_output && slot.n_tokens_after_reasoning >= 0 && slot.n_tokens_after_reasoning < 20) {
-                        early_stop_no_output = true;
-                    }
-
-                    // multiple </think> tags: the model emitted a spurious closing
-                    // tag inside content. PEG parser splits at the first one, so
-                    // content after the first </think> (including the stray tag)
-                    // reaches the client. Trigger self-check so the model can
-                    // confirm whether its reply is actually complete.
-                    if (!early_stop_no_output && has_think_close) {
-                        size_t first_close = gt.find("</think>");
-                        if (first_close != std::string::npos &&
-                            gt.find("</think>", first_close + 8) != std::string::npos) {
-                            early_stop_no_output = true;
-                            slot.self_check_reason = "multiple_think_close";
-                        }
-                    }
-                }
-            }
-
-            if (early_stop_no_output) {
-                slot.eog_retry_count++;
-
-                // arm monitoring regardless of which path is taken below
-                slot.monitoring_turns = 5;
-
-                // Try a hidden self-check turn first: ask the model whether its
-                // reply is complete.  This gates the EOS decision on the model's
-                // own judgement rather than blindly suppressing EOG.  The
-                // self-check prompt is an internal protocol using generic
-                // <complete>/<incomplete> markers that work across all vendors.
-                bool self_check_armed = false;
-                // the hidden self-check turn is truncated from the KV cache via
-                // sequence removal when it ends with <incomplete>. recurrent and
-                // hybrid caches only allow a rollback bounded by n_rs_seq, so the
-                // removal can fail there - skip self-check and use the direct
-                // EOG-suppression fallback below for such contexts instead
-                if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART &&
-                        !slot.cached_messages.empty() && slot.self_check_phase == server_slot::SELF_CHECK_NONE) {
-                    std::string sc_prompt = build_self_check_prompt(slot);
-                    if (!sc_prompt.empty()) {
-                        llama_tokens sc_tokens = common_tokenize(ctx_tgt, sc_prompt, false, true);
-                        if (!sc_tokens.empty()) {
-                            slot.self_check_prefill  = std::move(sc_tokens);
-                            slot.self_check_phase    = server_slot::SELF_CHECK_PREFILL;
-                            slot.self_check_complete = false;
-                            slot.self_check_text.clear();
-                            self_check_armed = true;
-                            SLT_WRN(slot, "early stop detected, triggering hidden self-check (retry %d/%d, %zu prefill tokens)\n",
-                                    slot.eog_retry_count, params_base.sampling.eog_retry_max,
-                                    slot.self_check_prefill.size());
-                        }
-                    }
-                }
-
-                if (!self_check_armed) {
-                    // Fallback: no cached messages or tokenization failed -
-                    // suppress EOG directly so the model continues generating
-                    slot.suppress_eog = true;
-                    common_sampler_set_suppress_eog(slot.smpl.get(), true);
-                    SLT_WRN(slot, "early stop without output detected, suppressing EOG directly (retry %d/%d, monitoring %d turns)\n",
-                            slot.eog_retry_count, params_base.sampling.eog_retry_max,
-                            slot.monitoring_turns);
-                }
-            } else {
-                slot.stop           = STOP_TYPE_EOS;
-                slot.has_next_token = false;
-
-                SLT_DBG(slot, "%s", "stopped by EOS\n");
-            }
-        }
-
-        if (params_base.sampling.runaway_threshold > 0 && slot.n_consecutive_repeat >= params_base.sampling.runaway_threshold * 8) {
-            slot.stop           = STOP_TYPE_LIMIT;
             slot.stop           = STOP_TYPE_EOS;
             slot.stop_detail    = "eos";
             slot.has_next_token = false;
 
-            SLT_WRN(slot, "stopped due to runaway repetition despite temp boost, token %d repeated %d times\n",
-                    slot.last_repeated_tok, slot.n_consecutive_repeat);
+            SLT_DBG(slot, "%s", "stopped by EOS\n");
         }
 
         SLT_DBG(slot, "n_gen = %d, n_remaining = %d, next token: %5d '%s'\n", (int) slot.stats.n_gen, slot.n_remaining(), result.tok, token_str.c_str());
@@ -3369,18 +2491,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         res->n_ctx           = n_ctx;
 
         queue_results.send(std::move(res));
-    }
-
-    // Gate slot save/restore/erase on slot content (does it hold media),
-    // not model capability: a multimodal model may hold a pure-text slot.
-    bool check_slot_no_media(const server_slot & slot, const int id_task) {
-        if (slot.prompt.tokens.has_media()) {
-            send_error(id_task,
-                "This operation is not supported while the slot holds image/audio tokens (a pure-text prefix is supported)",
-                ERROR_TYPE_NOT_SUPPORTED);
-            return false;
-        }
-        return true;
     }
 
     void send_partial_response(server_slot & slot, const completion_token_output & tkn, bool is_progress, bool is_begin = false) {
@@ -3578,7 +2688,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         try {
             auto & prompt = task.cli_prompt;
             if (mctx != nullptr) {
-                task.tokens = process_mtmd_prompt(mctx, prompt, task.cli_files, mtmd_helper_init_opt_default());
                 task.tokens = process_mtmd_prompt(mctx, prompt, task.cli_files, init_opt);
             } else {
                 task.tokens = std::move(tokenize_input_prompts(vocab, mctx, prompt, true, true, init_opt)[0]);
@@ -3734,7 +2843,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         // created by the current task
         int64_t last = -1;
         for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end(); ) {
-            if (it->id_task != id_task && last >= 0 && it->n_tokens <= last + params_base.checkpoint_min_step) {
             if (it->id_task != id_task && last >= 0 && it->n_tokens <= last + checkpoint_min_step) {
                 SLT_TRC(slot, "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                         it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
@@ -3747,49 +2855,8 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             ++it;
         }
 
-        llama_pos pos_end = slot.prompt.tokens.pos_next(slot.prompt.n_tokens() - n_tokens_cur);
-
         while (slot.prompt.checkpoints.size() >= (size_t) params_base.n_ctx_checkpoints) {
             // make room for the new checkpoint, if needed
-            // if we have > 4 checkpoints, keep the first 2 and last 2, and erase the one with the smallest
-            // gap between adjacent checkpoints, in order to preserve coverage of the full prompt history
-            if (slot.prompt.checkpoints.size() > 4) {
-                int64_t min_merged_span = INT64_MAX;
-                auto erase_it = slot.prompt.checkpoints.begin();
-                ++erase_it; // start from the second element (index 1)
-
-                auto prev_it = slot.prompt.checkpoints.begin();
-                auto cur_it = erase_it;
-                auto next_it = std::next(cur_it);
-
-                for (size_t i = 1; i < slot.prompt.checkpoints.size() - 1; ++i) {
-                    const int64_t merged_span = (int64_t) next_it->n_tokens - (int64_t) prev_it->n_tokens;
-                    if (merged_span < min_merged_span) {
-                        min_merged_span = merged_span;
-                        erase_it = cur_it;
-                    }
-                    prev_it = cur_it;
-                    cur_it = next_it;
-                    next_it = std::next(next_it);
-                }
-
-                const auto & cur = *erase_it;
-                SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
-                        cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
-                slot.prompt.checkpoints.erase(erase_it);
-                continue;
-            }
-
-            if (slot.prompt.checkpoints.size() == 4) {
-                auto erase_it = slot.prompt.checkpoints.begin();
-                ++erase_it; // second element
-                const auto & cur = *erase_it;
-                SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
-                        cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
-                slot.prompt.checkpoints.erase(erase_it);
-                continue;
-            }
-
             const auto & cur = slot.prompt.checkpoints.front();
 
             SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
@@ -3798,24 +2865,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
         }
 
-        auto & cur = slot.prompt.checkpoints.emplace_back();
-
-        cur.id_task = id_task;
-
-        // [TAG_CHECKPOINTS_FIX_POS_MIN]
-        // TODO: here we incorrectly deterimne that the saved checkpoint data covers the [pos_min, pos_max] range
-        //       this is not true for SWA models: https://github.com/ggml-org/llama.cpp/pull/24411#issuecomment-4677983225
-        cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max, pos_end);
-
-        cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        // stash the draft's speculative state with the checkpoint
-        common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
-
-        SLT_TRC(slot,
-                "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", pos_end = %d, size = %.3f MiB)\n",
-                (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
-                cur.pos_max, cur.n_tokens, (int) cur.pos_end, (float) cur.size() / 1024 / 1024);
         slot.prompt.checkpoints.push_back(std::move(cur));
         const auto & admitted = slot.prompt.checkpoints.back();
 
@@ -4039,9 +3088,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
                         break;
                     }
-                    if (!check_slot_no_media(*slot, task.id)) {
-                        break;
-                    }
                     if (slot->is_processing()) {
                         // if requested slot is unavailable, we defer this task for processing later
                         SRV_DBG("requested slot is unavailable, defer task, id_task = %d\n", task.id);
@@ -4054,9 +3100,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     std::string filename = task.slot_action.filename;
                     std::string filepath = task.slot_action.filepath;
 
-                    const llama_tokens tokens = slot->prompt.tokens.get_text_tokens();
-                    const size_t token_count = tokens.size();
-                    const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
                     std::vector<char> packed;
                     try {
                         packed = slot->prompt.tokens.serialize();
@@ -4107,18 +3150,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     std::string filename = task.slot_action.filename;
                     std::string filepath = task.slot_action.filepath;
 
-                    llama_tokens tokens;
-                    tokens.resize(slot->n_ctx);
-                    size_t token_count = 0;
-                    size_t nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), tokens.size(), &token_count);
-                    if (nread == 0) {
-                        slot->prompt.clear(); // KV may already been invalidated?
-                        send_error(task, "Unable to restore slot, no available space in KV cache or invalid slot save file", ERROR_TYPE_INVALID_REQUEST);
-                        break;
-                    }
-                    tokens.resize(token_count);
-                    slot->prompt.clear();
-                    slot->prompt.tokens.insert(tokens);
                     size_t nread = 0;
                     try {
                         size_t n_packed = 0;
@@ -4151,15 +3182,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         break;
                     }
 
-                    // A restored slot has no context checkpoint, so the next
-                    // request with cache_prompt finds no reuse anchor and
-                    // reprocesses the entire restored prefix. Create a
-                    // checkpoint spanning the restored span so the restored
-                    // KV is actually reused.
-                    if (params_base.n_ctx_checkpoints > 0) {
-                        create_checkpoint(*slot, (int64_t) 0, 0, (llama_pos) (token_count > 0 ? token_count - 1 : 0));
-                    }
-
                     const int64_t t_end = ggml_time_us();
                     const double t_restore_ms = (t_end - t_start) / 1000.0;
 
@@ -4179,10 +3201,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
                         send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
-                        break;
-                    }
-                    // Gate on slot content, consistent with save/restore.
-                    if (!check_slot_no_media(*slot, task.id)) {
                         break;
                     }
                     if (slot->is_processing()) {
@@ -4253,18 +3271,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 callback(slot);
             } catch (const std::exception & e) {
                 SLT_ERR(slot, "got exception: %s\n", e.what());
-#if defined(LLAMA_KVMEM)
-                // "The request does not fit the working set" is a property of the request,
-                // not a server fault: answer it as a client error with the actionable text
-                // rather than a 500. llama_kvmem_check_fit() normally rejects these before
-                // the prefill, so this is the path where it still slipped through.
-                const int fit = llama_kvmem_classify_fit_error(e.what());
-                if (fit != LLAMA_KVMEM_FIT_OK) {
-                    send_error(slot, llama_kvmem_fit_error_message(fit), ERROR_TYPE_INVALID_REQUEST);
-                    slot.release();
-                    continue;
-                }
-#endif
                 send_error(slot, std::string("got exception: ") + e.what(), ERROR_TYPE_SERVER);
                 slot.release();
             }
@@ -4396,27 +3402,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             llama_set_embeddings(ctx_tgt, slot_batched->need_embd());
         }
 
-        GGML_ASSERT(batch.slot_batched || batch.size() == 0);
-
-        if (batch.slot_batched) {
-            auto & slot_batched      = batch.slot_batched;
-            auto & alora_scale       = batch.alora_scale;
-            auto & alora_disabled_id = batch.alora_disabled_id;
-
-            // TODO @ngxson : alora handling is too messy, need to refactor it to be more clear and maintainable
-            // apply lora, only need to do it once per batch
-            common_set_adapter_lora(ctx_tgt, slot_batched->lora);
-
-            // if the lora is temporarily disabled for an alora, re-enable it
-            // for next time
-            if (alora_scale > 0.0f) {
-                SRV_DBG("re-enabling alora with scale %f\n", alora_scale);
-                slot_batched->lora[alora_disabled_id].scale = alora_scale;
-            }
-
-            llama_set_embeddings(ctx_tgt, slot_batched->need_embd());
-        }
-
         llama_batch batch_view;
         int32_t off_next = 0;
         int32_t n_batch = llama_n_batch(ctx_tgt);
@@ -4463,13 +3448,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
         // apply context-shift if needed
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
-            if (slot.is_processing() && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
-                // skip context shift for slots that just started a new task
-                // the prompt processing code will clear the old KV cache
-                if (slot.state == SLOT_STATE_STARTED) {
-                    return;
-                }
-
+            if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
                 if (!params_base.ctx_shift) {
                     // this check is redundant (for good)
                     // we should never get here, because generation should already stopped in process_token()
@@ -4478,27 +3457,11 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     return;
                 }
 
-                // A context shift remaps every position, so two things must hold before we may do
-                // it: the target memory has to support it, and so does the draft memory, because
-                // slot.mem.seq_add() remaps both of them (see common_memory::seq_add).
-                // Note that recurrent memory reports can_shift() == true (moving its head position
-                // is trivially supported), so this is *not* a "KVMem / recurrent" pair - the false
-                // cases are KVMem and the odd non-shiftable attention memories (step35, multiple
-                // pos-per-embd, SWA with mismatched base/swa sizes).
-                // common_init_from_params() already disables ctx_shift for a non-shiftable target,
-                // so this stays a safety net: never shift a memory that cannot follow.
-                // params_base.kvmem is checked explicitly and on purpose - KVMem's tiered index
-                // (block original positions + per-row metadata) cannot follow a remap, and that
-                // guarantee must not silently depend on the adapter's get_can_shift() alone.
-                const bool can_shift_dft = ctx_dft == nullptr ||
-                                           llama_memory_can_shift(llama_get_memory(ctx_dft));
-                if (params_base.kvmem ||
-                        !llama_memory_can_shift(llama_get_memory(ctx_tgt)) ||
-                        !can_shift_dft) {
-                    SLT_WRN(slot, "%s", params_base.kvmem
-                            ? "KVMem does not support context shift: the tiered block index is built from the "
-                              "old position numbering and cannot follow a remap - raise --ctx-size instead\n"
-                            : "context shift is not supported by this context, refusing to shift\n");
+                if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
+                    // The memory cannot remap positions (recurrent memory, or a tiered/sparse
+                    // backend such as KVMem whose block index is built from the old numbering).
+                    // KVMem has its own capacity management: raise --ctx-size instead.
+                    SRV_WRN("%s\n", "context shift is not supported by this context, refusing to shift");
                     send_error(slot, "context shift is not supported by this context", ERROR_TYPE_SERVER);
                     slot.release();
                     return;
@@ -4530,17 +3493,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                 // ref: https://github.com/ggml-org/llama.cpp/pull/24786
                 n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
-
-                {
-                    const auto & prompt_tokens = slot.prompt.tokens.get_tokens();
-                    int junction = n_keep + n_discard;
-                    int shift = check_tag_boundary(ctx_tgt, prompt_tokens, junction);
-                    if (shift != 0) {
-                        SLT_WRN(slot, "adjusted context shift boundary by %d tokens to avoid splitting a tag\n", shift);
-                        n_discard += shift;
-                        n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
-                    }
-                }
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
@@ -4619,15 +3571,9 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     } else {
                         GGML_ASSERT(slot.spec_i_batch.empty());
 
-                        llama_pos pos_end = slot.prompt.tokens.pos_next(slot.prompt.n_tokens());
                         slot.spec_ckpt.update_pos(
                                 slot.prompt.n_tokens(),
                                 llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
-                                llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
-                                pos_end);
-
-                        if (use_ckpt_dft) {
-                            slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                                 llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
                         slot.spec_ckpt.data_spec.clear();
                         common_speculative_get_state(spec.get(), slot.id, slot.spec_ckpt.data_spec);
@@ -4697,11 +3643,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
             if (slot.draft_owns_state) {
                 if (use_ckpt_dft) {
-                    ckpt.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                }
-
-                if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, ckpt.pos_max + 1, -1)) {
-                    GGML_ABORT("failed to remove sequence %d\n", slot.id);
                     if (!restore_checkpoint_transaction(
                                 slot, ckpt, nullptr, ctx_dft,
                                 false, true, false)) {
@@ -4747,8 +3688,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 const bool use_ckpt_tgt = server_speculative_rollback_requires_checkpoint(
                         ctx_tgt_seq_rm_type, common_context_seq_rm_max_rollback(ctx_tgt), draft.size());
 
-                const bool use_ckpt_dft =
-                   (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft));
                 const bool use_ckpt_dft = slot.draft_owns_state && server_speculative_rollback_requires_checkpoint(
                         ctx_dft_seq_rm_type, common_context_seq_rm_max_rollback(ctx_dft), draft.size());
 
@@ -4775,7 +3714,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                 }
 
                 if (use_ckpt_dft) {
-                    ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                     const auto capture = ckpt.update_dft(
                             ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                     if (!capture.ok()) {
@@ -4866,13 +3804,19 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             // image's blocks - so tell KVMem where the media rows are. Row
                             // coordinates, same space as the store's token rows.
                             std::vector<uint32_t> mm_starts, mm_ends;
-                            if (input_tokens.has_media()) {
+                            if (input_tokens.has_mtmd) {
                                 std::string mm_dbg;
-                                for (const auto & [chunk, at] : input_tokens.get_media_chunks()) {
-                                    const size_t n = mtmd_input_chunk_get_n_tokens(chunk->get());
+                                size_t mm_cursor = 0;
+                                while (mm_cursor < input_tokens.size()) {
+                                    const auto [chunk, at] = input_tokens.find_next_media_chunk(mm_cursor);
+                                    if (chunk == nullptr) {
+                                        break;
+                                    }
+                                    const size_t n = mtmd_input_chunk_get_n_tokens((*chunk)->get());
                                     mm_starts.push_back((uint32_t) at);
                                     mm_ends  .push_back((uint32_t) (at + n));
                                     mm_dbg += " [" + std::to_string(at) + "," + std::to_string(at + n) + ")";
+                                    mm_cursor = at + 1;
                                 }
                                 SLT_INF(slot, "KVMem media rows: %zu chunk(s) in [0, %d):%s\n",
                                         mm_starts.size(), n_prompt, mm_dbg.c_str());
@@ -4901,6 +3845,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         }
 #endif
 
+
                         SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                 slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
 
@@ -4919,7 +3864,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
-                        int n_past_common = 0;
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -4965,7 +3909,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             if (slot.task->n_tokens() >= slot.n_ctx) {
                                 send_error(slot,
                                            string_format("request (%d tokens) exceeds the available context size (%d "
-                                                         "tokens), try increasing it or enable context shift",
+                                                         "tokens), try increasing it",
                                                          slot.task->n_tokens(), slot.n_ctx),
                                            ERROR_TYPE_EXCEED_CONTEXT_SIZE);
                                 slot.release();
@@ -4975,7 +3919,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             if (slot.task->params.cache_prompt) {
                                 // reuse any previously computed tokens that are common with the new prompt
                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
-                                n_past_common = n_past;
                                 slot.n_prompt_tokens_lcp = n_past;
                                 if (n_past > 0 && slot.prompt_cache_source == "none") {
                                     slot.prompt_cache_source = "live";
@@ -5063,9 +4006,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
 
-                            // pos_next can be reduced below by a checkpoint restore - remember the divergence point for the checkpoint invalidation
-                            const llama_pos pos_next_lcp = pos_next;
-
                             if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                 if (pos_min == -1) {
@@ -5133,32 +4073,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
-                                    // search for a context checkpoint
-                                    const bool is_recurrent_or_hybrid = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
-                                    const auto prefix_end = slot.prompt.tokens.pos_next(slot.task->n_tokens());
-                                    const auto it = std::find_if(
-                                        slot.prompt.checkpoints.rbegin(),
-                                        slot.prompt.checkpoints.rend(),
-                                        [&](const auto & cur) {
-                                            // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
-                                            SLT_TRC(slot, "checking checkpoint with [%d, %d], pos_end = %d against %d...\n", cur.pos_min, cur.pos_max, (int)cur.pos_end, pos_min_thold);
-                                            // checkpoint is invalid if it ends after the new prompt
-                                            if (cur.pos_end > prefix_end) {
-                                                return false;
-                                            }
-                                            // workaround for [TAG_CHECKPOINTS_FIX_POS_MIN]
-                                            if (is_recurrent_or_hybrid) {
-                                                const bool ckpt_exact = cur.pos_min == cur.pos_max;
-                                                if (ckpt_exact) {
-                                                    // usable only if the tokens up to and including its position are
-                                                    // a prefix of the new prompt
-                                                    return cur.pos_max < pos_min_thold;
-                                                }
-                                                return cur.pos_max < pos_next || cur.pos_min == 0;
-                                            }
-                                            if (cur.pos_max > pos_next) {
-                                                return false;
                                 llama_pos main_p0 = pos_next;
                                 llama_pos main_p1 = -1;
                                 llama_pos draft_p0 = pos_next;
@@ -5223,29 +4137,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                                                 SLT_TRC(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
                                             }
                                         }
-                                    );
-
-                                    bool do_reset = it == slot.prompt.checkpoints.rend();
-
-                                    if (!do_reset) {
-                                        // restore the context checkpoint
-                                        it->load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        // restore the draft's speculative state
-                                        common_speculative_set_state(spec.get(), slot.id, it->data_spec);
-
-                                        pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
-                                        n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
-                                        n_past_common = std::min(n_past_common, (int) it->n_tokens);
-                                        SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
-                                    }
-
-                                    if (do_reset) {
-                                        SLT_TRC(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
-                                                "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-                                        pos_next = 0;
-                                        n_past = 0;
-                                        n_past_common = 0;
 
                                         if (do_reset) {
                                             const bool missing_kvarn_boundary =
@@ -5263,12 +4154,11 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             }
 
                             {
-                                // erase any checkpoints with pos_max > prompt_end
-                                const llama_pos pos_stale = std::min(pos_next_lcp, (llama_pos) slot.task->n_tokens());
+                                // erase any checkpoints with pos_max > pos_next
                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
                                     const auto & cur = *it;
-                                    if (cur.pos_max > pos_next || cur.pos_max >= pos_stale) {
-                                        SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, pos_stale = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (int)pos_stale, (float) cur.size() / 1024 / 1024);
+                                    if (cur.pos_max > pos_next) {
+                                        SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
                                         it = slot.prompt.checkpoints.erase(it);
                                     } else {
                                         ++it;
@@ -5283,7 +4173,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                         if (n_past == slot.task->n_tokens() && n_past > 0) {
                             SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
                             n_past--;
-                            n_past_common = std::min(n_past_common, n_past);
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
@@ -5292,7 +4181,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                         metrics.add_prompt_cached(n_past);
 
-                        slot.prompt.tokens.keep_first(std::max((size_t)n_past_common, (size_t)n_past));
+                        slot.prompt.tokens.keep_first(n_past);
 
                     } // end of SLOT_STATE_STARTED
 
@@ -5312,16 +4201,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
-#if defined(LLAMA_KVMEM)
-                    if (params_base.kvmem) {
-                        // KVMem keeps a tiered store (and its per-row position metadata)
-                        // next to the KV cache. Everything past the reused prefix just left
-                        // the cache - drop it from the store as well, otherwise a later
-                        // stage-in would reference rows whose metadata is already gone
-                        // ("missing cache row position metadata"). This mirrors the
-                        // standalone kvmem server, which truncates right after seq_rm().
-                        llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) p0));
                     llama_pos planned_p0 = p0;
                     const auto normalize_p0 = [&](llama_pos value) {
                         return value > 0
@@ -5375,7 +4254,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             send_partial_response(slot, {}, false, true);
                         }
                     }
-#endif
 
                     // If using an alora, there may be uncached tokens that come
                     // before the invocation sequence. When this happens, the
@@ -5435,13 +4313,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             SLT_ERR(slot, "failed to process mtmd chunk, res = %d\n", res);
                             send_error(slot, "failed to process mtmd chunk", ERROR_TYPE_SERVER);
                             slot.release();
-                            // release() -> reset() moves the task out of the slot, so slot.task
-                            // is nullptr from here on: both this loop's own condition
-                            // (slot.task->n_tokens()) and the code right after it
-                            // (slot.task->params.message_spans) would dereference null.
-                            // Nothing is left to do for this slot - leave the per-slot
-                            // callback instead of looping back into it.
-                            return;
                             return; // the slot is done, skip it entirely
                         }
 
@@ -5493,12 +4364,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                             const auto pos = slot.prompt.n_tokens();
                             const auto & checkpoints = slot.prompt.checkpoints;
 
-                        // break at the last user message, or at user messages at least min step past the last checkpoint
-                        if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
-                            const auto pos = slot.prompt.n_tokens();
-                            const auto & checkpoints = slot.prompt.checkpoints;
-
-                            if (pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + params_base.checkpoint_min_step) {
                             if (pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + checkpoint_min_step) {
                                 break;
                             }
@@ -5540,26 +4405,9 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     const bool is_last_user_message = n_tokens_start == last_user_pos;
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
-                        if (batch.size() == 0) {
-                            SLT_WRN(slot, "%s", "prompt fully cached but batch is empty, forcing re-evaluation of last token\n");
-                            const llama_pos p_last = slot.prompt.tokens.pos_next() - 1;
-                            slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - 1);
-                            common_context_seq_rm(ctx_tgt, slot.id, p_last, -1);
-                            if (ctx_dft) {
-                                common_context_seq_rm(ctx_dft, slot.id, p_last, -1);
-                            }
-#if defined(LLAMA_KVMEM)
-                            if (params_base.kvmem) {
-                                // same bookkeeping as the reused-prefix path above: the row at
-                                // p_last has just left the KV cache. This is the branch an
-                                // mtmd prompt takes when its last chunk ends up fully cached.
-                                llama_kvmem_truncate_cached((uint32_t) std::max(0, p_last));
-                            }
-#endif
-                            return;
-                        }
-
                         slot.state = SLOT_STATE_DONE_PROMPT;
+
+                        GGML_ASSERT(batch.size() > 0);
 
                         // extract the logits only for the last token
                         batch.set_output(batch.size() - 1, true);
@@ -5593,7 +4441,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
                     do_checkpoint = do_checkpoint && (
                             slot.prompt.checkpoints.empty() ||
                             is_last_user_message || near_prompt_end ||
-                            n_tokens_start > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
                             n_tokens_start > slot.prompt.checkpoints.back().n_tokens + checkpoint_min_step);
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
@@ -5639,7 +4486,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
             }
         }
 
-        const int ret = llama_decode(ctx_tgt, batch_view);
         bool has_output = false;
         for (int i = off; i < off + batch_view.n_tokens; ++i) {
             has_output |= batch.tokens[i].output;
@@ -5690,25 +4536,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
             {
                 std::string err;
-
-                if (n_batch == 1 && ret == 1) {
-                    // TODO: try to terminate only the largest active slot/sequence and continue with the rest
-                    //       need to remove the tokens from the current batch too
-#if defined(LLAMA_KVMEM)
-                    // With KVMem the whole context is not the limit: a slot pool
-                    // (budget + gen_reserve) is. "Context size has been exceeded"
-                    // would point the user at --ctx-size / --context-shift, which
-                    // cannot help. Name the real knob instead.
-                    if (params_base.kvmem) {
-                        err = "KVMem ran out of GPU slots for this request. The pinned retrieval "
-                              "working set cannot be evicted, so a single turn is capped by "
-                              "--kvmem-gen-reserve - raise it, or lower --kvmem-budget, and retry.";
-                    } else
-#endif
-                    {
-                        err = "Context size has been exceeded.";
-                    }
-                }
 
                 if (ret == -1) {
                     err = "Invalid input batch.";
@@ -5850,6 +4677,7 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;
+
 #if defined(LLAMA_KVMEM)
                 if (params_base.kvmem) {
                     // Prefill finished: apply the retrieval selection, then stop harvesting
@@ -5993,19 +4821,6 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
                         SLT_DBG(slot, "restoring speculative checkpoint (pos_min = %d, pos_max = %d, size = %zu)\n", ckpt.pos_min, ckpt.pos_max, ckpt.size());
 
-                        ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-
-                        if (slot.ctx_dft) {
-                            ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                        }
-
-                        slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);
-#if defined(LLAMA_KVMEM)
-                        if (params_base.kvmem) {
-                            // speculative rollback: drop the same tail from the KVMem store
-                            llama_kvmem_truncate_cached((uint32_t) std::max(0, ckpt.pos_max + 1));
-                        }
-#endif
                         if (!restore_checkpoint_transaction(
                                     slot, ckpt, slot.ctx_tgt, slot.draft_owns_state ? slot.ctx_dft : nullptr,
                                     true, use_ckpt_dft, true)) {
@@ -6091,9 +4906,10 @@ static bool has_visible_after(const std::string & text, size_t offset) {
 
             slot.mem.seq_rm(slot.id, slot.prompt.tokens.pos_next(), -1);
 #if defined(LLAMA_KVMEM)
+            // KVMem keeps rows that are no longer in the KV cache; without this the next
+            // stage-in trips over missing row metadata.
             if (params_base.kvmem) {
-                // accepted draft tokens shift the prompt end; drop the same tail from the store
-                llama_kvmem_truncate_cached((uint32_t) std::max(0, (int32_t) slot.prompt.tokens.pos_next()));
+                llama_kvmem_truncate_cached((uint32_t) std::max(0, slot.prompt.tokens.pos_next()));
             }
 #endif
 
@@ -6363,7 +5179,6 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
     auto res = create_response();
-    res->set_req(&req);
     auto completion_id = gen_chatcmplid();
     auto & rd = res->rd;
     auto & params = this->params;
@@ -6372,10 +5187,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
     int32_t sse_ping_interval = params.sse_ping_interval;
 
-    auto create_tasks = [&]() {
+    try {
         std::vector<server_task> tasks;
 
         const auto & prompt = data.at("prompt");
+        // TODO: this log can become very long, put it behind a flag or think about a more compact format
+        //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
 
         if (!params.path_prompts_log_dir.empty()) {
             const auto file_path = std::filesystem::path(params.path_prompts_log_dir) / string_format("%012" PRId64 ".txt", ggml_time_ms());
@@ -6387,15 +5204,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             }
         }
 
+        // process prompt
         std::vector<server_tokens> inputs;
 
         if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
-            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files, mtmd_helper_init_opt_default()));
-        } else {
-            inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
-        }
-
-        auto delimiters = common_chat_msg_delimiters_parse(json_value(data, "message_delimiters", json::array()));
             // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
             inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files, ctx_server.init_opt));
         } else {
@@ -6422,16 +5234,17 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     meta->logit_bias_eog,
                     data);
 
-            task.params.message_spans      = task.tokens.find_message_spans(delimiters);
-            task.params.message_delimiters = delimiters;
+            task.params.message_spans = task.tokens.find_message_spans(delimiters);
 
             task.id_slot = json_value(data, "id_slot", -1);
             sse_ping_interval = task.params.sse_ping_interval;
 
+            // OAI-compat
             task.params.res_type          = res_type;
             task.params.oaicompat_cmpl_id = completion_id;
             task.params.oaicompat_model   = meta->model_name;
 
+            // prepare child tasks
             if (task.params.n_cmpl > 1) {
                 int n_children = task.params.n_cmpl - 1;
                 for (int j = 0; j < n_children; j++) {
@@ -6442,81 +5255,45 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             tasks.push_back(std::move(task));
         }
 
-        return tasks;
-    };
+        rd.post_tasks(std::move(tasks));
+    } catch (const std::exception & e) {
+        res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+        return res;
+    }
 
     bool stream = json_value(data, "stream", false);
 
     if (!stream) {
         // non-stream, wait for the results
-        int http_retry = 0;
-        const int http_retry_max = params.sampling.eog_retry_max;
-
-        while (true) {
-            try {
-                auto tasks = create_tasks();
-                if (http_retry > 0) {
-                    for (auto & task : tasks) {
-                        if (http_retry >= 2) {
-                            task.params.sampling.seed += http_retry;
-                        }
-                    }
-                    SRV_WRN("empty output, retrying non-stream completion (%d/%d)\n", http_retry, http_retry_max);
-                }
-                rd.post_tasks(std::move(tasks));
-            } catch (const std::exception & e) {
-                res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
-                return res;
+        auto all_results = rd.wait_for_all(req.should_stop);
+        if (all_results.is_terminated) {
+            return res; // connection is closed
+        } else if (all_results.error) {
+            res->error(all_results.error->to_json());
+            return res;
+        } else {
+            json arr = json::array();
+            for (auto & res : all_results.results) {
+                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
+                arr.push_back(res->to_json());
             }
-
-            auto all_results = rd.wait_for_all(req.should_stop);
-            if (all_results.is_terminated) {
-                return res;
-            } else if (all_results.error) {
-                res->error(all_results.error->to_json());
-                return res;
-            }
-
-            // check for empty output
-            bool has_output = false;
-            for (auto & result : all_results.results) {
-                auto * final_result = dynamic_cast<server_task_result_cmpl_final*>(result.get());
-                if (final_result && (!final_result->oaicompat_msg.content.empty() || !final_result->oaicompat_msg.tool_calls.empty())) {
-                    has_output = true;
-                    break;
+            GGML_ASSERT(!arr.empty() && "empty results");
+            if (arr.size() == 1) {
+                // if single request, return single object instead of array
+                res->ok(arr[0]);
+            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
+                // if multiple results in OAI format, we need to re-format them
+                json & choices = arr[0]["choices"];
+                for (size_t i = 1; i < arr.size(); i++) {
+                    choices.push_back(std::move(arr[i]["choices"][0]));
                 }
+                res->ok(arr[0]);
+            } else {
+                // multi-results, non-OAI compat
+                res->ok(arr);
             }
-
-            if (has_output || http_retry >= http_retry_max) {
-                json arr = json::array();
-                for (auto & result : all_results.results) {
-                    GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr);
-                    arr.push_back(result->to_json());
-                }
-                GGML_ASSERT(!arr.empty() && "empty results");
-                if (arr.size() == 1) {
-                    res->ok(arr[0]);
-                } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
-                    json & choices = arr[0]["choices"];
-                    for (size_t i = 1; i < arr.size(); i++) {
-                        choices.push_back(std::move(arr[i]["choices"][0]));
-                    }
-                    res->ok(arr[0]);
-                } else {
-                    res->ok(arr);
-                }
-                break;
-            }
-
-            http_retry++;
         }
     } else {
-        try {
-            rd.post_tasks(create_tasks());
-        } catch (const std::exception & e) {
-            res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
-            return res;
-        }
         // in streaming mode, the first error must be treated as non-stream response
         // this is to match the OAI API behavior
         // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309
@@ -6945,52 +5722,6 @@ void server_routes::init_routes() {
 
     this->get_props = [this](const server_http_req &) {
         auto res = create_response(true);
-
-        // this endpoint can be accessed during sleeping
-        // the next LOC is to avoid someone accidentally use ctx_server
-        bool ctx_server; // do NOT delete this line
-        GGML_UNUSED(ctx_server);
-
-        task_params tparams;
-        tparams.sampling = params.sampling;
-        json default_generation_settings_for_props = json {
-            { "params", tparams.to_json(true) },
-            { "n_ctx",  meta->slot_n_ctx },
-        };
-
-        std::string tmpl_default = common_chat_templates_source(meta->chat_params.tmpls.get(), "");
-        std::string tmpl_tools   = common_chat_templates_source(meta->chat_params.tmpls.get(), "tool_use");
-
-        json props = {
-            { "default_generation_settings", default_generation_settings_for_props },
-            { "total_slots",                 params.n_parallel },
-            { "model_alias",                 meta->model_name },
-            { "model_ftype",                 meta->model_ftype },
-            { "model_path",                  meta->model_path },
-            { "modalities",                  json {
-                {"vision", meta->has_inp_image},
-                {"video",  meta->has_inp_video},
-                {"audio",  meta->has_inp_audio},
-            } },
-            { "media_marker",                get_media_marker() },
-            { "endpoint_slots",              params.endpoint_slots },
-            { "endpoint_props",              params.endpoint_props },
-            { "endpoint_metrics",            params.endpoint_metrics },
-            { "ui",                          params.ui },
-            { "ui_settings",                 meta->json_ui_settings },
-            { "chat_template",               tmpl_default },
-            { "chat_template_caps",          meta->chat_template_caps },
-            { "bos_token",                   meta->bos_token_str },
-            { "eos_token",                   meta->eos_token_str },
-            { "build_info",                  meta->build_info },
-            { "is_sleeping",                 queue_tasks.is_sleeping() },
-            { "cors_proxy_enabled",          params.ui_mcp_proxy },
-            { "builtin_tools_enabled",       !params.server_tools.empty() },
-        };
-        if (params.use_jinja) {
-            if (!tmpl_tools.empty()) {
-                props["chat_template_tool_use"] = tmpl_tools;
-            }
         // note: do NOT use ctx_server here, this endpoint must be accessible during sleep
         if (queue_tasks.is_sleeping()) {
             std::unique_lock<std::mutex> lock(mutex_cache);
@@ -7711,7 +6442,6 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const l
         if (!prompt.is_string()) {
             throw std::runtime_error("for mtmd, input prompt must be a string.");
         }
-        n_tokens = process_mtmd_prompt(mctx, prompt.get<std::string>(), files, mtmd_helper_init_opt_default(), true).size();
         n_tokens = process_mtmd_prompt(mctx, prompt.get<std::string>(), files, init_opt, true).size();
     } else {
         n_tokens = tokenize_mixed(vocab, prompt, true, true).size();

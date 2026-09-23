@@ -4,6 +4,7 @@
 
 #include "common.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -54,6 +55,11 @@ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sa
 // or manual force), false if reached via a natural end sequence match.
 // Cleared when a new start sequence re-arms the sampler.
 bool common_reasoning_budget_was_forced(const struct llama_sampler * smpl);
+// Manually transition the sampler into FORCING so the forced sequence is
+// emitted next. Returns false when no forced sequence is configured.
+bool common_reasoning_budget_force_end(struct llama_sampler * smpl);
+
+size_t common_reasoning_budget_forced_token_count(const struct llama_sampler * smpl);
 
 // Manually transition the reasoning budget sampler into the FORCING state.
 // Returns true if the transition occurred.
