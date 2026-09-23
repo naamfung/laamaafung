@@ -54,10 +54,7 @@ struct llama_context {
     //   - changing attention type
     //   - etc.
     void sched_reserve();
-
-    // disable auto fused ops (Flash Attention, Gated Delta Net) whose op lands on a device
-    // that differs from the layer it belongs to (usually due to missing backend support)
-    void resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs);
+    void record_backend_private_workspace(ggml_cgraph * gf);
 
     void synchronize();
 
@@ -78,7 +75,8 @@ struct llama_context {
     llama_memory_t get_memory() const;
 
     // return true if the memory was updated
-    bool memory_update(bool optimize);
+    llama_memory_status memory_update(bool optimize);
+    bool grow_dflash_swa();
 
     enum llama_pooling_type pooling_type() const;
 
@@ -151,14 +149,16 @@ struct llama_context {
     // state save/load
     //
 
-    size_t state_get_size();
-    size_t state_get_data(      uint8_t * dst, size_t size);
-    size_t state_set_data(const uint8_t * src, size_t size);
+    size_t state_get_size(llama_state_seq_flags flags = 0);
+    size_t state_get_data(      uint8_t * dst, size_t size, llama_state_seq_flags flags = 0);
+    size_t state_set_data(const uint8_t * src, size_t size, llama_state_seq_flags flags = 0);
 
     size_t state_seq_get_size(llama_seq_id seq_id, llama_state_seq_flags flags);
 
     size_t state_seq_get_data(llama_seq_id seq_id,       uint8_t * dst, size_t size, llama_state_seq_flags flags);
     size_t state_seq_set_data(llama_seq_id seq_id, const uint8_t * src, size_t size, llama_state_seq_flags flags);
+    llama_state_seq_restore_plan * state_seq_prepare_data(
+            llama_seq_id seq_id, const uint8_t * src, size_t size, llama_state_seq_flags flags);
 
     bool state_load_file(
             const char * filepath,
@@ -266,8 +266,12 @@ private:
 
     llm_graph_cb graph_get_cb() const;
 
+    // disable auto fused ops (Flash Attention, Gated Delta Net) whose op lands on a device
+    // that differs from the layer it belongs to (usually due to missing backend support)
+    void resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs);
+
     // TODO: read/write lora adapters and cvec
-    size_t state_write_data(llama_io_write_i & io);
+    size_t state_write_data(llama_io_write_i & io, llama_state_seq_flags flags = 0);
     size_t state_read_data (llama_io_read_i  & io);
 
     size_t state_seq_write_data(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags);
@@ -348,15 +352,6 @@ private:
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;
 
-    // the Hadamard transforms this context's graphs consult: the model's own,
-    // plus the target's when the model borrows its token embeddings or output
-    // head through ctx_other (those tensors keep the target's folding)
-    llama_hadamard_rotations hadamard_rotations;
-    llama_hadamard_rotations hadamard_inverses;
-
-    // one-time Hadamard transform-coverage check on the first built graph
-    bool hadamard_verified = false;
-
     // training
     ggml_opt_context_t opt_ctx = nullptr;
 
@@ -372,6 +367,8 @@ private:
     std::vector<ggml_backend_t>             backend_ptrs;
     std::vector<ggml_backend_buffer_type_t> backend_buft;
     std::vector<size_t>                     backend_buf_exp_size; // expected buffer sizes
+    std::vector<size_t>                     backend_kvarn_workspace_y_size;
+    std::vector<size_t>                     backend_kvarn_workspace_split_k_size;
 
     llm_graph_result_ptr gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;

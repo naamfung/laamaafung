@@ -30,7 +30,6 @@ llama_memory_hybrid::llama_memory_hybrid(
                             /* layer filters */
     const layer_filter_cb & filter_attn,
     const layer_filter_cb & filter_recr,
-                     bool   replay,
                  uint32_t   n_ubatch,
                  uint32_t   tail_tokens,
                 ggml_type   tail_type,
@@ -73,8 +72,7 @@ llama_memory_hybrid::llama_memory_hybrid(
         n_rs_seq,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recr(il); }
-            : filter_recr,
-        replay
+            : filter_recr
     )) {}
 
 llama_memory_hybrid::llama_memory_hybrid(
@@ -220,9 +218,7 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
 }
 
 llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {
-    // the min of the total cache is the max of the two caches' min values.
-    // the recurrent state is valid only at its latest position, so the combined min must
-    // not report positions that the recurrent state cannot serve
+    // the min of the total cache is the max of the two caches' min values
     return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
 }
 
@@ -401,18 +397,6 @@ const llama_kv_cache_context * llama_memory_hybrid_context::get_attn_kv_context(
     auto * result = dynamic_cast<const llama_kv_cache_context *>(ctx_attn.get());
     GGML_ASSERT(result != nullptr);
     return result;
-}
-
-ggml_tensor * llama_memory_hybrid_context::get_turbo_rot_forward() const {
-    return ctx_attn ? ctx_attn->get_turbo_rot_forward() : nullptr;
-}
-
-ggml_tensor * llama_memory_hybrid_context::get_turbo_rot_inverse() const {
-    return ctx_attn ? ctx_attn->get_turbo_rot_inverse() : nullptr;
-}
-
-ggml_tensor * llama_memory_hybrid_context::get_turbo_innerq_scale_inv() const {
-    return ctx_attn ? ctx_attn->get_turbo_innerq_scale_inv() : nullptr;
 }
 
 const llama_memory_recurrent_context * llama_memory_hybrid_context::get_recr() const {

@@ -11,26 +11,10 @@
 #include <set>
 #include <functional>
 #include <map>
-#include <unordered_map>
 
 struct ggml_cgraph;
 struct ggml_context;
 struct ggml_tensor;
-
-// Maps a folded model weight to the activation-side transform applied
-// immediately before the matmul: optional sign flip, then the normalized
-// blockwise Hadamard rotation.
-struct llama_hadamard_transform {
-    ggml_tensor * rot;
-    ggml_tensor * signs; // nullptr for identity sign mode
-    // when perm_rep > 1 the activation arrives with its feature axis in tiled
-    // head order [hd, nk, rep] and must be permuted to the grouped order
-    // [hd, rep, nk] the fold was computed in, before signs and rotation
-    int64_t perm_hd  = 0;
-    int64_t perm_nk  = 0;
-    int64_t perm_rep = 0;
-};
-using llama_hadamard_rotations = std::unordered_map<const ggml_tensor *, llama_hadamard_transform>;
 
 struct llama_cparams;
 struct llama_layer;
@@ -84,12 +68,6 @@ enum llm_ffn_op_type : int {
 enum llm_ffn_gate_type {
     LLM_FFN_SEQ,
     LLM_FFN_PAR, // ffn_gate is parallel to ffn_up
-};
-
-struct llm_graph_fused_node {
-    llm_fused_op op;
-    ggml_tensor * tensor;
-    int il;
 };
 
 enum llm_norm_type {
@@ -888,8 +866,6 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
-    const llama_hadamard_rotations * hadamard_rotations;
-    const llama_hadamard_rotations * hadamard_inverses;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -924,7 +900,6 @@ struct llm_graph_params {
             ubatch.n_seq_tokens == other.ubatch.n_seq_tokens &&
             ubatch.n_seqs       == other.ubatch.n_seqs &&
             ubatch.n_seqs_unq   == other.ubatch.n_seqs_unq &&
-            ubatch.n_pos        == other.ubatch.n_pos &&
             (
                 (!ubatch.token && !other.ubatch.token) ||
                 (!ubatch.embd  && !other.ubatch.embd)  ||
@@ -987,6 +962,12 @@ struct llm_graph_params {
             loras == other.loras &&
             cross == other.cross;
     }
+};
+
+struct llm_graph_fused_node {
+    llm_fused_op op;
+    ggml_tensor * tensor;
+    int il;
 };
 
 class llm_graph_result {
@@ -1125,12 +1106,6 @@ struct llm_graph_context {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
-    const llama_hadamard_rotations * hadamard_rotations;
-    const llama_hadamard_rotations * hadamard_inverses;
-
-    // Transforms shared by folded weights on the same activation. Key is (input, rotation);
-    // both must match. Valid for one graph build only.
-    mutable std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hadamard_memo;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1145,15 +1120,6 @@ struct llm_graph_context {
     virtual ~llm_graph_context() = default;
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
-
-    // KVMem: side-channel copies. No-ops unless LLAMA_KVMEM is enabled and
-    // llama_kvmem_get_params()->enabled. Q is copied only when the ubatch
-    // overlaps the retrieval query span. V is copied in prefill only with
-    // --kvmem-harvest-v (or KVMEM_DUMP_CAPTURE); otherwise D2H on stage-out.
-    // Dest tensors are graph outputs named kvmem_{k,q,v}-<il>.
-    void kvmem_capture_k(ggml_tensor * k_prerope, int il) const;
-    void kvmem_capture_q(ggml_tensor * q, int il) const;
-    void kvmem_capture_v(ggml_tensor * v, int il) const;
 
     //
     // common

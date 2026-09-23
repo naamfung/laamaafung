@@ -281,20 +281,10 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
     Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
     cb(Qcur, "Qcur_normed", il);
 
-    kvmem_capture_q(Qcur, il);
-
-    ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
-    cb(Kcur, "Kcur", il);
-
-    ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s);
-    cb(Vcur, "Vcur", il);
-
     // Apply K normalization
     Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
     Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, nullptr, LLM_NORM_RMS, il);
     cb(Kcur, "Kcur_normed", il);
-
-    kvmem_capture_k(Kcur, il);
 
     ggml_tensor * gate = ggml_view_3d(ctx0, Qcur_full, n_embd_head, n_head, n_tokens,
         ggml_element_size(Qcur_full) * n_embd_head * 2,
@@ -321,7 +311,6 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
     cb(Qcur, "Qcur", il);
     cb(Kcur, "Kcur", il);
     cb(Vcur, "Vcur", il);
-    kvmem_capture_v(Vcur, il);
 
     // Attention computation
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
@@ -530,20 +519,6 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
         ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
 
         tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
-
-        // a Hadamard-latent embedding table stores rotated rows; restore the primal
-        // basis right after the lookup (h = s * (H z)), exactly like the trunk path in
-        // llm_graph_context::build_inp_embd. Without this the draft head consumes
-        // embeddings in the rotated basis and llama_verify_hadamard_graph refuses the graph.
-        if (hadamard_inverses) {
-            const auto it = hadamard_inverses->find(tok_embd_w);
-            if (it != hadamard_inverses->end()) {
-                tok_embd = llama_mul_mat_hadamard(ctx0, tok_embd, it->second.rot);
-                if (it->second.signs) {
-                    tok_embd = ggml_mul(ctx0, tok_embd, it->second.signs);
-                }
-            }
-        }
     } else {
         tok_embd = inp->embd;
     }
@@ -605,11 +580,9 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
     Kcur = build_norm(Kcur, layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
     cb(Kcur, "mtp_Kcur_normed", il);
-    kvmem_capture_k(Kcur, il);
 
     Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
     cb(Vcur, "mtp_Vcur", il);
-    kvmem_capture_v(Vcur, il);
 
     Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
             n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,

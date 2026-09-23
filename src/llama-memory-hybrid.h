@@ -40,7 +40,6 @@ public:
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
     const layer_filter_cb & filter_recr = nullptr,
-                     bool   replay = false,
                  uint32_t   n_ubatch = 0,
                  uint32_t   tail_tokens = 0,
                 ggml_type   tail_type = GGML_TYPE_F16,
@@ -154,11 +153,6 @@ public:
 
     llama_memory_status  get_status() const override;
     const llama_ubatch & get_ubatch() const override;
-
-    // TurboQuant: delegate to the KV cache context
-    ggml_tensor * get_turbo_rot_forward() const override;
-    ggml_tensor * get_turbo_rot_inverse() const override;
-    ggml_tensor * get_turbo_innerq_scale_inv() const override;
 
     //
     // llama_memory_hybrid_context

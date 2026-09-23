@@ -14,6 +14,8 @@ struct llama_kv_cell_ext {
     // 2D spatial positions, typically used for M-RoPE
     llama_pos x = 0;
     llama_pos y = 0;
+
+    // KVMem: logical (cache row) position, independent of M-RoPE
     llama_pos logical_pos = -1;
 
     // when tok = LLAMA_TOKEN_NULL when the cell is produced by embedding input (i.e. multimodal)

@@ -45,6 +45,7 @@ struct llama_ubatch {
     llama_token  *  token;      // [n_tokens]         | i   | id, token
     float        *  embd;       // [n_embd, n_tokens] | i   | embd
     llama_pos    *  pos;        // [n_tokens*n_pos]   | i   | pos
+    llama_pos    *  logical_pos;// [n_tokens]         | i   | KVMem logical cache-row position (M-RoPE independent)
     int32_t      *  n_seq_id;   // [n_tokens]         | i   | -
     llama_seq_id ** seq_id;     // [n_tokens]         | s   | s0, s1, seq_id
     llama_seq_id *  seq_id_unq; // [n_seqs_unq]       | s   | seq_id
@@ -54,7 +55,6 @@ struct llama_ubatch {
     struct data_t {
         std::vector<llama_token>    token;
         std::vector<float>          embd;
-        std::vector<float>          embd_nextn;
         std::vector<llama_pos>      logical_pos;
         std::vector<llama_pos>      pos;
         std::vector<int32_t>        n_seq_id;
@@ -68,8 +68,9 @@ struct llama_ubatch {
 
     // the llama_ubatch pointers above point to this data if set. otherwise - point to external non-owning data
     std::shared_ptr<data_t> data;
+
+    // KVMem: logical cache-row positions (independent of M-RoPE); null when not in use
     llama_pos * logical_pos = nullptr;
-    float * embd_nextn = nullptr;
 };
 
 // a helper for sanitizing, fulfilling and splitting a batch

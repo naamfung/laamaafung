@@ -123,7 +123,6 @@ public:
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
-        // a model can hold more than one cache, so the tensor names have to stay unique
                  uint32_t   n_ubatch = 0,
                  uint32_t   tail_tokens = 0,
                 ggml_type   tail_type = GGML_TYPE_F16,
@@ -164,6 +163,10 @@ public:
             llama_pos & planned_p0, llama_pos & planned_p1) const override;
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
     bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) override;
+
+    // KVMem: remove cells by their *logical* (cache-row) position, falling back to the
+    // physical position for cells that have no logical position recorded.
+    bool seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 
     int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) override;
 
@@ -213,10 +216,6 @@ public:
 
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
-    ggml_tensor * get_v_storage(int32_t il) const;
-
-    const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
-    bool seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 
     const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
 
@@ -229,16 +228,9 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
-    ggml_tensor * get_k_idx(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
-    // TurboQuant: get rotation matrices (stored as row-major C arrays)
-    // turbo_rotation = R (forward rotation, for Q pre-rotate-queries)
-    // turbo_rotation_inv = R^T = R^{-1} (inverse rotation, for V output un-rotation)
-    ggml_tensor * get_turbo_rotation() const { return turbo_rotation; }
-    ggml_tensor * get_turbo_rotation_inv() const { return turbo_rotation_inv; }
-
-    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
-    ggml_tensor * get_turbo_innerq_scale_inv() const { return turbo_innerq_scale_inv; }
+    // KVMem: raw V storage tensor of a layer (no view/slot plumbing)
+    ggml_tensor * get_v_storage(int32_t il) const;
     ggml_tensor * get_k_tail(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v_tail(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_k_tail_fallback(ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const;
@@ -307,7 +299,6 @@ public:
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
-    ggml_tensor * cpy_k_idx(ggml_context * ctx, ggml_tensor * k_idx_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_k_with_tail(
             ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs,
             ggml_tensor * tail_idxs, int32_t il, const slot_info & sinfo) const;
@@ -414,13 +405,11 @@ private:
 
         ggml_tensor * k;
         ggml_tensor * v;
-        ggml_tensor * k_idx;   // MSA single-head indexer keys, F32
         ggml_tensor * k_tail;
         ggml_tensor * v_tail;
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
-        std::vector<ggml_tensor *> k_idx_stream;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -509,9 +498,6 @@ private:
     // env: LLAMA_KV_CACHE_DEBUG
     int debug = 0;
 
-    // set when a k_idx (indexer) cache exists and the stream layout supports MSA (single seq, or one stream per seq)
-    bool msa_strict_slots = false;
-
     // this is the SWA type of the cache - not to be confused with the model SWA type
     const llama_swa_type swa_type = LLAMA_SWA_TYPE_NONE;
 
@@ -537,13 +523,6 @@ private:
 
     std::vector<kv_layer> layers;
 
-    // TurboQuant rotation matrices (128x128, row-major stored)
-    ggml_tensor * turbo_rotation = nullptr;      // R (forward rotation)
-    ggml_tensor * turbo_rotation_inv = nullptr;   // R^T = R^{-1} (inverse rotation)
-
-    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization (128 floats)
-    ggml_tensor * turbo_innerq_scale_inv = nullptr;
-
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
     // Shared auxiliary layer id -> source model layer id.
@@ -557,7 +536,6 @@ private:
 
     size_t size_k_bytes() const;
     size_t size_v_bytes() const;
-    size_t size_k_idx_bytes() const;
 
     ggml_tensor * build_rope_shift(
             const llama_cparams & cparams,
@@ -675,19 +653,6 @@ public:
     // get views of the current state of the cache
     virtual ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     virtual ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_k_idx(ggml_context * ctx, int32_t il) const;
-
-    // TurboQuant rotation accessors
-    ggml_tensor * get_turbo_rotation() const;
-    ggml_tensor * get_turbo_rotation_inv() const;
-
-    // Override virtual methods from llama_memory_context_i
-    ggml_tensor * get_turbo_rot_forward() const override;
-    ggml_tensor * get_turbo_rot_inverse() const override;
-
-    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
-    ggml_tensor * get_turbo_innerq_scale_inv() const override;
-
     virtual ggml_tensor * get_k_tail(ggml_context * ctx, int32_t il) const;
     virtual ggml_tensor * get_v_tail(ggml_context * ctx, int32_t il) const;
     virtual ggml_tensor * get_k_tail_fallback(ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const;
@@ -719,7 +684,6 @@ public:
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     virtual ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
     virtual ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
-    ggml_tensor * cpy_k_idx(ggml_context * ctx, ggml_tensor * k_idx_cur, ggml_tensor * k_idxs, int32_t il) const;
     virtual ggml_tensor * cpy_k_with_tail(
             ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs,
             ggml_tensor * tail_idxs, int32_t il) const;

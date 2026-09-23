@@ -16,10 +16,6 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
-#if defined(LLAMA_KVMEM)
-#include "llama-kvmem-hooks.h"
-#include "llama-kvmem-diag.h"
-#endif
 
 #include <cassert>
 #include <cinttypes>
@@ -172,11 +168,10 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
     // TODO: extend llama_ubatch to differentiate between token embeddings and hidden states
     //       for now, we assume that the hidden state is always provided as an embedding
     //       ref: https://github.com/ggml-org/llama.cpp/pull/23643
-    const float * hidden = ubatch->embd_nextn ? ubatch->embd_nextn : ubatch->embd;
-    if (hidden) {
+    if (ubatch->embd) {
         GGML_ASSERT(n_embd == h->ne[0]);
 
-        ggml_backend_tensor_set(h, hidden, 0, n_tokens*n_embd*ggml_element_size(h));
+        ggml_backend_tensor_set(h, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
     }
 }
 
@@ -185,7 +180,7 @@ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
 
     res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
     res &= (!params.ubatch.embd)  || (embd   && embd->ne[1]   == params.ubatch.n_tokens);
-    res &= (!params.ubatch.embd && !params.ubatch.embd_nextn) || (h && h->ne[1] == params.ubatch.n_tokens);
+    res &= (!params.ubatch.embd)  || (h      && h->ne[1]      == params.ubatch.n_tokens);
 
     return res;
 }
@@ -1731,8 +1726,6 @@ void llm_graph_result::reset() {
     t_sampled_logits.clear();
     t_candidates.clear();
 
-    fused_nodes.clear();
-
     params = {};
 
     inputs.clear();
@@ -1887,8 +1880,6 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     loras            (params.loras),
     mctx             (params.mctx),
     cross            (params.cross),
-    hadamard_rotations (params.hadamard_rotations),
-    hadamard_inverses  (params.hadamard_inverses),
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
@@ -1903,144 +1894,6 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     }
 }
 
-static void kvmem_capture_impl(ggml_context * ctx0, ggml_cgraph * gf, ggml_tensor * src, int il, const char * tag,
-                               uint32_t row0 = 0) {
-#if defined(LLAMA_KVMEM)
-    const llama_kvmem_params * kp = llama_kvmem_get_params();
-    if (!src || !kp->enabled) {
-        return;
-    }
-    // Recency/identity does not need host raw-K. Skip pinning intermediates
-    // unless retrieval is on, harvest-V is on (V only), or an explicit dump.
-    if (kp->method != 1 && getenv("KVMEM_DUMP_CAPTURE") == nullptr) {
-        if (!kp->harvest_v || tag[0] != 'v') {
-            return;
-        }
-    }
-    // Never pin a *view* as a graph output: ggml-alloc consults view_src for
-    // output tensors (ggml-alloc.c:645) and never frees an output (:692), so a
-    // pinned view both disables in-place reuse of its source and keeps the source
-    // alive. Pin a private contiguous copy in that case. Call sites affected
-    // today: qwen35's MTP V capture (Vcur = ggml_reshape_3d of the V projection).
-    // NOTE: this is not what fixed the v21 Q repetition — the tensor attention
-    // consumes there is a plain ggml_mul output (Q after Q-norm), not a view; that
-    // case is handled by the explicit copy in kvmem_capture_q.
-    const bool was_view = ggml_is_view(src) || src->view_src != nullptr;
-    if (was_view) {
-        src = ggml_dup(ctx0, src);
-    }
-    {
-        static bool seen[3] = { false, false, false };
-        const int slot = tag[0] == 'q' ? 0 : (tag[0] == 'k' ? 1 : 2);
-        if (!seen[slot]) {
-            seen[slot] = true;
-            kvmem_diag("KVMEM_CAPTURE tag=%s il=%d row0=%u view=%d op_after=%s ne=[%lld,%lld,%lld]\n",
-                    tag, il, row0, was_view ? 1 : 0, ggml_op_name(src->op),
-                    (long long) src->ne[0], (long long) src->ne[1], (long long) src->ne[2]);
-        }
-    }
-    // Keep the pre-RoPE tensor itself (rope_ext is not in-place). Avoids a
-    // per-layer GPU cpy; harvest reads this buffer after the full graph.
-    ggml_format_name(src, "kvmem_%s-%d", tag, il);
-    ggml_set_output(src);
-    ggml_build_forward_expand(gf, src);
-    llama_kvmem_register_capture(src, il, tag[0], row0);
-#else
-    GGML_UNUSED(ctx0);
-    GGML_UNUSED(gf);
-    GGML_UNUSED(src);
-    GGML_UNUSED(il);
-    GGML_UNUSED(tag);
-    GGML_UNUSED(row0);
-#endif
-}
-
-void llm_graph_context::kvmem_capture_k(ggml_tensor * k_prerope, int il) const {
-#if defined(LLAMA_KVMEM)
-    // portable bisect switch: KVMEM_NO_KCAP=1 disables the pre-RoPE K capture
-    if (getenv("KVMEM_NO_KCAP") != nullptr) {
-        return;
-    }
-    // Prefill: full ubatch mean-K. Decode / MTP verify after pin: running mean-K.
-    if (ubatch.n_tokens <= 1) {
-        if (!llama_kvmem_want_decode_mean()) {
-            return;
-        }
-        kvmem_capture_impl(ctx0, gf, k_prerope, il, "k");
-        return;
-    }
-    if (llama_kvmem_want_prefill_capture() || llama_kvmem_want_decode_mean()) {
-        kvmem_capture_impl(ctx0, gf, k_prerope, il, "k");
-    }
-#else
-    GGML_UNUSED(k_prerope);
-    GGML_UNUSED(il);
-#endif
-}
-
-void llm_graph_context::kvmem_capture_q(ggml_tensor * q, int il) const {
-    if (ubatch.n_tokens <= 1) {
-        return;
-    }
-    // portable bisect switch: KVMEM_NO_QCAP=1 disables the prefill Q capture
-    if (getenv("KVMEM_NO_QCAP") != nullptr) {
-        return;
-    }
-#if defined(LLAMA_KVMEM)
-    const llama_pos * pos = ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos;
-    // Retrieval only scores the query rows, so pin just that contiguous slice of
-    // the ubatch instead of all of it: a smaller dup and a smaller D2H per layer.
-    // Falls back to the whole ubatch whenever the query rows are not one
-    // contiguous range (e.g. several disjoint turn spans) or cover everything.
-    uint32_t row0 = 0;
-    uint32_t row1 = 0;
-    const bool slice = llama_kvmem_q_capture_rows(ubatch.n_tokens, pos, &row0, &row1) &&
-            q->nb[0] == ggml_element_size(q) &&
-            q->ne[2] == static_cast<int64_t>(ubatch.n_tokens) &&
-            row0 < row1 && row1 <= static_cast<uint32_t>(ubatch.n_tokens);
-    if (slice) {
-        ggml_tensor * qs = ggml_view_3d(ctx0, q, q->ne[0], q->ne[1],
-                static_cast<int64_t>(row1 - row0), q->nb[1], q->nb[2],
-                static_cast<size_t>(row0) * q->nb[2]);
-        kvmem_capture_impl(ctx0, gf, ggml_dup(ctx0, qs), il, "q", row0);
-        return;
-    }
-    if (!llama_kvmem_want_q_capture(ubatch.n_tokens, 1, pos)) {
-        return;
-    }
-    // v21 regression: what gets pinned here is the very tensor attention
-    // consumes (a ggml_mul output, i.e. Q after Q-norm). Marking it as a graph
-    // output corrupts the Q handed to attention as soon as the prefill spans
-    // more than one ubatch (garbled context -> verbatim repetition); pinning a
-    // private contiguous copy instead is verified to fix it. Keep the copy.
-    kvmem_capture_impl(ctx0, gf, ggml_dup(ctx0, q), il, "q", 0);
-    return;
-#endif
-    kvmem_capture_impl(ctx0, gf, q, il, "q", 0);
-}
-
-void llm_graph_context::kvmem_capture_v(ggml_tensor * v, int il) const {
-    // Default: no prefill V. --kvmem-harvest-v (or dump) copies token-major
-    // Vcur on the same pipe as K so evict / apply_retrieval skip read_gpu_block.
-    if (ubatch.n_tokens <= 1) {
-        return;
-    }
-#if defined(LLAMA_KVMEM)
-    if (!llama_kvmem_want_prefill_capture()) {
-        return;
-    }
-    const llama_kvmem_params * kp = llama_kvmem_get_params();
-    if (!(kp && kp->harvest_v) && getenv("KVMEM_DUMP_CAPTURE") == nullptr) {
-        return;
-    }
-#else
-    GGML_UNUSED(v);
-    GGML_UNUSED(il);
-    return;
-#endif
-    kvmem_capture_impl(ctx0, gf, v, il, "v");
-}
-
 
 
 ggml_tensor * llm_graph_context::build_cvec(
@@ -2053,35 +1906,7 @@ ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur,
           ggml_tensor * w_s) const {
-    ggml_tensor * cur_mm = cur;
-    if (hadamard_rotations) {
-        const auto it = hadamard_rotations->find(w);
-        if (it != hadamard_rotations->end()) {
-            const auto & t = it->second;
-            // another folded weight on this same activation already built the transform
-            const auto memo_key = std::make_pair((const ggml_tensor *) cur, (const ggml_tensor *) t.rot);
-            const auto memo_it  = hadamard_memo.find(memo_key);
-            if (memo_it != hadamard_memo.end()) {
-                cur_mm = memo_it->second;
-            } else {
-            if (t.perm_rep > 1) {
-                // tiled [hd, nk, rep] -> grouped [hd, rep, nk] feature order
-                ggml_tensor * x = ggml_is_contiguous(cur_mm) ? cur_mm : ggml_cont(ctx0, cur_mm);
-                const int64_t ne1 = x->ne[1], ne2 = x->ne[2], ne3 = x->ne[3];
-                x = ggml_reshape_4d(ctx0, x, t.perm_hd, t.perm_nk, t.perm_rep, ne1*ne2*ne3);
-                x = ggml_cont(ctx0, ggml_permute(ctx0, x, 0, 2, 1, 3));
-                cur_mm = ggml_reshape_4d(ctx0, x, t.perm_hd*t.perm_nk*t.perm_rep, ne1, ne2, ne3);
-            }
-            if (t.signs) {
-                cur_mm = ggml_mul(ctx0, cur_mm, t.signs);
-            }
-            cur_mm = llama_mul_mat_hadamard(ctx0, cur_mm, t.rot);
-            hadamard_memo[memo_key] = cur_mm;
-            }
-        }
-    }
-
-    ggml_tensor * res = ggml_mul_mat(ctx0, w, cur_mm);
+    ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
 
     if (w_s) {
         res = ggml_mul(ctx0, res, w_s);
@@ -2113,35 +1938,7 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * cur, // ggml_tensor * b
           ggml_tensor * ids,
           ggml_tensor * w_s) const {
-    ggml_tensor * cur_mm = cur;
-    if (hadamard_rotations) {
-        const auto it = hadamard_rotations->find(w);
-        if (it != hadamard_rotations->end()) {
-            const auto & t = it->second;
-            // another folded weight on this same activation already built the transform
-            const auto memo_key = std::make_pair((const ggml_tensor *) cur, (const ggml_tensor *) t.rot);
-            const auto memo_it  = hadamard_memo.find(memo_key);
-            if (memo_it != hadamard_memo.end()) {
-                cur_mm = memo_it->second;
-            } else {
-            if (t.perm_rep > 1) {
-                // tiled [hd, nk, rep] -> grouped [hd, rep, nk] feature order
-                ggml_tensor * x = ggml_is_contiguous(cur_mm) ? cur_mm : ggml_cont(ctx0, cur_mm);
-                const int64_t ne1 = x->ne[1], ne2 = x->ne[2], ne3 = x->ne[3];
-                x = ggml_reshape_4d(ctx0, x, t.perm_hd, t.perm_nk, t.perm_rep, ne1*ne2*ne3);
-                x = ggml_cont(ctx0, ggml_permute(ctx0, x, 0, 2, 1, 3));
-                cur_mm = ggml_reshape_4d(ctx0, x, t.perm_hd*t.perm_nk*t.perm_rep, ne1, ne2, ne3);
-            }
-            if (t.signs) {
-                cur_mm = ggml_mul(ctx0, cur_mm, t.signs);
-            }
-            cur_mm = llama_mul_mat_hadamard(ctx0, cur_mm, t.rot);
-            hadamard_memo[memo_key] = cur_mm;
-            }
-        }
-    }
-
-    ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur_mm, ids);
+    ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur, ids);
 
     if (w_s) {
         const int64_t n_expert = w_s->ne[0];
@@ -2976,18 +2773,6 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
 
         cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
 
-        // a Hadamard-latent embedding table stores rotated rows; restore the
-        // primal basis right after the lookup: h = s * (H z)
-        if (hadamard_inverses) {
-            const auto it = hadamard_inverses->find(tok_embd);
-            if (it != hadamard_inverses->end()) {
-                cur = llama_mul_mat_hadamard(ctx0, cur, it->second.rot);
-                if (it->second.signs) {
-                    cur = ggml_mul(ctx0, cur, it->second.signs);
-                }
-            }
-        }
-
         // apply lora for embedding tokens if needed
         for (const auto & lora : *loras) {
             llama_adapter_lora_weight * lw = lora.first->get_weight(tok_embd);
@@ -3275,10 +3060,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         v_tail_current = ggml_permute(ctx0, v_tail_current, 0, 2, 1, 3);
     }
 
-    // TurboQuant note: graph-side Q rotation (pre-rotate-queries) is implemented below
-    // in the flash-attn path. The VEC kernel bug (wrong Q/K stride in
-    // vec_dot_fattn_vec_KQ_turbo3_0) was fixed in fattn-common.cuh to match f16 pattern.
-
     ggml_tensor * cur;
 
     const bool use_native_tail = k_tail != nullptr && tail_route == LLAMA_KV_TAIL_ROUTE_NATIVE;
@@ -3328,27 +3109,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
-        // Enable built-in causal masking for pure-causal single-stream prefill.
-        // Only the MMA kernel path honors this flag; VEC/tile ignore it.
-        // Uses op_params[7] (GGML_FLASH_ATTN_EXT_OP_PARAM_CAUSAL) on the 0.23 baseline.
-        if (cparams.causal_attn && n_stream == 1 && !cparams.kv_unified
-            && hparams.swa_type == LLAMA_SWA_TYPE_NONE
-            && hparams.f_max_alibi_bias == 0.0f) {
-            ggml_flash_attn_ext_set_causal(cur);
-        }
-
-        // TurboQuant: inverse WHT on FA output when V values are WHT-rotated.
-        // For MLA, V is a view of K with different ne[0] (e.g. V=512, K=576).
-        // Group size must come from K (which determines the WHT rotation), not V.
-        if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO1_5 || v->type == GGML_TYPE_TURBO3_TCQ || v->type == GGML_TYPE_TURBO2_TCQ) {
-            const bool k_is_turbo = (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ);
-            const ggml_tensor * group_src = k_is_turbo ? k : v;
-            const int turbo_group = (group_src->ne[0] % 128 == 0) ? 128 : 64;
-            if (cur->ne[0] % turbo_group == 0) {
-                if (!ggml_is_contiguous(cur)) { cur = ggml_cont(ctx0, cur); }
-                ggml_tensor * innerq_scale = mctx ? mctx->get_turbo_innerq_scale_inv() : nullptr;
-                cur = ggml_turbo_wht(ctx0, cur, 1, turbo_group, innerq_scale);  // 1 = inverse
-            }
         if (final_attn_op) {
             *final_attn_op = cur;
         }
@@ -3459,18 +3219,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
         cb(kqv, "kqv", il);
 
-        // TurboQuant: inverse WHT on attention output (non-FA path)
-        if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO1_5 || v->type == GGML_TYPE_TURBO3_TCQ || v->type == GGML_TYPE_TURBO2_TCQ) {
-            const bool k_is_turbo = (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ);
-            const ggml_tensor * group_src = k_is_turbo ? k : v;
-            const int turbo_group = (group_src->ne[0] % 128 == 0) ? 128 : 64;
-            if (kqv->ne[0] % turbo_group == 0) {
-                if (!ggml_is_contiguous(kqv)) { kqv = ggml_cont(ctx0, kqv); }
-                ggml_tensor * innerq_scale = mctx ? mctx->get_turbo_innerq_scale_inv() : nullptr;
-                kqv = ggml_turbo_wht(ctx0, kqv, 1, turbo_group, innerq_scale);
-            }
-        }
-
         // for MLA with the absorption optimization, we need to "decompress" from MQA back to MHA
         if (v_mla) {
             kqv = ggml_mul_mat(ctx0, v_mla, kqv);
@@ -3487,8 +3235,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
         }
     }
-
-    // TurboQuant: graph-side inverse WHT on attention output (undoes V rotation)
 
     ggml_build_forward_expand(gf, cur);
 
@@ -3927,55 +3673,6 @@ ggml_tensor * llm_graph_context::build_attn(
         }
     }
 
-    ggml_tensor * kq_mask = inp->get_kq_mask();
-
-    ggml_tensor * q = q_cur;
-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
-
-    // TurboQuant pre-rotate-queries: O(d log d) WHT rotation via custom op
-    // Q shape: (n_embd_head, n_head, n_tokens)
-    // For zero-padded models (head_dim not 128-aligned), pad Q to match padded K dim first.
-    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ) {
-        // Pad Q per-head to next multiple of 128 if needed
-        if (q->ne[0] % 128 != 0) {
-            const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
-            q = ggml_pad(ctx0, q, pad, 0, 0, 0);
-        }
-        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
-        ggml_tensor * innerq_scale = mctx_cur->get_turbo_innerq_scale_inv();
-        q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);  // 0 = forward, 0 = auto group size from q->ne[0]
-    }
-
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
-    cb(cur, "kqv_out", il);
-
-    // TurboQuant: if V was padded, the output has padded dimensions.
-    // Extract original V head_dim after inverse WHT (applied inside build_attn_mha).
-    // NOTE: gate on v->type (not k->type) for asymmetric configs where K=q8_0 but V=turbo
-    if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO1_5 || v->type == GGML_TYPE_TURBO3_TCQ || v->type == GGML_TYPE_TURBO2_TCQ) {
-        const int64_t orig_v_head = hparams.n_embd_head_v(il);
-        // cur is 2D: (n_embd_head * n_head, n_tokens) after build_attn_mha
-        const int64_t padded_v_head = v->ne[0];
-        if (padded_v_head != orig_v_head) {
-            // Reshape to 4D, extract original head_dim, reshape back to 2D
-            // Fix #78 (bingh0): cur shape post-MHA is (n_embd_head * n_head, n_tokens),
-            // not (n_embd_head * n_head_kv, n_tokens). Reshape needs n_head
-            // (Q-head count) so GQA models with n_head != n_head_kv (e.g.
-            // Qwen2.5-0.5B head_dim=64 padded → 128) don't fail the element
-            // count check in ggml_reshape_3d.
-            const int64_t n_head_v = hparams.n_head(il);
-            const int64_t n_tokens_cur = cur->ne[1];
-            cur = ggml_reshape_3d(ctx0, cur, padded_v_head, n_head_v, n_tokens_cur);
-            // ggml_view_3d to extract first orig_v_head elements per head
-            cur = ggml_view_3d(ctx0, cur, orig_v_head, n_head_v, n_tokens_cur,
-                               cur->nb[1], cur->nb[2], 0);
-            cur = ggml_cont(ctx0, cur);
-            cur = ggml_reshape_2d(ctx0, cur, orig_v_head * n_head_v, n_tokens_cur);
-        }
-    }
-
-    if (inp->self_v_rot) {
     ggml_tensor * kq_mask = kq_mask_override ? kq_mask_override : inp->get_kq_mask();
 
     ggml_tensor * q = q_cur;
@@ -4202,44 +3899,8 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
-    // TurboQuant: pre-rotate Q for K-only (MLA) attention
-    // For zero-padded models, pad Q to match padded K dim first.
-    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ) {
-        // Pad Q per-head to next multiple of 128 if needed
-        if (q->ne[0] % 128 != 0) {
-            const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
-            q = ggml_pad(ctx0, q, pad, 0, 0, 0);
-        }
-        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
-        ggml_tensor * innerq_scale = mctx_cur->get_turbo_innerq_scale_inv();
-        q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);  // 0 = forward, 0 = auto group size
-    }
-
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
-
-    // TurboQuant: if V was padded (MLA: V is view of K, may have padded dim),
-    // extract original V head_dim after inverse WHT.
-    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ) {
-        const int64_t orig_v_head = v_cur->ne[0];  // original V head_dim from model
-        const int64_t padded_v_head = v->ne[0];     // padded V head_dim in cache
-        if (padded_v_head != orig_v_head) {
-            // cur is 2D: (padded_v_head * n_head, n_tokens) after build_attn_mha
-            // Fix #78 (bingh0): cur shape post-MHA is (n_embd_head * n_head, n_tokens),
-            // not (n_embd_head * n_head_kv, n_tokens). Reshape needs n_head
-            // (Q-head count) so GQA models with n_head != n_head_kv (e.g.
-            // Qwen2.5-0.5B head_dim=64 padded → 128) don't fail the element
-            // count check in ggml_reshape_3d.
-            const int64_t n_head_v = hparams.n_head(il);
-            const int64_t n_tokens_cur = cur->ne[1];
-            cur = ggml_reshape_3d(ctx0, cur, padded_v_head, n_head_v, n_tokens_cur);
-            cur = ggml_view_3d(ctx0, cur, orig_v_head, n_head_v, n_tokens_cur,
-                               cur->nb[1], cur->nb[2], 0);
-            cur = ggml_cont(ctx0, cur);
-            cur = ggml_reshape_2d(ctx0, cur, orig_v_head * n_head_v, n_tokens_cur);
-        }
-    }
 
     if (wo) {
         if (arch == LLM_ARCH_GLM4 || arch == LLM_ARCH_GLM4_MOE) {
@@ -4466,45 +4127,6 @@ ggml_tensor * llm_graph_context::build_attn(
     const auto & kq_mask = is_swa ? inp->get_kq_mask_swa() : inp->get_kq_mask();
 
     ggml_tensor * q = q_cur;
-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
-
-    // TurboQuant: pre-rotate Q for ISWA attention (pad to 128-aligned if needed)
-    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO1_5 || k->type == GGML_TYPE_TURBO3_TCQ || k->type == GGML_TYPE_TURBO2_TCQ) {
-        if (q->ne[0] % 128 != 0) {
-            const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
-            q = ggml_pad(ctx0, q, pad, 0, 0, 0);
-        }
-        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
-        ggml_tensor * innerq_scale = mctx_cur->get_turbo_innerq_scale_inv();
-        q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);
-    }
-
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
-    cb(cur, "kqv_out", il);
-
-    // TurboQuant: if V was padded, extract original V head_dim after inverse WHT
-    // NOTE: gate on v->type (not k->type) for asymmetric configs where K=q8_0 but V=turbo
-    if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO1_5 || v->type == GGML_TYPE_TURBO3_TCQ || v->type == GGML_TYPE_TURBO2_TCQ) {
-        const int64_t orig_v_head = hparams.n_embd_head_v(il);
-        const int64_t padded_v_head = v->ne[0];
-        if (padded_v_head != orig_v_head) {
-            // Fix #78 (bingh0): cur shape post-MHA is (n_embd_head * n_head, n_tokens),
-            // not (n_embd_head * n_head_kv, n_tokens). Reshape needs n_head
-            // (Q-head count) so GQA models with n_head != n_head_kv (e.g.
-            // Qwen2.5-0.5B head_dim=64 padded → 128) don't fail the element
-            // count check in ggml_reshape_3d.
-            const int64_t n_head_v = hparams.n_head(il);
-            const int64_t n_tokens_cur = cur->ne[1];
-            cur = ggml_reshape_3d(ctx0, cur, padded_v_head, n_head_v, n_tokens_cur);
-            cur = ggml_view_3d(ctx0, cur, orig_v_head, n_head_v, n_tokens_cur,
-                               cur->nb[1], cur->nb[2], 0);
-            cur = ggml_cont(ctx0, cur);
-            cur = ggml_reshape_2d(ctx0, cur, orig_v_head * n_head_v, n_tokens_cur);
-        }
-    }
-
-    if (v_rot) {
     ggml_tensor * k = use_kvarn ?
         kvarn_ctx->get_k_for_attention(ctx0, il, kvarn_plan.native_attention) :
         mctx_cur->get_k(ctx0, il);
