@@ -33,7 +33,7 @@ run_test() {
   local base peak v free_min
   base=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ",")
   curl -s --noproxy '*' --max-time 1200 "http://127.0.0.1:9660/v1/chat/completions" -H "Content-Type: application/json" \
-    -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":384,"temperature":0,"stream":false}' > "$TMPW/mx2-r.json" 2>/dev/null &
+    -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":384,"temperature":0.6,"stream":false}' > "$TMPW/mx2-r.json" 2>/dev/null &
   local CURL=$!
   peak=$base; free_min=99999
   for i in $(seq 1 140); do
