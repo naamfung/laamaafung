@@ -62,17 +62,14 @@
 
 **工具链依赖**：
 
-- **Go 编译器 1.21+** —— 编译 builder 本身：`go build -o builder.exe builder.go`。**builder.exe 为本地构建产物，不入仓库**（.gitignore 已忽略），仓库只跟踪源码 builder.go
-
-- **Visual Studio 2022** —— MSVC C/C++ 编译器 + Windows SDK 10；builder 自动探测安装路径并自建编译环境，`-list` 可查看探测结果
-
-- **CUDA Toolkit 12.x** —— GPU 后端（nvcc）；默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖
-
-- **Ninja** —— 构建生成器；builder 默认使用，换回 VS 生成器用 `-gen vs`（ccache 自动停用）
-
-- **ccache 4.13+（可选）** —— CUDA 编译缓存，仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃
-
-- **bun（可选）** —— Web UI 源码构建；缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server
+| 组件 | 用途 | 说明 |
+|---|---|---|
+| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`。**builder.exe 为本地构建产物，不入仓库**（.gitignore 已忽略），仓库只跟踪源码 builder.go |
+| Visual Studio 2022 | MSVC C/C++ 编译器 + Windows SDK 10 | builder 自动探测安装路径并自建编译环境；`-list` 可查看探测结果 |
+| CUDA Toolkit 12.x | GPU 后端（nvcc） | 默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖 |
+| Ninja | 构建生成器 | builder 默认使用；换回 VS 生成器用 `-gen vs`（ccache 自动停用） |
+| ccache 4.13+（可选） | CUDA 编译缓存 | 仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃 |
+| bun（可选） | Web UI 源码构建 | 缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server |
 
 **基本用法**（在仓库根目录执行）：
 
