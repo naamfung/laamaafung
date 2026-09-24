@@ -30,19 +30,19 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem 分支（v21，尚未长期验证稳定）**：
+- **克隆 KVMem 分支（v21，尚未長期驗證穩定）**：
   KVMem（分層/稀疏 KV 記憶，見下文「KVMem」一節）目前只在 `v21` 分支上，適合需要在**有限顯存**下驅動超長上下文的場景：
   ```sh
   git clone -b v21 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化分支（v22，尚未长期验证稳定）**：
+- **克隆 KVMem + Prism 三值量化分支（v22，尚未長期驗證穩定）**：
   在 `v21` 的 KVMem 之上加入 **Prism 三值量化**支援（`PTQ1_0`／`PQ2_0` 權重；GGUF 帶 `prism.hadamard.*` 折疊元數據，推理時激活自動做同款旋轉、無需額外參數，見下文「啟動示例」的「Prism 三值量化」與「KVMem + Prism 三值量化」）。需要跑 Prism 三值模型時用此分支：
   ```sh
   git clone -b v22 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，尚未长期验证稳定）**：
+- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，尚未長期驗證穩定）**：
   在 `v22` 之上加入 **TCQ（Trellis-Coded Quantization）KV 量化**：`turbo3_tcq`（3.25 bpv）／`turbo2_tcq`（2.25 bpv），以及 **turbo1.5 三值 KV 量化**：`turbo1.5`（2.25 bpv 有效載荷），見下文「啟動示例」的「TCQ KV 量化」與「turbo1.5 KV 量化」。需要更小的 KV cache 佔用時用此分支：
   ```sh
   git clone -b v23 https://github.com/naamfung/laamaafung.git
@@ -50,14 +50,53 @@
 
 ---
 
-### 编译指南（builder —— 标准生产构建流程）
+### 編譯指南（builder —— 標準生產構建流程）
 
-构建统一使用 **builder**（Go 实现，自 v25 起随仓库根目录附带）。**本分支不含 builder**：请克隆 v25 或 v26 后，用其 `builder.exe -C <本分支工作区路径>` 指向构建——构建目录自动按分支命名（`build-<分支名>`），各分支互不干扰。builder 内置：代理变量自动剥离（防 MSB6001）、MSVC 环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache、Web UI 依赖兜底、产物齐全性自检。旧 `build*.sh` 脚本已在所有分支移除。
+構建統一走倉庫根目錄的 **builder**（Go 實現，自 v25 起隨倉庫附帶；本分支不含 builder 時，請克隆 v25 或 v26 後用其 `builder.exe -C <本分支工作區路徑>` 指向構建——構建目錄自動按分支命名，如 v26 分支 → `build-v26`，各分支互不干擾）。builder 內置：代理變量自動剝離（防 MSB6001）、MSVC 環境自建（INCLUDE/LIB/PATH 手工拼裝，無需 cmd.exe/vcvars）、CUDA 專屬 ccache、Web UI 依賴兜底、產物齊全性自檢。舊 `build*.sh` 腳本已在所有分支移除。
 
-**工具链依赖**：Go 编译器 1.21+（编译 builder 本身，`go build -o builder.exe builder.go`）；Visual Studio 2022（MSVC + Windows SDK 10，自动探测安装路径）；CUDA Toolkit 12.x（默认 native 架构，`-arch` 覆盖）；Ninja（默认生成器）；ccache 4.13+（可选，仅包装 nvcc，须保持 `-DGGML_CCACHE=OFF`）；bun（可选，UI 源码构建，缺失时自动回退预构建 UI 资源）。
+**工具鏈依賴**：
 
-**基本用法**：`builder.exe`（增量构建）、`-fresh`（全量重建）、`-j N`（并行度）、`-list`（查看工具链探测）、`clean`（清理）。常用参数：`-target T1,T2`、`-keep`、`-arch 86`、`-gen ninja|vs`、`-ui auto|archive|off`、`-no-configure`、`-C <dir>`。产物在 `<构建目录>/bin`，编译日志为 `builder-build.log` / `builder-configure.log`。
+- **Go 編譯器 1.21+** —— 編譯 builder 本身：`go build -o builder.exe builder.go`。**builder.exe 為本地構建產物，不入倉庫**（.gitignore 已忽略），倉庫只跟蹤源碼 builder.go
 
+- **Visual Studio 2022** —— MSVC C/C++ 編譯器 + Windows SDK 10；builder 自動探測安裝路徑並自建編譯環境，`-list` 可查看探測結果
+
+- **CUDA Toolkit 12.x** —— GPU 後端（nvcc）；默認 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆蓋
+
+- **Ninja** —— 構建生成器；builder 默認使用，換回 VS 生成器用 `-gen vs`（ccache 自動停用）
+
+- **ccache 4.13+（可選）** —— CUDA 編譯緩存，僅包裝 nvcc（緩存目錄 `<倉庫父目錄>/.ccache`）；**必須保持 `-DGGML_CCACHE=OFF`**——包裝本機本地化 MSVC 的 cl.exe 會崩潰
+
+- **bun（可選）** —— Web UI 源碼構建；缺失時自動回退預構建 UI 資源，不會產出無 UI 的 llama-server
+
+**基本用法**（在倉庫根目錄執行）：
+
+```sh
+builder.exe              # 增量構建（默認；無構建目錄時即全新構建）
+builder.exe -fresh       # 先刪構建目錄再全量重建
+builder.exe -j 12        # 指定並行度
+builder.exe -list        # 列出探測到的工具鏈/環境後退出
+builder.exe clean        # 僅清理構建目錄與 ui/dist
+```
+
+**常用參數**：
+
+- `-target T1,T2` —— 只構建指定目標；跳過產物自檢
+
+- `-keep` —— 僅重置 CMake 狀態、保留已編譯對象
+
+- `-arch 86` —— 覆蓋 CUDA 架構（默認 native）
+
+- `-gen ninja|vs` —— 強制生成器（換生成器需先 clean）
+
+- `-no-ccache` / `-ccache-all` —— 關閉 ccache / 也給 C/CXX 掛 ccache（後者在本機本地化 MSVC 下會崩，僅調試用）
+
+- `-ui auto|archive|off` —— UI 方案：auto（默認）優先復用共享依賴緩存做源碼構建，回退本地歸檔，都拿不到則報錯退出——絕不靜默產出無 UI 的二進制
+
+- `-no-configure` —— 確認沒改過 CMakeLists 時跳過 configure
+
+- `-C <dir>` —— 指定倉庫根（用於 worktree，如 `./builder.exe -C ../wt-v23`）
+
+**構建目錄與產物**：構建目錄按分支命名（`build-<分支名>`，如 v26 分支 → `build-v26`）；產物在 `<構建目錄>/bin`（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次構建結束自檢產物齊全性 + 內嵌 UI 體積。編譯日誌落在 `<構建目錄>/builder-build.log` 與 `builder-configure.log`；瞬時競爭錯誤（nvcc C1083 / MSB8066 / MSB6001）會自動重跑。
 ---
 
 ### 推荐模型
