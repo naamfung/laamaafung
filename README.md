@@ -4,7 +4,7 @@
 
 致力於從推理引擎側修復影響模型無法驅動智能代理勝任長程任務的所有問題：模型遞歸生成式的死循環及各種因選項組合未被邏輯正確處理導致的無故停止工作。
 
-优质输出 = （优质模型 + 优质模板 + 优质代理 + 优质引擎）* 正确参数
+優質輸出 = （優質模型 + 優質模板 + 優質代理 + 優質引擎）* 正確參數
 
 ---
 
@@ -12,7 +12,7 @@
 
 推薦優先克隆穩定分支 `v17`，適合穩定使用。
 
-如須測試最新功能，可以克隆测试分支或開發分支 `master`。
+如須測試最新功能，可以克隆測試分支或開發分支 `master`。
 
 - **克隆穩定分支（推薦稀疏模型使用）**：
   ```sh
@@ -81,19 +81,19 @@ builder.exe clean        # 僅清理構建目錄與 ui/dist
 
 ---
 
-### 推荐模型
+### 推薦模型
 
-unsloth/Qwen-AgentWorld-35B-A3B 二零二六年六月廿五 / 原版 / 推荐IQ4及以上质量：
+unsloth/Qwen-AgentWorld-35B-A3B 二零二六年六月廿五 / 原版 / 推薦IQ4及以上質量：
 https://huggingface.co/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/tree/main
 
-mudler/Qwen-AgentWorld-35B-A3B-APEX / 原版 / 建议 APEX-I-Compact 或 APEX-Compact 及以上质量：
+mudler/Qwen-AgentWorld-35B-A3B-APEX / 原版 / 建議 APEX-I-Compact 或 APEX-Compact 及以上質量：
 https://huggingface.co/mudler/Qwen-AgentWorld-35B-A3B-APEX-GGUF/tree/main
 
 ---
 
-### 推荐模板
+### 推薦模板
 
-千问 3.5/3.6/AgentWorld 及以其为基座的衍生模型，建议使用「tmpl」目录内的「Qwen-Agentic-EN / Qwen-Agentic-HON(S/T) 」模板。
+千問 3.5/3.6/AgentWorld 及以其為基座的衍生模型，建議使用「tmpl」目錄內的「Qwen-Agentic-EN / Qwen-Agentic-HON(S/T) 」模板。
 
 ---
 
@@ -265,7 +265,7 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 
 turbo1.5 KV 量化（`turbo1.5`，須 v23 分支）：
 
-turbo1.5 是 turbo 系列的**三值**版本：每 32 值一塊、5 trit/byte 打包（`packed = Σ(trit_i+1)×3^i`），理論載荷 2.25 bpv、存儲口徑 4.0 bpv（16 字節/32 值，含 7 字節對齊填充）。與 `turbo2/3/4` 一樣採用 128-group 修正范數 + Walsh–Hadamard 旋轉（旋轉激活上做三值量化，K/V 寫入與 Q 變換都在 graph 層自動配對，點積數學等價），量化誤差低於同位率的標量三值。與 TCQ 不同，**turbo1.5 可與 `turbo2/3/4`／`q8_0`／`f16` 交叉混搭**（例如 `-ctk q8_0 -ctv turbo1.5`），也可 K/V 同型走專用 VEC 注意力內核（與 TCQ 一樣不參與 MMA 融合路徑）；head_dim 須為 128 的倍數（不足時緩存自動零填充到 128 對齊）。要跑 `turbo1.5` 把 `-ctk` / `-ctv` 換掉即可，其餘參數不變：
+turbo1.5 是 turbo 系列的**三值**版本：每 32 值一塊、5 trit/byte 打包（`packed = Σ(trit_i+1)×3^i`），理論載荷 2.25 bpv、存儲口徑 4.0 bpv（16 字節/32 值，含 7 字節對齊填充）。與 `turbo2/3/4` 一樣採用 128-group 修正範數 + Walsh–Hadamard 旋轉（旋轉激活上做三值量化，K/V 寫入與 Q 變換都在 graph 層自動配對，點積數學等價），量化誤差低於同位率的標量三值。與 TCQ 不同，**turbo1.5 可與 `turbo2/3/4`／`q8_0`／`f16` 交叉混搭**（例如 `-ctk q8_0 -ctv turbo1.5`），也可 K/V 同型走專用 VEC 注意力內核（與 TCQ 一樣不參與 MMA 融合路徑）；head_dim 須為 128 的倍數（不足時緩存自動零填充到 128 對齊）。要跑 `turbo1.5` 把 `-ctk` / `-ctv` 換掉即可，其餘參數不變：
 
 ```sh
 llamaServer="G:/Agents/kvmem-works/laamaafung/build-v23/bin/Release/llama-server.exe"
@@ -289,7 +289,7 @@ $llamaServer --model $model --host 0.0.0.0 --port 8008 \
 
 > 不帶 `--kvmem*` 即為無 KVMem 版本，其餘參數不變。CLI 亦接受 `turbo1_5` 別名（`llama-bench` 同）。實測（Qwen3.5-9B IQ4_XS，RTX 3060 Ti，`-ngl 99 -c 8192`，`llama-kvmem-cli`）：`turbo1.5` 約 84 t/s，對照 `turbo3` 84.6／`turbo4` 84.8（同條件，LUT 查表的 unpack 開銷與三值解碼大體相抵）；純 `llama-cli` 無 KVMem 實測 80.9 t/s。輸出正確性已驗證（連貫中文長文與 17×23=391 多方法計算；KVMem 組合與 `llama-server -ctk turbo1.5` 亦同樣通過）。
 
-文本 + 视觉：
+文本 + 視覺：
 
 ```sh
 llamaServer="D:/Programs/llama-cpp-repos/laamaafung-v17/bin/Release/llama-server.exe"
@@ -330,17 +330,17 @@ $llamaServer -m $model \
 
 #### 啟動參數與工作原理說明
 
-以下係關鍵參數組及其工作原理，方便用戶根據實際需求進行選擇：
+以下係關鍵參數組及其工作原理，方便用户根據實際需求進行選擇：
 
 | 參數組 | 說明 | 適用場景 |
 | --- | --- | --- |
 | `--cache-prompt --cache-ram 8192 --checkpoint-min-step 512 --ctx-checkpoints 64` | 啟用提示緩存（KV 緩存重用）機制。當多個請求有相同或相似的 prompt 前綴時，系統會重用之前計算的 KV 狀態，避免重複計算。`--cache-ram 8192` 設定緩存大小為 8GB，`--checkpoint-min-step 512` 設定創建 checkpoint 的最小步長，`--ctx-checkpoints 64` 設定保留的 checkpoint 數量。 | 適合有大量重複前綴請求、長對話歷史或需要加速響應的場景。 |
 | `--cache-reuse N` | 啟用中間 chunk 位移重用。與 `--cache-prompt` 的前綴匹配不同，此功能透過 K-shift 將已緩存的 KV chunk 旋轉到新位置實現重用（非傳統意義的緩存重用）。**依賴 `llama_memory_can_shift()`**，當模型不支援 K-shift 時會自動禁用並警告 `cache_reuse is not supported by this context`。不支援的模型包括：使用 M-RoPE/IM-RoPE 位置編碼的模型（`n_pos_per_embd > 1`，如 Qwen3.5/3.6 系列、Qwen3VL 等多模態模型）、以及未啟用 `--swa-full` 的 SWA 模型。Qwen3.5/3.6 系列同時採用混合注意力架構（門控 DeltaNet 線性注意力 + 門控注意力），IM-RoPE 與混合注意力任一已足以令 K-shift 失效。**啟用 `--kvmem` 時一律自動禁用**（同因：KVMem 的索引無法跟隨位置重映射）。 | 僅對支援 K-shift 的標準 RoPE 模型（如 Qwen2.5、Llama 等）有效。不支援的模型移除此參數即可消除警告，`--cache-prompt` 已提供前綴緩存重用。 |
 | `--context-shift` | 啟用生成階段的運行時 K-shift（KV cache 動態位移）。要求 `llama_memory_can_shift()` 回傳 true，否則會在 context 用盡時優雅停止（`STOP_TYPE_LIMIT`）。K-shift 不可用時自動禁用並警告，初始 prompt 截斷不受影響。隱含啟用 `--prompt-truncate`。**啟用 `--kvmem` 時一律拒絕**（KVMem 的分層索引按舊位置編號建立，無法跟隨重映射），需要更長上下文請加大 `--ctx-size`；此時「隱含啟用截斷」亦一併失效。 | 適合需要生成階段動態遷移 KV cache 的長程代理任務。使用 `--kvmem` 時請直接移除此參數。 |
-| `--prompt-truncate` | 啟用初始 prompt 截斷（當請求 tokens 超過 `--ctx-size` 時自動截斷中間部分並保留頭尾）。對所有模型架構均生效，無需 KV cache 位移支援；但**啟用 `--kvmem` 時會被自動禁用並警告**（截斷會挖掉 prompt 中段並重寫 token 數組，令檢索查詢區間與 `--ctx-checkpoints` 的訊息分界全部錯位），超長提示改為返回明確的 400 `exceed_context_size`。由 `--context-shift` 隱含啟用，亦可單獨使用。 | 適合處理超長 prompt 提交、對話歷史較長的場景，避免 HTTP 400 錯誤。使用 `--kvmem` 時請改為加大 `--ctx-size` 或在客戶端裁剪提示。 |
+| `--prompt-truncate` | 啟用初始 prompt 截斷（當請求 tokens 超過 `--ctx-size` 時自動截斷中間部分並保留頭尾）。對所有模型架構均生效，無需 KV cache 位移支援；但**啟用 `--kvmem` 時會被自動禁用並警告**（截斷會挖掉 prompt 中段並重寫 token 數組，令檢索查詢區間與 `--ctx-checkpoints` 的訊息分界全部錯位），超長提示改為返回明確的 400 `exceed_context_size`。由 `--context-shift` 隱含啟用，亦可單獨使用。 | 適合處理超長 prompt 提交、對話歷史較長的場景，避免 HTTP 400 錯誤。使用 `--kvmem` 時請改為加大 `--ctx-size` 或在客户端裁剪提示。 |
 | `--kvmem` 及其子參數 | 啟用 KVMem 分層/稀疏 KV 記憶，讓 `llama-server` 本體在有限顯存下驅動超長上下文（須 v21 分支的 `LLAMA_KVMEM` 構建）。**強制 `--parallel 1`**；純線性注意力（recurrent）與 SWA 模型不支援，不滿足時靜默回退標準 KV。子參數：`--kvmem-budget`、`--kvmem-gpu-ratio`、`--kvmem-block-tokens`、`--kvmem-gen-reserve`、`--kvmem-query-last`、`--kvmem-query-max`、`--kvmem-method`、`--kvmem-harvest-v`、`--no-kvmem-image-autoscale`。 | 顯存不足以容納目標上下文的 KV cache 時（例如 8GB 顯存跑 128K 上下文）。詳見下文「KVMem（分層/稀疏 KV 記憶）」一節。 |
 | `--swa-full` | 使用與 base cache 等大的全尺寸 SWA cache。僅對 GGUF 模型頭中明確聲明滑動窗口注意力（SWA）且窗口大小固定的模型有效（如 Gemma2/3、Cohere2、Exaone 等）。預設關閉時 SWA cache 僅為 `min(size_base, n_swa + n_ubatch)`，會導致 `llama_kv_cache_iswa::get_can_shift()` 回傳 false，使 `--context-shift` 的運行時 K-shift 失效（初始截斷不受影響）。啟用後 SWA 與 base 等大，K-shift 完全可用。 | 真正採用 SWA 架構的模型需要 `--context-shift` 完整功能（含生成階段運行時 K-shift）時必須配合使用。 |
-| `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閱導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
+| `--threads N` / `--threads-batch N` | 設置生成和 batch/prompt 處理的線程數。當 N <= 0（如 -1 或 0）時，系統會使用 `common_cpu_get_num_math()`（即物理數學核心數），而非 `hardware_concurrency()`（所有邏輯核心），以避免在 SMT（超線程）或混合架構 CPU 上過度訂閲導致的性能下降。 | 適合在具有 SMT（超線程）或混合架構（如 Apple M1）的 CPU 上優化 token 生成吞吐量。 |
 | `LLAMA_THREADS_RATIO` (環境變數) | 當 `--threads` 為 auto 模式（N <= 0）時，按此比例縮放線程數（範圍 0.1 - 1.0，默認 1.0 即不縮放）。**適用於 GPU + CPU 混合推理場景**（如 MoE 專家層透過 `-ncmoe` 卸載到 CPU），留出部分 CPU 核心給 CUDA driver/sync 工作，可顯著提升 decode 吞吐量。見下方案例。 | GPU + CPU 混合推理（`-ncmoe > 0` 且 `-ngl > 0`）場景。純 CPU 推理或純 GPU 推理無需設置。 |
 
 #### KVMem（分層/稀疏 KV 記憶）
@@ -372,10 +372,10 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 - 多模態（mmproj）：**已支持**（官版參數集帶 `--mmproj`，示例照搬）。圖像塊佔用連續的 cache 行、但攜帶 2-D（M-RoPE）模型位置，因此 `llama-server` 會為嵌入批設置 `llama_batch::logical_pos`（相鄰行號）並把媒體行的範圍告知 KVMem（`set_media_ranges`），KVMem 才能按行尋址且**整張圖整體保留**。
   - **預算**：`--kvmem-budget` 必須 ≥ 單張圖像的行數（由 `--image-min-tokens` 決定）＋ sink ＋ 查詢。圖像組是強制的、不能拆塊，所以這一項不滿足時**預設會先自動縮小圖像**（見下），只有連縮放下限都放不下（或關閉了自動縮放）才會拒絕該請求。拒絕時回 **HTTP 400**（`invalid_request_error`）而非 500 —— 這是請求本身放不下，不是服務器故障；訊息 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget` 直接點出兩個解法，與官版 `llama-kvmem-server` 逐字相同。判定在**前填之前**做（`llama_kvmem_check_fit()`），所以失敗是瞬時的，不會先跑完一次前填才報錯。高細節大圖的行數會隨原生解像度上升：實測 224×224 純色圖 ≈ 49 行、1024×1024 ≈ 1024 行、2048×2048 ≈ 4096 行（`KVMEM_TRACE=1` 的 `KVMem media rows: N chunk(s) ... [start,end)` 可核對）。
   - **圖像自動縮放（預設開）**：行數超預算時，在 **token 化之前**按比例把圖縮小，而不是讓請求失敗。KVMem 先算出「一張圖可用的 token 數」＝ `(budget − (sink + 4 個塊)) ÷ 本次請求的圖片數`，交給 vision 層把該模型的 image-token 上限壓低；Qwen-VL 的動態解析度預處理器隨即在 bitmap 階段把圖縮到預算內，所以縮放發生在**像素層**、比「先 token 化再拒絕」早一步。三個性質值得記住：**只降上限、從不放大**（小圖保持原解析度）；**以模型的原始上限為基準逐請求重算**，不會跨請求累積；**下限為 2 個塊**（預設 256 tokens）。
-  - 這與 **DeepSeek Harness 的圖像歸一化標準一致**：DSH 放行大圖、再按比例縮到 `normalizedImageMaxPixels = 2048×2048`；而本模型預設的 image-token 上限（4096 tokens × `patch_area` 1024 px）= 4,194,304 px，**恰好也是 2048×2048**。也就是說**預算充裕時（≳5K 行）行為與 DSH 完全一致、不做任何額外降質**，只有預算不足時才進一步縮小。日誌會打 `KVMem budget caps one image at N tokens (model limit M) for K media file(s)`；想完全關掉用 `--no-kvmem-image-autoscale`（回復為直接拒絕）。
-  - **`llama-kvmem-server` 同樣支援**（同名開關）：那裡的「拒絕」原本是它自己的守衛，報 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）；接上自動縮放後會先縮圖、請求正常完成。**注意它是獨立編譯的目標，需要 `tools/CMakeLists.txt` 給它 `LLAMA_KVMEM=1`**，否則 `server-common.cpp` 裡的 `#if defined(LLAMA_KVMEM)` 鉤子會被靜默編掉（本分支已補）。
+  - 這與 **DeepSeek Harness 的圖像歸一化標準一致**：DSH 放行大圖、再按比例縮到 `normalizedImageMaxPixels = 2048×2048`；而本模型預設的 image-token 上限（4096 tokens × `patch_area` 1024 px）= 4,194,304 px，**恰好也是 2048×2048**。也就是説**預算充裕時（≳5K 行）行為與 DSH 完全一致、不做任何額外降質**，只有預算不足時才進一步縮小。日誌會打 `KVMem budget caps one image at N tokens (model limit M) for K media file(s)`；想完全關掉用 `--no-kvmem-image-autoscale`（回復為直接拒絕）。
+  - **`llama-kvmem-server` 同樣支援**（同名開關）：那裡的「拒絕」原本是它自己的守衞，報 `image group exceeds KV budget; reduce --image-max-tokens or increase --kvmem-budget`（HTTP 400）；接上自動縮放後會先縮圖、請求正常完成。**注意它是獨立編譯的目標，需要 `tools/CMakeLists.txt` 給它 `LLAMA_KVMEM=1`**，否則 `server-common.cpp` 裡的 `#if defined(LLAMA_KVMEM)` 鈎子會被靜默編掉（本分支已補）。
   - **多圖**：同一條訊息裡**相鄰（中間無文本）且尺寸相同**的圖片會被 Qwen-VL 視為**視頻幀**兩兩合併成一張畫布（`mtmd.cpp` 的 `n_merge_frames = clip_model_n_temporal_merge()`，每組上限 2 張、逐對 `(1,2)(3,4)…`）。合併後模型看到的是拼合圖（例如兩張純色圖會被描述成「左右兩半」），且整組只佔一張畫布的 token 數。**要讓每張圖各自獨立，請在兩張圖之間插一個文本 part**（例如 `\n`）；尺寸不同則不會合併。日誌的 `KVMem media rows: N chunk(s)` 是判斷實際分塊數的可靠依據。
-  - **錯誤恢復**：放不下的請求只影響該次請求（HTTP 400），不會拖垮服務器；即便異常是在前填深處才浮現，也會被歸類成同一條 400 訊息（`llama_kvmem_classify_fit_error()`），不會退回 500。
+  - **錯誤恢復**：放不下的請求隻影響該次請求（HTTP 400），不會拖垮服務器；即便異常是在前填深處才浮現，也會被歸類成同一條 400 訊息（`llama_kvmem_classify_fit_error()`），不會退回 500。
 
 **與其他功能的交互**
 
@@ -394,16 +394,16 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 | --- | --- | --- |
 | `--kvmem` | 關閉 | 總開關（環境變數 `LLAMA_ARG_KVMEM`） |
 | `--kvmem-budget N` | `0` = `--ctx-size` | 顯存工作集 token 數，**最關鍵的容量參數**，見下方配置建議 |
-| `--kvmem-gpu-ratio R` | `0.50` | KVMem 顯存池上限佔 **VRAM 總量**的比例：`cap_blocks = (VRAM × R) / 塊大小`。與官版預設一致（`0.50`），取偏保守的值，以免個別用戶設錯參數時把顯存推爆。它是**上限**而非目標值：若 `budget + gen_reserve` 未超出 `cap_blocks` 就完全不起作用，實際工作集仍由 `--kvmem-budget` 決定；配方確實需要更大池時才調大（官版生產配方用 `0.85`）。核對方法：`KVMEM_TRACE=1` 的 `KVMEM_KV_BYTES` 行看 `cap_blocks` 與實際 `budget`/`pool`。 |
+| `--kvmem-gpu-ratio R` | `0.50` | KVMem 顯存池上限佔 **VRAM 總量**的比例：`cap_blocks = (VRAM × R) / 塊大小`。與官版預設一致（`0.50`），取偏保守的值，以免個別用户設錯參數時把顯存推爆。它是**上限**而非目標值：若 `budget + gen_reserve` 未超出 `cap_blocks` 就完全不起作用，實際工作集仍由 `--kvmem-budget` 決定；配方確實需要更大池時才調大（官版生產配方用 `0.85`）。核對方法：`KVMEM_TRACE=1` 的 `KVMEM_KV_BYTES` 行看 `cap_blocks` 與實際 `budget`/`pool`。 |
 | `--kvmem-block-tokens N` | `128` | 塊大小。越大檢索粒度越粗、元數據越省 |
-| `--kvmem-gen-reserve N` | `8192` | 生成階段保留在工作集內的 slack token 數（decode 頭寸）。每輪生成先寫進這段頭寸，用完才會觸發重選／換出，所以設太小會在**生成途中把剛檢索回來的內容擠掉**，長回合直接失去召回。**`256` 之類只是測試刻度**（連一段程式碼都不夠寫），官版生產值為 **8192**，上下限由用戶按「單輪可能生成多長」自定。顯存成本 ≈ 該 token 數 × `block_bytes / block_tokens`。 |
+| `--kvmem-gen-reserve N` | `8192` | 生成階段保留在工作集內的 slack token 數（decode 頭寸）。每輪生成先寫進這段頭寸，用完才會觸發重選／換出，所以設太小會在**生成途中把剛檢索回來的內容擠掉**，長回合直接失去召回。**`256` 之類只是測試刻度**（連一段程式碼都不夠寫），官版生產值為 **8192**，上下限由用户按「單輪可能生成多長」自定。顯存成本 ≈ 該 token 數 × `block_bytes / block_tokens`。 |
 | `--kvmem-query-last N` | `64` | prompt 無 chat 訊息分界（raw `/completion`）時的查詢長度 = 最後 N tokens；有分界時僅作兜底 |
 | `--kvmem-query-max N` | `512` | 檢索查詢長度上限，超出時保留尾部（`0` = 不限制） |
 | `--kvmem-method M` | `retrieval` | `retrieval`（按查詢檢索歷史塊）或 `recency`（只保留最近內容，等於純壓縮） |
 | `--kvmem-harvest-v` | 關閉 | 前填時同時把 V 搬到主機（增加前填開銷，換取更完整的檢索載入） |
 | `--no-kvmem-image-autoscale` | 自動縮放**開啟** | 關閉圖像自動縮放（環境變數 `LLAMA_ARG_NO_KVMEM_IMAGE_AUTOSCALE`）。預設開啟時，超出行數預算的圖像會在 **token 化之前**按比例縮小，而不是讓請求失敗；關閉後回到直接拒絕（HTTP 400，訊息見下文）。見「啟用條件」的多模態說明。 |
 
-**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。`--kvmem-gen-reserve` 單獨看是「**單輪生成頭寸**」：要 ≥ 你預期最長的一輪生成（寫碼／長推理動輒數千 token），官版生產值取 8192、上下限由用戶自定；只給 256 之類的測試刻度，KVMem 的召回會在生成途中被自己的換出邏輯吃掉。`--kvmem-gpu-ratio` 是**上限**而非目標值：它按 VRAM 總量換算可容納的塊數，若 `budget + gen_reserve` 超出就會把池壓小（見上表）。**預設 `0.50`（與官版一致）**，取值保守以免設錯參數時把顯存推爆；只要 `budget + gen_reserve` 未觸及 `cap_blocks`，它就不起作用，實際工作集完全由 `--kvmem-budget` 決定。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gen-reserve 8192` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）；該組合的 `budget + gen_reserve = 40960` tokens，在 8GB + `-ctk turbo4`（量化 KV）下仍低於 `cap_blocks`，故未顯式指定 ratio。**注意**：若改用 F16 KV，8GB 的 `cap_blocks` 僅約 43K tokens，與 40960 已相當接近——此時 `--kvmem-gpu-ratio 0.50` 會開始成為實際約束，需要更大工作集時請一併調大該值。
+**配置建議**：`--kvmem-budget` 需 ≥「單次前填最大提示所佔的塊數 + `--kvmem-gen-reserve`」。若預算小於提示塊數，日誌會出現 `prepare_working_set: incoming block N was not placed on GPU`，KVMem 會回滾該次 append 並由上游拆小批次重試（可恢復、輸出正確，但前填反覆重試會變慢）——這屬**預算配置問題，不是缺陷**。`--kvmem-gen-reserve` 單獨看是「**單輪生成頭寸**」：要 ≥ 你預期最長的一輪生成（寫碼／長推理動輒數千 token），官版生產值取 8192、上下限由用户自定；只給 256 之類的測試刻度，KVMem 的召回會在生成途中被自己的換出邏輯吃掉。`--kvmem-gpu-ratio` 是**上限**而非目標值：它按 VRAM 總量換算可容納的塊數，若 `budget + gen_reserve` 超出就會把池壓小（見上表）。**預設 `0.50`（與官版一致）**，取值保守以免設錯參數時把顯存推爆；只要 `budget + gen_reserve` 未觸及 `cap_blocks`，它就不起作用，實際工作集完全由 `--kvmem-budget` 決定。生產組合 `-c 131072 --kvmem-budget 32768 --kvmem-gen-reserve 8192` 已在 8GB 顯存 + `-n-cpu-moe 36` 上實測正常（多輪對話、含 checkpoint 回滾，0 報錯）；該組合的 `budget + gen_reserve = 40960` tokens，在 8GB + `-ctk turbo4`（量化 KV）下仍低於 `cap_blocks`，故未顯式指定 ratio。**注意**：若改用 F16 KV，8GB 的 `cap_blocks` 僅約 43K tokens，與 40960 已相當接近——此時 `--kvmem-gpu-ratio 0.50` 會開始成為實際約束，需要更大工作集時請一併調大該值。
 
 **日誌排查（`KVMEM_TRACE=1`）**：`KVMEM_KV_BYTES cells=.. budget=.. pool=..`（是否啟用與池大小）、`KVMem query span = [a, b) of N prompt tokens (last user turn|fallback: last tokens)`（本回合查詢區間及來源）、`KVMEM_CAPTURE tag=q/k`（捕獲是否生效）、`KVMEM_TRACE harvest n=.. q=.. k=..`、`KVMEM_TRACE retrieval stage_in=.. skip=.. window=..`、`KVMEM_DECODE_MEAN flush block=.. n=..`。若這些行全部缺失或計數為 0，代表 KVMem 並未真正參與，請先檢查是否被 `--parallel`、SWA 或 recurrent 條件擋下。
 
@@ -428,7 +428,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 
 **最佳配置**：`LLAMA_THREADS_RATIO=0.56`（即 `-t 10`），比預設全核快 **+18%**。
 
-> **注意：** 最優比例取決於 CPU 架構、GPU 算力、MoE 卸載比例、模型大小等多個因素，上表數據僅供參考。建議用戶通過 `llama-bench` 實測自身硬件的最優值。設置方式：
+> **注意：** 最優比例取決於 CPU 架構、GPU 算力、MoE 卸載比例、模型大小等多個因素，上表數據僅供參考。建議用户通過 `llama-bench` 實測自身硬件的最優值。設置方式：
 >
 > ```sh
 > # Linux/macOS
@@ -455,7 +455,7 @@ KVMem 把 KV 緩存切成固定大小的**塊**（預設 128 tokens/塊），只
 
 > **注意：** 切勿將 `--load-mode` 與舊參數 `--mlock`/`--mmap`/`--no-mmap`/`--direct-io`/`--no-direct-io` 混用，否則會觸發警告，且僅命令行最後一個 flag 生效。舊參數僅為向後兼容保留，後續版本可能移除。
 
-> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。上游新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現 Laamaafung 已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降。建議根据自身设备的实际参数性能表现选用 `mlock-ram` 或者 `mlock`。
+> **舊組合 `--no-mmap --mlock` 遷移說明：** 舊版 `use_mmap` 與 `use_mlock` 是兩個獨立布爾字段，允許「不用 mmap + 鎖定記憶體」的組合（eager read 載入 CPU buffer 後再 mlock）。上游新版 `--load-mode` 合併為單枚舉，原本不再支持此組合。現 Laamaafung 已新增 `--load-mode mlock-ram` 恢復此行為：直接讀取模型到 RAM 後 mlock，不經過 mmap，避免推理時 mmap page-fault 導致的性能下降。建議根據自身設備的實際參數性能表現選用 `mlock-ram` 或者 `mlock`。
 
 ---
 
@@ -493,9 +493,9 @@ llama_context::from_params: n_ubatch set to auto, selected value: 4096 based on 
 
 ---
 
-#### TurboQuant 键值缓存 與 MMA 融合路徑
+#### TurboQuant 鍵值緩存 與 MMA 融合路徑
 
-透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`，v23 分支另支援 TCQ 兩型 `turbo3_tcq` / `turbo2_tcq` 與三值型 `turbo1.5`）可壓縮 KV 缓存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；條件不滿足時（Volta 及更早、或 K/V 不同型等）會自動回退到一般注意力派發，仍在 GPU 上執行（詳見本節末尾）。
+透過 `--cache-type-k` / `--cache-type-v` 指定 TurboQuant 量化類型（`turbo4` / `turbo3` / `turbo2`，v23 分支另支援 TCQ 兩型 `turbo3_tcq` / `turbo2_tcq` 與三值型 `turbo1.5`）可壓縮 KV 緩存佔用。在 CUDA 後端上，只要 GPU 架構為 Turing 及以上（Turing / Ampere / Ada Lovelace / Hopper / Blackwell 等，即 SM 7.5+），系統會自動啟用 MMA 融合注意力路徑（fused turbo MMA）以加速解碼；條件不滿足時（Volta 及更早、或 K/V 不同型等）會自動回退到一般注意力派發，仍在 GPU 上執行（詳見本節末尾）。
 
 | 環境變數 | 預設值 | 描述 |
 | --- | --- | --- |
@@ -508,7 +508,7 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 - **Turing / Ampere**：量化 KV → `MMA_F16`，**仍然是 tensor core**，但會先把 K/V 轉成 f16（多一份臨時顯存與頻寬開銷）。
 - **Ada Lovelace 及以上**：解碼（`Q->ne[1] <= 2`）→ `VEC`（核心內反量化、無臨時緩衝）；其餘 → `MMA_F16`。
 
-所以 `-ctk turbo4 -ctv turbo3` 這類 **K/V 不同型**的混搭只是拿不到「融合」那一檔優化（內聯反量化 + GQA 打包、省掉 f16 臨時緩衝），並非退回 CPU 或沒有加速；要吃滿融合路徑就把 K 與 V 設成同一個 turbo 類型。全過程自動，無需手動干預。
+所以 `-ctk turbo4 -ctv turbo3` 這類 **K/V 不同型**的混搭只是拿不到「融合」那一檔優化（內聯反量化 + GQA 打包、省掉 f16 臨時緩衝），並非退回 CPU 或沒有加速；要吃滿融合路徑就把 K 與 V 設成同一個 turbo 類型。全過程自動，無需手動幹預。
 
 ---
 
@@ -557,15 +557,15 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 
 #### 段級重複循環檢測參數說明
 
-| 參數 | 類型 | 默认值 | 描述 |
+| 參數 | 類型 | 默認值 | 描述 |
 | --- | --- | --- | --- |
-| `--repeat-line-window` | 整数 | 0（已禁用） | 要跟踪的历史片段数量 |
-| `--repeat-line-min-length` | 整数 | 20 | 最小片段长度（避免因短语而产生的误报） |
-| `--repeat-line-delimiters` | 字符串 | `"\n.!?:。！？："` | 结束一个片段的字符 |
-| `--repeat-line-temp-boost` | 浮点数 | 0.5 | 检测到回路时温度升高 |
+| `--repeat-line-window` | 整數 | 0（已禁用） | 要跟蹤的歷史片段數量 |
+| `--repeat-line-min-length` | 整數 | 20 | 最小片段長度（避免因短語而產生的誤報） |
+| `--repeat-line-delimiters` | 字符串 | `"\n.!?:。！？："` | 結束一個片段的字符 |
+| `--repeat-line-temp-boost` | 浮點數 | 0.5 | 檢測到迴路時温度升高 |
 
 
-示例（啟用 repeat_line 采樣器以防止無限循環）：
+示例（啟用 repeat_line 採樣器以防止無限循環）：
 
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --repeat-line-window 10 --repeat-line-min-length 20 --repeat-line-delimiters "\n.!?:。！？：" --repeat-line-temp-boost 0.5
@@ -575,34 +575,34 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 
 #### 連續 Token 重複失控檢測（內建，無須配置）
 
-當模型陷入同一 token 反覆生成的死循環（例如 `</</</...`），系統會自動偵測並以分級升溫打破循環，無需手動啟用任何參數。此機制與段級重複檢測（`--repeat-line-*`）互補：前者針對行/段級語義重複，本機制針對 token 級的硬性失控。
+當模型陷入同一 token 反覆生成的死循環（例如 `</</</...`），系統會自動偵測並以分級升温打破循環，無需手動啟用任何參數。此機制與段級重複檢測（`--repeat-line-*`）互補：前者針對行/段級語義重複，本機制針對 token 級的硬性失控。
 
 | 連續次數 | 動作 | 效果（以 base temp = 0.6 為例） |
 | --- | --- | --- |
-| 8 次 | `temp_boost = 2.0`，即 logit 乘以 1/(1+2) | 等效 temp = 1.8，溫和升溫，嘗試打破循環 |
-| 16 次 | `temp_boost = 3.0`，即 logit 乘以 1/(1+3) | 等效 temp = 2.4，強力升溫 |
-| 64 次 | `STOP_TYPE_LIMIT` | 升溫無效，強制停止作為最終安全網 |
+| 8 次 | `temp_boost = 2.0`，即 logit 乘以 1/(1+2) | 等效 temp = 1.8，温和升温，嘗試打破循環 |
+| 16 次 | `temp_boost = 3.0`，即 logit 乘以 1/(1+3) | 等效 temp = 2.4，強力升温 |
+| 64 次 | `STOP_TYPE_LIMIT` | 升温無效，強制停止作為最終安全網 |
 
-升溫原理與 `--repeat-line-temp-boost` 相同：對所有候選 token 的 logit 乘以 `1/(1+boost)`，等效於臨時提高採樣溫度。一旦生成的 token 不再重複，boost 立即歸零，恢復正常採樣。
+升温原理與 `--repeat-line-temp-boost` 相同：對所有候選 token 的 logit 乘以 `1/(1+boost)`，等效於臨時提高採樣温度。一旦生成的 token 不再重複，boost 立即歸零，恢復正常採樣。
 
-**與 `--repeat_penalty` / `--presence_penalty` 的區別：** 這兩個參數對已出現過的 token 施加持續性懲罰（降低其 logit），但對同一 token 連續出現的硬性失控無效。原因是：當模型對某 token（如 `</`）的 logit 遠高於所有其他候選 token 時，即使施加 1.5x 或 2.0x 的懲罰，此 token 仍然具有最高概率，模型會繼續選擇它，形成死循環。本機制不行"懲罰重複 token"的路線，而是通過升溫（壓縮所有 logit 差距）令低概率 token 獲得被選中的機會，從根本上打破循環。
+**與 `--repeat_penalty` / `--presence_penalty` 的區別：** 這兩個參數對已出現過的 token 施加持續性懲罰（降低其 logit），但對同一 token 連續出現的硬性失控無效。原因是：當模型對某 token（如 `</`）的 logit 遠高於所有其他候選 token 時，即使施加 1.5x 或 2.0x 的懲罰，此 token 仍然具有最高概率，模型會繼續選擇它，形成死循環。本機制不行"懲罰重複 token"的路線，而是通過升温（壓縮所有 logit 差距）令低概率 token 獲得被選中的機會，從根本上打破循環。
 
 ---
 
 #### 週期性 Token 循環檢測機制（Periodic Token Loop Detection）
 
-當模型生成呈現週期性或交替性的 token 死循環模式（例如「ababab...」、「abcabc...」等，其中 a、b、c 代表不同的獨立 token），內建的連續 token 失控檢測（針對連續相同 token，如 `aaaaaaaa...`）無法有效偵測此類模式。本機制提供專門的週期性重複檢測 sampler，用於檢查最近 token 序列中的循環/交替模式，並在檢測到時應用懲罰或升溫以打破死循環。
+當模型生成呈現週期性或交替性的 token 死循環模式（例如「ababab...」、「abcabc...」等，其中 a、b、c 代表不同的獨立 token），內建的連續 token 失控檢測（針對連續相同 token，如 `aaaaaaaa...`）無法有效偵測此類模式。本機制提供專門的週期性重複檢測 sampler，用於檢查最近 token 序列中的循環/交替模式，並在檢測到時應用懲罰或升温以打破死循環。
 
 | 參數 | 類型 | 預設值 | 描述 |
 | --- | --- | --- | --- |
 | `--cycle-detect-last-n N` | 整數 | 64 | 要檢查循環模式的最近 token 數量（0 = 停用） |
 | `--cycle-detect-min-period N` | 整數 | 2 | 要檢測的最小週期長度 |
 | `--cycle-detect-max-period N` | 整數 | 8 | 要檢測的最大週期長度 |
-| `--cycle-detect-action TYPE` | 字符串 | `"boost"` | 檢測到循環模式時的動作：`"boost"`（溫度升溫，預設）或 `"penalty"`（重複懲罰） |
-| `--cycle-boost-factor F` | 浮點數 | 0.5 | 檢測到循環模式時的升溫因子（僅當 action = `"boost"` 時生效。等效於臨時將採樣溫度提高，壓縮所有 logit 差距） |
+| `--cycle-detect-action TYPE` | 字符串 | `"boost"` | 檢測到循環模式時的動作：`"boost"`（温度升温，預設）或 `"penalty"`（重複懲罰） |
+| `--cycle-boost-factor F` | 浮點數 | 0.5 | 檢測到循環模式時的升温因子（僅當 action = `"boost"` 時生效。等效於臨時將採樣温度提高，壓縮所有 logit 差距） |
 | `--cycle-penalty-repeat F` | 浮點數 | 1.00 | 檢測到循環模式時的重複懲罰因子（僅當 action = `"penalty"` 時生效。1.0 = 停用懲罰） |
 
-示例（啟用週期性重複採樣器並採用升溫機制打破死循環）：
+示例（啟用週期性重複採樣器並採用升温機制打破死循環）：
 
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action boost --cycle-boost-factor 0.5
@@ -614,7 +614,7 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --cycle-detect-last-n 64 --cycle-detect-min-period 2 --cycle-detect-max-period 8 --cycle-detect-action penalty --cycle-penalty-repeat 1.5
 ```
 
-**升溫原理：** 當選擇 `"boost"` 動作時，對所有候選 token 的 logit 乘以 `1/(1+boost_factor)`，等效於臨時提高採樣溫度。一旦生成的 token 不再呈現週期循環，檢測機制會重置，恢復正常採樣。
+**升温原理：** 當選擇 `"boost"` 動作時，對所有候選 token 的 logit 乘以 `1/(1+boost_factor)`，等效於臨時提高採樣温度。一旦生成的 token 不再呈現週期循環，檢測機制會重置，恢復正常採樣。
 
 **與連續 Token 失控檢測的區別：** 內建的連續 token 失控檢測僅針對「連續相同 token」的硬性失控（如 `aaaaaaaa...` 或 `</</</...`）。而本機制專門針對 token-level 的交替/週期性循環模式（如 `ababab...`、`abcabc...`），透過週期檢測演算法（基於字串最小週期匹配屬性）識別並打破此類死循環。
 
@@ -622,7 +622,7 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 
 #### 早停檢測與 EOG 抑制（Early-Stop Detection & EOG Suppression）
 
-當模型在思考完成後未產生任何可見輸出就自動停止（例如思考結束但無正文回答，或工具調用被截斷），客戶端會收到空響應且無明顯錯誤。流式模式下此問題尤其嚴重：用戶可能完全不會察覺本回合已丟失。本機制通過雙層設計驅動模型持續生成直至出現真實內容，並對觸發此機制的 slot 開啟 5 回合高強度監控。
+當模型在思考完成後未產生任何可見輸出就自動停止（例如思考結束但無正文回答，或工具調用被截斷），客户端會收到空響應且無明顯錯誤。流式模式下此問題尤其嚴重：用户可能完全不會察覺本回合已丟失。本機制通過雙層設計驅動模型持續生成直至出現真實內容，並對觸發此機制的 slot 開啟 5 回合高強度監控。
 
 | 參數 | 類型 | 預設值 | 描述 |
 | --- | --- | --- | --- |
@@ -630,9 +630,9 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 
 **雙層架構設計：**
 
-1. **Slot 層 EOG 攔截（流式透明）** - 在 `process_token()` 中，當採樣到 EOG token 時檢查 `slot.generated_text` 判斷是否為缺陷性早停。若是，則不設置 `STOP_TYPE_EOS`，而是啟用 EOG 抑制（`common_sampler_set_suppress_eog`），將所有 EOG token 的 logit 強制設為 `-INFINITY`，令 sampler 返回次優 token 以繼續生成。由於抑制發生在 sampler 內部，流式客戶端看到的是不中斷的 token 流，無需倒帶或重啟，且正常路徑與投機採樣路徑（共用 `common_sampler_sample()`）均被覆蓋。
+1. **Slot 層 EOG 攔截（流式透明）** - 在 `process_token()` 中，當採樣到 EOG token 時檢查 `slot.generated_text` 判斷是否為缺陷性早停。若是，則不設置 `STOP_TYPE_EOS`，而是啟用 EOG 抑制（`common_sampler_set_suppress_eog`），將所有 EOG token 的 logit 強制設為 `-INFINITY`，令 sampler 返回次優 token 以繼續生成。由於抑制發生在 sampler 內部，流式客户端看到的是不中斷的 token 流，無需倒帶或重啟，且正常路徑與投機採樣路徑（共用 `common_sampler_sample()`）均被覆蓋。
 
-2. **HTTP 層重試（非流式）** - 對非流式請求，`handle_completions_impl()` 將任務創建封裝為 `create_tasks` lambda 並運行重試循環：若最終結果的 `oaicompat_msg.content` 與 `tool_calls` 均為空，則重新提交任務。從第 2 次重試起 bump 採樣種子（`seed += http_retry`）以避免重複採樣同一死胡同。循環受 `--eog-retry-max` 約束。
+2. **HTTP 層重試（非流式）** - 對非流式請求，`handle_completions_impl()` 將任務創建封裝為 `create_tasks` lambda 並運行重試循環：若最終結果的 `oaicompat_msg.content` 與 `tool_calls` 均為空，則重新提交任務。從第 2 次重試起 bump 採樣種子（`seed += http_retry`）以避免重複採樣同一死衚衕。循環受 `--eog-retry-max` 約束。
 
 **早停檢測條件（任一命中即判定）：**
 
@@ -656,7 +656,7 @@ MMA 融合路徑生效條件：**K 與 V 同型**且為 `turbo4`/`turbo3`/`turbo
 
 **隱藏自檢 turn（監控增強）：**
 
-單純的早停條件檢查無法區分"模型已正常完成簡短回覆"與"模型異常截斷"兩種場景。為此監控機制在觸發早停時不直接抑制 EOG，而是先注入一個對客戶端透明的隱藏 turn，讓模型自判回覆是否完整，再根據判定結果決定是否抑制 EOG 並繼續生成。自檢使用內部協議標記 `<complete>` / `<incomplete>`，不依賴任何廠商特定標籤（如 `<think>`、`<tool_call>`），故通用於 Qwen、Gemma 等所有模型。
+單純的早停條件檢查無法區分"模型已正常完成簡短回覆"與"模型異常截斷"兩種場景。為此監控機制在觸發早停時不直接抑制 EOG，而是先注入一個對客户端透明的隱藏 turn，讓模型自判回覆是否完整，再根據判定結果決定是否抑制 EOG 並繼續生成。自檢使用內部協議標記 `<complete>` / `<incomplete>`，不依賴任何廠商特定標籤（如 `<think>`、`<tool_call>`），故通用於 Qwen、Gemma 等所有模型。
 
 自檢狀態機（per-slot，`SELF_CHECK_*` 階段）：
 
@@ -666,11 +666,11 @@ NONE -> PREFILL -> GENERATING -> {NONE | ROLLBACK} -> NONE
 
 1. **NONE -> PREFILL**：`process_token()` 中 `early_stop_no_output` 為真且 `cached_messages` 非空時觸發。`build_self_check_prompt()` 通過 `common_chat_format_single()` 構建增量 prompt（`past_msg = cached_messages + assistant_msg(generated_text)`，`new_msg = user "Review completeness, output <complete>/<incomplete>"`），tokenize 後入隊 `self_check_prefill`。
 2. **PREFILL -> GENERATING**：`handle_last_sampled_token()` 將觸發 EOS 以 `output=false` 加入 batch，隨後追加 prefill tokens（末 token `output=true`）。保存回滾狀態（KV 位置、prompt 大小、EOS token id），sampler 同步接受每個 prefill token 以保持懲罰/repeat 狀態一致。
-3. **GENERATING**：`process_token()` 將自檢回覆 token 路由至 `handle_self_check_token()`，累積文本至 `self_check_text`（清空 `text_to_send` 對客戶端隱藏），監測 `<complete>`/`<incomplete>` 標記。安全閥：回覆超過 64 字符仍無標記時保守判定為 incomplete。
+3. **GENERATING**：`process_token()` 將自檢回覆 token 路由至 `handle_self_check_token()`，累積文本至 `self_check_text`（清空 `text_to_send` 對客户端隱藏），監測 `<complete>`/`<incomplete>` 標記。安全閥：回覆超過 64 字符仍無標記時保守判定為 incomplete。
 4. **完整判定**：`<complete>` -> `STOP_TYPE_EOS`，自檢 turn 留在 cache 中由下個請求覆蓋；`<incomplete>` -> 進入 `ROLLBACK`。
 5. **ROLLBACK -> NONE**：`handle_last_sampled_token()` 通過 `common_context_seq_rm()` 從 KV cache 截斷整個自檢 turn，`keep_first()` 截斷 `prompt.tokens`，重新以 `output=true` 評估觸發 EOS，arm EOG 抑制後模型在原回覆上繼續生成。
 
-自檢全過程所有 token 的 `text_to_send` 均被清空，流式與非流式客戶端均無感知。`generated_text`、stop-word 偵測、partial response、EOG 早停邏輯在 GENERATING 階段全部旁路。
+自檢全過程所有 token 的 `text_to_send` 均被清空，流式與非流式客户端均無感知。`generated_text`、stop-word 偵測、partial response、EOG 早停邏輯在 GENERATING 階段全部旁路。
 
 **重試預算：**
 - `--eog-retry-max` 同時控制 slot 層抑制次數與 HTTP 層非流式重試次數
@@ -684,20 +684,20 @@ NONE -> PREFILL -> GENERATING -> {NONE | ROLLBACK} -> NONE
 
 ---
 
-#### DRY 采样防重复参数说明
+#### DRY 採樣防重複參數說明
 
-DRY (Don't Repeat Yourself) 是一种防止模型生成重复内容的采样机制。
+DRY (Don't Repeat Yourself) 是一種防止模型生成重複內容的採樣機制。
 
-| 参数 | 默认值 | 描述 |
+| 參數 | 默認值 | 描述 |
 | --- | --- | --- |
-| `--dry-multiplier N` | 0.00 | 设置 DRY 采样乘数（0.0 = 禁用） |
-| `--dry-base N` | 1.75 | 设置 DRY 采样基础值 |
-| `--dry-allowed-length N` | 2 | 设置 DRY 采样的允许长度 |
-| `--dry-penalty-last-n N` | -1 | 设置 DRY 对最后 n 个 token 的惩罚（0 = 禁用，-1 = 上下文大小） |
-| `--dry-sequence-breaker STRING` | - | 为 DRY 采样添加序列中断符，同时清除默认中断符 ('\n', ':', '"', '*')；使用 "none" 表示不使用任何序列中断符 |
+| `--dry-multiplier N` | 0.00 | 設置 DRY 採樣乘數（0.0 = 禁用） |
+| `--dry-base N` | 1.75 | 設置 DRY 採樣基礎值 |
+| `--dry-allowed-length N` | 2 | 設置 DRY 採樣的允許長度 |
+| `--dry-penalty-last-n N` | -1 | 設置 DRY 對最後 n 個 token 的懲罰（0 = 禁用，-1 = 上下文大小） |
+| `--dry-sequence-breaker STRING` | - | 為 DRY 採樣添加序列中斷符，同時清除默認中斷符 ('\n', ':', '"', '*')；使用 "none" 表示不使用任何序列中斷符 |
 
 
-示例（啟用 DRY 采樣以防止重複內容）：
+示例（啟用 DRY 採樣以防止重複內容）：
 
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe --model /path/to/model.gguf --dry-multiplier 1.5 --dry-base 1.75 --dry-allowed-length 2 --dry-penalty-last-n 2048 --dry-sequence-breaker "none"
@@ -713,7 +713,7 @@ DRY (Don't Repeat Yourself) 是一种防止模型生成重复内容的采样机�
 
 | 參數 | 預設值 | 描述 |
 | --- | --- | --- |
-| `--reasoning-temp N` | 0.80 | 推理塊內的溫度 |
+| `--reasoning-temp N` | 0.80 | 推理塊內的温度 |
 | `--reasoning-top-k N` | 40 | 推理塊內的 top-k |
 | `--reasoning-top-p N` | 0.95 | 推理塊內的 top-p |
 | `--reasoning-min-p N` | 0.05 | 推理塊內的 min-p |
@@ -721,8 +721,8 @@ DRY (Don't Repeat Yourself) 是一种防止模型生成重复内容的采样机�
 | `--reasoning-xtc-probability N` | 0.00 | 推理塊內的 XTC 概率 |
 | `--reasoning-xtc-threshold N` | 0.10 | 推理塊內的 XTC 閾值 |
 | `--reasoning-typical-p N` | 1.00 | 推理塊內的 typical-p |
-| `--reasoning-dynatemp-range N` | 0.00 | 推理塊內的動態溫度範圍 |
-| `--reasoning-dynatemp-exp N` | 1.00 | 推理塊內的動態溫度指數（別名：`--reasoning-dynatemp-exponent`） |
+| `--reasoning-dynatemp-range N` | 0.00 | 推理塊內的動態温度範圍 |
+| `--reasoning-dynatemp-exp N` | 1.00 | 推理塊內的動態温度指數（別名：`--reasoning-dynatemp-exponent`） |
 | `--reasoning-repeat-last-n N` | 64 | 推理塊內的重複懲罰歷史長度 |
 | `--reasoning-repeat-penalty N` | 1.00 | 推理塊內的重複懲罰倍數 |
 | `--reasoning-presence-penalty N` | 0.00 | 推理塊內的存在懲罰 |
@@ -741,7 +741,7 @@ DRY (Don't Repeat Yourself) 是一种防止模型生成重复内容的采样机�
 
 **與連續 Token 重複失控檢測的互動：** 當推理塊內啟用 `chain_think` 時，runaway detection 的 `temp_boost` 仍會作用於所有候選 token 的 logit（在 `chain_think` apply 之前），因此推理塊內外的失控循環都能被打破。
 
-示例（推理塊用較高溫度 + 較大 top-p，正文用較低溫度）：
+示例（推理塊用較高温度 + 較大 top-p，正文用較低温度）：
 
 ```sh
 ./laamaafung/build/bin/Release/llama-server.exe \
@@ -755,7 +755,7 @@ DRY (Don't Repeat Yourself) 是一种防止模型生成重复内容的采样机�
 
 `reasoning_temp`（別名 `reasoning_temperature`）、`reasoning_top_k`、`reasoning_top_p`、`reasoning_min_p`、`reasoning_top_n_sigma`、`reasoning_xtc_probability`、`reasoning_xtc_threshold`、`reasoning_typical_p`、`reasoning_dynatemp_range`、`reasoning_dynatemp_exp`（別名 `reasoning_dynatemp_exponent`）、`reasoning_repeat_last_n`、`reasoning_repeat_penalty`、`reasoning_presence_penalty`、`reasoning_frequency_penalty`、`reasoning_dry_multiplier`、`reasoning_dry_base`、`reasoning_dry_allowed_length`、`reasoning_dry_penalty_last_n`、`reasoning_mirostat`、`reasoning_mirostat_tau`（別名 `reasoning_mirostat_ent`）、`reasoning_mirostat_eta`（別名 `reasoning_mirostat_lr`）、`reasoning_adaptive_target`、`reasoning_adaptive_decay`、`reasoning_min_keep`、`reasoning_seed`。
 
-Anthropic 客戶端範例（`/v1/messages`）：
+Anthropic 客户端範例（`/v1/messages`）：
 
 ```json
 {
@@ -770,24 +770,24 @@ Anthropic 客戶端範例（`/v1/messages`）：
 
 ---
 
-## 编程代理
+## 編程代理
 
 ### Klaude Code
 
-此乃适配本地模型服务的 Klaude Code 版本：https://github.com/naamfung/klaude/releases
+此乃適配本地模型服務的 Klaude Code 版本：https://github.com/naamfung/klaude/releases
 
-默认设置上下文长度为 128k 容量，可使用 `ANTHROPIC_MODEL="Agentic-Turbo-Coder[256k]"` 等方式设置为你本地模型服务开启的容量上限。
+默認設置上下文長度為 128k 容量，可使用 `ANTHROPIC_MODEL="Agentic-Turbo-Coder[256k]"` 等方式設置為你本地模型服務開啓的容量上限。
 
 
-### 简单配置
+### 簡單配置
 
-可以将以上下载的预编译版本放入 `$HOME/.local/bin` 或你喜欢的路径：
+可以將以上下載的預編譯版本放入 `$HOME/.local/bin` 或你喜歡的路徑：
 
 ```bash
 export PATH="$HOME/.local/bin":$PATH
 ```
 
-### 配置 "Open" Claude / Klaude 环境变量
+### 配置 "Open" Claude / Klaude 環境變量
 
 ```bash
 export ANTHROPIC_BASE_URL="http://192.168.124.197:8008"
@@ -800,21 +800,21 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="Agentic-Turbo-Coder"
 
 ### Glash
 
-Glash 是基于我对 crush 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/glash
+Glash 是基於我對 crush 的本地化適配，提供終端環境下的編程代理能力：https://github.com/naamfung/glash
 
 
 ### Rex
 
-从响应速度而言，我推荐使用 Rex ，其基于我对 Reasonix 的本地化适配，提供终端環境下的编程代理能力：https://github.com/naamfung/rex
+從響應速度而言，我推薦使用 Rex ，其基於我對 Reasonix 的本地化適配，提供終端環境下的編程代理能力：https://github.com/naamfung/rex
 
-克隆之后用「make build」编译，将得到的二进制程序放到你系统环境变量可搜索到的路径，启动终端运行「rex setup」选 ANTHROPIC 兼容协议配置好 laamaafung server 运行的端口。再次启动「rex」即可畅享本地模型支持下的编程乐趣。
+克隆之後用「make build」編譯，將得到的二進制程序放到你係統環境變量可搜索到的路徑，啓動終端運行「rex setup」選 ANTHROPIC 兼容協議配置好 laamaafung server 運行的端口。再次啓動「rex」即可暢享本地模型支持下的編程樂趣。
 
-由于 Reasonix 主线发布到其生产路径下的版本根本就不稳定，时神时鬼，不推荐直接使用 Reasonix，建议锁定一版自认稳定的版本或使用我维护的 Rex 版。
+由於 Reasonix 主線發佈到其生產路徑下的版本根本就不穩定，時神時鬼，不推薦直接使用 Reasonix，建議鎖定一版自認穩定的版本或使用我維護的 Rex 版。
 
 
 ### Dsc
 
-推荐在本地模型环境中使用 Dsc 作为编程代理：https://github.com/naamfung/dsc
+推薦在本地模型環境中使用 Dsc 作為編程代理：https://github.com/naamfung/dsc
 
 ---
 
