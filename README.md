@@ -68,14 +68,17 @@
 
 **工具链依赖**：
 
-| 组件 | 用途 | 说明 |
-|---|---|---|
-| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`。**builder.exe 为本地构建产物，不入仓库**（.gitignore 已忽略），仓库只跟踪源码 builder.go |
-| Visual Studio 2022 | MSVC C/C++ 编译器 + Windows SDK 10 | builder 自动探测安装路径并自建编译环境；`-list` 可查看探测结果 |
-| CUDA Toolkit 12.x | GPU 后端（nvcc） | 默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖 |
-| Ninja | 构建生成器 | builder 默认使用；换回 VS 生成器用 `-gen vs`（ccache 自动停用） |
-| ccache 4.13+（可选） | CUDA 编译缓存 | 仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃 |
-| bun（可选） | Web UI 源码构建 | 缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server |
+- **Go 编译器 1.21+** —— 编译 builder 本身：`go build -o builder.exe builder.go`。**builder.exe 为本地构建产物，不入仓库**（.gitignore 已忽略），仓库只跟踪源码 builder.go
+
+- **Visual Studio 2022** —— MSVC C/C++ 编译器 + Windows SDK 10；builder 自动探测安装路径并自建编译环境，`-list` 可查看探测结果
+
+- **CUDA Toolkit 12.x** —— GPU 后端（nvcc）；默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖
+
+- **Ninja** —— 构建生成器；builder 默认使用，换回 VS 生成器用 `-gen vs`（ccache 自动停用）
+
+- **ccache 4.13+（可选）** —— CUDA 编译缓存，仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃
+
+- **bun（可选）** —— Web UI 源码构建；缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server
 
 **基本用法**（在仓库根目录执行）：
 
@@ -96,7 +99,7 @@ builder.exe clean        # 仅清理构建目录与 ui/dist
 - `-no-ccache` / `-ccache-all` —— 关闭 ccache / 也给 C/CXX 挂 ccache（后者在本机本地化 MSVC 下会崩，仅调试用）
 - `-ui auto|archive|off` —— UI 方案：`auto`（默认）优先复用跨 worktree 共享的依赖缓存 `<仓库父目录>/.ui-deps`（NTFS 目录联接，零拷贝）做源码构建，回退到本地归档 `files/llama-b*-ui.tar.gz`，都拿不到则报错退出——**绝不静默产出无 UI 的二进制**
 - `-no-configure` —— 确认没改过 CMakeLists 时跳过 configure
-- `-C <dir>` —— 指定仓库根（用于 worktree，如 `builder.exe -C ..\wt-v23`）
+- `-C <dir>` —— 指定仓库根（用于 worktree，如 `./builder.exe -C ../wt-v23`）
 
 **构建目录与产物**：构建目录按分支命名（`build-<分支名>`，如 kvarn-align 分支 → `build-kvarn-align`）；产物在 `<构建目录>/bin`（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次构建结束自检产物齐全性 + 内嵌 UI 体积。编译日志落在 `<构建目录>/builder-build.log` 与 `builder-configure.log`；瞬时竞争错误（nvcc C1083 / MSB8066 / MSB6001）会自动重跑。
 
