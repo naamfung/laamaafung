@@ -30,31 +30,31 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem 分支（v21，非穩定）**：
+- **克隆 KVMem 分支（v21，尚未长期验证稳定）**：
   KVMem（分層/稀疏 KV 記憶，見下文「KVMem」一節）目前只在 `v21` 分支上，適合需要在**有限顯存**下驅動超長上下文的場景：
   ```sh
   git clone -b v21 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化分支（v22，非穩定）**：
+- **克隆 KVMem + Prism 三值量化分支（v22，尚未长期验证稳定）**：
   在 `v21` 的 KVMem 之上加入 **Prism 三值量化**支援（`PTQ1_0`／`PQ2_0` 權重；GGUF 帶 `prism.hadamard.*` 折疊元數據，推理時激活自動做同款旋轉、無需額外參數，見下文「啟動示例」的「Prism 三值量化」與「KVMem + Prism 三值量化」）。需要跑 Prism 三值模型時用此分支：
   ```sh
   git clone -b v22 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，非穩定）**：
+- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，尚未长期验证稳定）**：
   在 `v22` 之上加入 **TCQ（Trellis-Coded Quantization）KV 量化**：`turbo3_tcq`（3.25 bpv）／`turbo2_tcq`（2.25 bpv），以及 **turbo1.5 三值 KV 量化**：`turbo1.5`（2.25 bpv 有效載荷），見下文「啟動示例」的「TCQ KV 量化」與「turbo1.5 KV 量化」。需要更小的 KV cache 佔用時用此分支：
   ```sh
   git clone -b v23 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 turbo/FA 內核修復 + builder 構建分支（v25，基線）**：
+- **克隆 turbo/FA 內核修復 + builder 構建分支（v25，尚未长期验证稳定）**：
   在 `v23` 之上修復融合 turbo-MMA 的 SMEM swizzle 寫側錯位、MMA 模板/launch 實參錯位與 turbo KV 的 FA 調度回退（turbo 系解碼最高 -18% 的根因）、恢復 MMA 內置因果掩碼優化，並引入 **builder** 標準構建流程（見下文「編譯指南」）。生產環境建議用此分支：
   ```sh
   git clone -b v25 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVarN 引擎支援分支（v26，非穩定）**：
+- **克隆 KVarN 引擎支援分支（v26，尚未长期验证稳定）**：
   在 `v25` 之上增加 **KVarN 支援**：結構化 KV 快取（`kvarnN` 系列）、採樣防禦、自檢/EOG/重試子系統，並保留 KVMem 與 Prism 三值量化全鏈路（turbo 系列快取類型走原生路徑）。試驗 KVarN 特性時用此分支：
   ```sh
   git clone -b v26 https://github.com/naamfung/laamaafung.git
