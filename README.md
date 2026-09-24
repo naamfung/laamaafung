@@ -782,6 +782,76 @@ Anthropic 客户端範例（`/v1/messages`）：
 
 ---
 
+## 性能對比
+
+以下數據於 2026-09-24 在同一台機器（8GB 顯存卡，fit 後可用約 7.1–7.2GiB；Windows；`--threads 18`）實測，原始結果與可復現腳本見 [`perf-tests/`](perf-tests/)。
+
+### 三錨點復現（引擎無回退）
+
+| 模型 | 場景 | 本次實測 | 歷史基準 |
+|---|---|---|---|
+| 35B CODER（Agentic） | server 128K + MTP nmax2 | 33.1 t/s（tg_3s 36.7） | 36.01 |
+| 9B 生產（Q4_K_M） | server 128K config 復刻 | 75.8（v25）/ 73.5（v26） | 72.38 |
+| 9B IQ4_XS | CLI 形態 | 84.0 | 87.4 |
+
+三個錨點全部落在歷史區間內，其中 9B 兩分支均高於歷史錨點；IQ4_XS 的差值來自 kvmem-cli 與 llama-cli 的形態差異。結論：移植與分支治理沒有引入性能回退。
+
+### 35B CODER（ctx 131072，`--n-cpu-moe 34`，MTP）
+
+| 組合 | 生成速度 | tg_3s 峰值 | MTP 接受率 | 顯存峰值 |
+|---|---|---|---|---|
+| v25 + nmax2 | 33.1 | 36.7 | 0.697 | 7217MiB |
+| v26 + nmax2 | 31.7 | 34.41 | 0.684 | 7242MiB |
+| v26 + nmax3 | 32.4 | 33.27 | 0.600 | 7304MiB |
+| v26 + nmax4（config 基準） | 27.8 | 31.7 | 0.489 | 7375MiB |
+| v26 + f16 KV | 29.0 | 32.56 | 0.484 | 7820MiB（餘 159MiB） |
+| v26 + ub1024 | 29.0 | 33.1 | 0.489 | 7807MiB |
+
+要點：`--spec-draft-n-max 2` 是甜點（接受率 0.68–0.75，遠高於 nmax4 的 0.49）；`-ub 256` 保持默認，ub 1024 明顯劣化；128K 長上下文下 KV 量化 q8_0/q8_0 穩健，f16 雖快但顯存貼邊。
+
+### 9B 生產（Q4_K_M，ctx 131072，config 復刻）
+
+- `-ctv turbo4` 較 `-ctv q8_0` 快約 8 t/s（73.5 對 65.3）。
+- `-ctk f16 -ctv f16` 反而掉到 39.0 —— 顯存壓力主導，量化 KV 在 8GB 卡上是必選項。
+- `--threads 12` 與 18 持平（72.1），線程不是瓶頸。
+
+### 27B 三值 PTQ1_0（ctx 4096，`-fit off`）
+
+| 組合 | 生成速度 | Prefill | 顯存峰值 |
+|---|---|---|---|
+| v25 base（q8_0/q8_0） | 31.1 | 44 | 6882MiB |
+| v26 base（q8_0/q8_0） | 30.5 | 17 | 6859MiB |
+| v26 turbo4 | 30.7 | 39 | 6826MiB |
+| v26 kvarn3/kvarn2 | 29.1 | 53 | 6874MiB |
+| v26 + KVMem（budget 4096） | 30.3 | 37 | 6446MiB（省約 440MiB） |
+
+三值推理 CPU/CUDA 路徑完整可用；KVMem 在此段主要收益是顯存而非速度。另：27B PQ2_0 在 8GB 卡無法裸跑（差 728MiB），但 `+KVMem` 可行（38.9 t/s）。
+
+### n-cpu-moe × KVMem 池寬交叉（35B，ctx 8192）
+
+- plain 極限為 36 層（26.5 t/s）；開 KVMem 後下探到 32 層仍可運行，30 層以下無解。
+- 最佳區間 ncm34 + 任一 KVMem 池（30.1–30.7，tg_3s 33.2–33.4）；ncm32 + 32K/16K 池 tg_3s 最高 34.39。
+- 生產口徑：128K plain 極限 ncm36（25.6 t/s）；256K 必須配 KVMem（ncm36 約 23.8–29.4 t/s）。
+
+### MTP 接受率回歸定性
+
+35B 上 nmax4 接受率較歷史偏低（0.49 對歷史約 0.55+），經三重驗證（PPL 持平 5.0064 對 5.0012、批擴展性持平、tg_3s 峰值持平）確認為良性 FP 漂移而非缺陷；生產上直接用 nmax2 即可繞開。
+
+### 已知限制
+
+- KVMem × TQ 系 KV 量化組合（如 `-ctk kvarn8 -ctv kvarn4` 換用 TQ 後再開 KVMem）會觸發 FlashAttention vec 內核的 `GGML_ABORT("fatal error")`（`ggml/src/ggml-cuda/fattn.cu`），此為對未編譯類型對的有意防禦，屬不支持組合而非缺陷。
+
+### 復現
+
+```bash
+# 以 27B 三值矩陣為例（其餘同理，見腳本頭部註釋）
+bash perf-tests/scripts/matrix-27b.sh /tmp/matrix-27b.md
+```
+
+結果檔案（`perf-tests/results/`）與腳本一一對應；`ncm-prod-results3.md` 末尾附有一次「空輸出」異常的完整核查閉環記錄（結論：模型 reasoning-only 輸出行為，非引擎缺陷）。
+
+---
+
 ## 編程代理
 
 ### Klaude Code
