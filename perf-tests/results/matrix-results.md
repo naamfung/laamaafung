@@ -26,6 +26,8 @@
 | v26-9B-turbo3-2 | gen 59.4 t/s (tg_3s峰值 60.04) | prefill 66 t/s |  | 5271 MB | `-ngl 99 -c 8192 -ctk turbo3 -ctv turbo2` |
 | v26-9B-tcq3-tcq3 | gen 57.1 t/s (tg_3s峰值 57.27) | prefill 33 t/s |  | - | `-ngl 99 -c 8192 -ctk turbo3_tcq -ctv turbo3_tcq` |
 | v26-9B-tcq3-tcq2 | gen 57.6 t/s (tg_3s峰值 59.0) | prefill 67 t/s |  | - | `-ngl 99 -c 8192 -ctk turbo3_tcq -ctv turbo2_tcq` |
+| v26-9B-q8-tcq3 | gen 57.4 t/s (tg_3s峰值 59.26) | prefill 62 t/s |  | - | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo3_tcq` |
+| v26-9B-tcq3-q8 | gen 56.6 t/s (tg_3s峰值 57.61) | prefill 67 t/s |  | - | `-ngl 99 -c 8192 -ctk turbo3_tcq -ctv q8_0` |
 | v26-9B-kvmem | gen 58.1 t/s (tg_3s峰值 59.08) | prefill 60 t/s |  | 5195 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv q8_0 --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |
 | v26-9B-kvmem-turbo4 | gen 58.5 t/s (tg_3s峰值 59.05) | prefill 61 t/s |  | 5181 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo4 --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |
 | v26-9B-kvmem-kvarn4 | gen 58.2 t/s (tg_3s峰值 60.86) | prefill 618 t/s |  | 5171 MB | `-ngl 99 -c 8192 -ctk kvarn8 -ctv kvarn4 --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |

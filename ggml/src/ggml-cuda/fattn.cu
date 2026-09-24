@@ -505,6 +505,16 @@ static bool ggml_cuda_fattn_pair_compiled(ggml_type type_K, ggml_type type_V) {
                              type_K == GGML_TYPE_TURBO3_TCQ || type_K == GGML_TYPE_TURBO2_TCQ)) {
         return true;
     }
+    // laamaafung: TCQ × q8_0 mixed pairs are also compiled — the K dot-product and
+    // V dequant paths are orthogonal in fattn-vec.cuh (K=q8_0 takes the standard
+    // q8_1 Q path; V=TCQ dequantizes via the shared-memory codebook, and vice versa).
+    {
+        const bool k_tcq = type_K == GGML_TYPE_TURBO3_TCQ || type_K == GGML_TYPE_TURBO2_TCQ;
+        const bool v_tcq = type_V == GGML_TYPE_TURBO3_TCQ || type_V == GGML_TYPE_TURBO2_TCQ;
+        if ((type_K == GGML_TYPE_Q8_0 && v_tcq) || (k_tcq && type_V == GGML_TYPE_Q8_0)) {
+            return true;
+        }
+    }
     if (type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 ||
         type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16) {
         return type_K == type_V;
