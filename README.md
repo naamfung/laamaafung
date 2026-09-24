@@ -815,6 +815,8 @@ Anthropic 客户端範例（`/v1/messages`）：
 - `-ctk f16 -ctv f16` 反而掉到 39.0 —— 顯存壓力主導，量化 KV 在 8GB 卡上是必選項。
 - `--threads 12` 與 18 持平（72.1），線程不是瓶頸。
 
+另：c8192 口徑下 turbo1.5 KV 全形態實測（q8_0×t1.5 59.2、t1.5 對稱 57.6、t1.5×q8_0 58.6）與 turbo3/turbo2 持平。
+
 ### 27B 三值（PTQ1_0 與 PQ2_0，ctx 4096 與 256K）
 
 27B 三值為 dense 模型（無 MTP 草稿，接受率列不適用）：
@@ -828,6 +830,8 @@ Anthropic 客户端範例（`/v1/messages`）：
 | v26 PQ2_0 + KVMem 256K（budget 8192） | 29.9 | 32.45 | 29 | 7883MiB（餘 142MiB） |
 | v26 PTQ1_0 + KVMem 256K（budget 8192） | 30.3 | 30.74 | 28 | 6956MiB（餘 1069MiB） |
 | v26 PTQ1_0 plain 256K（無 KVMem） | 9.2 | 9.63 | 2 | 7876MiB（退化） |
+| v26 PTQ1_0 turbo1.5 V（c4096） | 30.4 | 30.9 | 36 | 7147MiB |
+| v26 PTQ1_0 turbo1.5 對稱（c4096） | 30.0 | 30.63 | 26 | 7144MiB |
 
 要點：
 
