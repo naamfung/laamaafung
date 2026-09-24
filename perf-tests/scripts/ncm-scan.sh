@@ -39,7 +39,7 @@ for NCM in 36 34 32 30 28 26 24; do
       continue
     fi
     base peak v free_min free_load
-    base=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
+    base=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ",")
     free_load=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits)
     curl -s --noproxy '*' --max-time 900 "http://127.0.0.1:9580/v1/chat/completions" -H "Content-Type: application/json" \
       -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":384,"temperature":0,"stream":false}' > "$TMPW/ncm-r.json" 2>/dev/null &
@@ -48,7 +48,7 @@ for NCM in 36 34 32 30 28 26 24; do
     free_min=99999
     for i in $(seq 1 100); do
       kill -0 $CURL 2>/dev/null || break
-      read -r v fv < <(nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader,nounits)
+      read -r v fv < <(nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader,nounits | tr -d ",")
       [ "$v" -gt "$peak" ] && peak=$v
       [ "$fv" -lt "$free_min" ] && free_min=$fv
       sleep 1

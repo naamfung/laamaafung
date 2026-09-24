@@ -13,4 +13,4 @@ m3 = re.findall(r'tg_3s = +([0-9.]+)', s)
 tg3 = max(float(x) for x in m3) if m3 else ''
 acc = re.findall(r'draft acceptance = +([0-9.]+).*?mean len = +([0-9.]+)', s)
 acctxt = f"{acc[-1][0]}/{acc[-1][1]}" if acc else ''
-print(f"| {tag} | gen {gps:.1f} t/s (tg_3s峰值 {tg3}) | prefill {pps:.0f} t/s | {acctxt} | {vram} MB | `{args}` |")
+print(f"| {tag} | gen {gps:.1f} t/s (tg_3s峰值 {tg3}) | prefill {pps:.0f} t/s | {acctxt} | {vram} | `{args}` |")

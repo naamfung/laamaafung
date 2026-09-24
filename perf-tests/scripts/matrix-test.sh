@@ -65,7 +65,7 @@ run_test() {
   curl -s --noproxy '*' --max-time 900 "http://127.0.0.1:$port/v1/chat/completions" -H "Content-Type: application/json" -d "$body2" > "$TMPW/mtx-r2.json" 2>/dev/null
 
   local vram
-  vram=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+  vram=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d "," 2>/dev/null | head -1)
 
   $PY "$TMP/mtx-extract.py" "$tag" "$TMPW/mtx-r2.json" "$TMP/mtx-$tag.log" "$vram" "$model" "${args[*]}" >> "$LOGF" 2>&1
 

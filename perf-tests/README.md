@@ -1,6 +1,6 @@
 # perf-tests
 
-2026-09-24 大型性能矩陣的腳本與原始結果。環境：8GB 顯存卡、Windows、`--threads 18`。
+2026-09-24 大型性能矩陣的腳本與原始結果。環境：**NVIDIA GeForce RTX 3060 Ti 8GB**（驅動 616.92）、Intel Xeon E5-2696 v3（`--threads 18`）、31.8 GB 記憶體、Windows；各結果檔頭部均有完整環境標註。
 
 ## scripts/
 
@@ -20,10 +20,9 @@
 
 ## results/
 
-與腳本一一對應。`ncm-prod-results3.md` 末尾附 256K KVMem 組「空輸出」異常的核查閉環：
-content_len=0 / reasoning_len=574 / finish=length —— 模型在 temperature 0 下把全部生成預算花在
-`<think>` 中，服務器按 `empty output` 防禦重試；引擎生成管線健康（29.4 t/s、接受率 0.521），
-判定為模型行為而非缺陷。
+與腳本一一對應。`ncm-prod-results3.md` 末尾附 256K KVMem 組「空輸出」異常的核查閉環與
+**同參數手工重測**（24.91 t/s、HTTP 200、接受率 0.556；content 為空屬模型 reasoning-only
+行為，服務器防禦重試 3 次後正常返回，非引擎缺陷）。
 
 已知限制：KVMem × TQ 系 KV 量化組合觸發 `ggml/src/ggml-cuda/fattn.cu` 的 FA vec
 `GGML_ABORT("fatal error")`（未編譯類型對的有意防禦）。
