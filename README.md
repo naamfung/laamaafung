@@ -49,7 +49,7 @@
   ```
 
 - **克隆 turbo/FA 內核修復 + builder 構建分支（v25，尚未长期验证稳定）**：
-  在 `v23` 之上修復融合 turbo-MMA 的 SMEM swizzle 寫側錯位、MMA 模板/launch 實參錯位與 turbo KV 的 FA 調度回退（turbo 系解碼最高 -18% 的根因）、恢復 MMA 內置因果掩碼優化，並引入 **builder** 標準構建流程（見下文「編譯指南」）。生產環境建議用此分支：
+  在 `v23` 之上修復融合 turbo-MMA 的 SMEM swizzle 寫側錯位、MMA 模板/launch 實參錯位與 turbo KV 的 FA 調度回退（turbo 系解碼最高 -18% 的根因）、恢復 MMA 內置因果掩碼優化，並引入 **builder** 標準構建流程（見下文「編譯指南」）：
   ```sh
   git clone -b v25 https://github.com/naamfung/laamaafung.git
   ```
