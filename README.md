@@ -784,7 +784,7 @@ Anthropic 客户端範例（`/v1/messages`）：
 
 ## 性能對比
 
-以下數據於 2026-09-24 在同一台機器（8GB 顯存卡，fit 後可用約 7.1–7.2GiB；Windows；`--threads 18`）實測，原始結果與可復現腳本見 [`perf-tests/`](perf-tests/)。
+以下數據於 2026-09-24 在同一台機器實測：NVIDIA GeForce RTX 3060 Ti 8192 MiB（驅動 616.92，fit 後可用約 7.1–7.2GiB）、Intel Xeon E5-2696 v3 @ 2.30GHz（`--threads 18`）、31.8 GB 記憶體、Windows。原始結果與可復現腳本見 [`perf-tests/`](perf-tests/)。
 
 ### 三錨點復現（引擎無回退）
 
