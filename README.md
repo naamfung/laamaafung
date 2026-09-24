@@ -30,31 +30,31 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem 分支（v21，尚未长期验证稳定）**：
+- **克隆 KVMem 分支（v21，尚未長期驗證穩定）**：
   KVMem（分層/稀疏 KV 記憶，見下文「KVMem」一節）目前只在 `v21` 分支上，適合需要在**有限顯存**下驅動超長上下文的場景：
   ```sh
   git clone -b v21 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化分支（v22，尚未长期验证稳定）**：
+- **克隆 KVMem + Prism 三值量化分支（v22，尚未長期驗證穩定）**：
   在 `v21` 的 KVMem 之上加入 **Prism 三值量化**支援（`PTQ1_0`／`PQ2_0` 權重；GGUF 帶 `prism.hadamard.*` 折疊元數據，推理時激活自動做同款旋轉、無需額外參數，見下文「啟動示例」的「Prism 三值量化」與「KVMem + Prism 三值量化」）。需要跑 Prism 三值模型時用此分支：
   ```sh
   git clone -b v22 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，尚未长期验证稳定）**：
+- **克隆 KVMem + Prism 三值量化 + TCQ/turbo1.5 KV 量化分支（v23，尚未長期驗證穩定）**：
   在 `v22` 之上加入 **TCQ（Trellis-Coded Quantization）KV 量化**：`turbo3_tcq`（3.25 bpv）／`turbo2_tcq`（2.25 bpv），以及 **turbo1.5 三值 KV 量化**：`turbo1.5`（2.25 bpv 有效載荷），見下文「啟動示例」的「TCQ KV 量化」與「turbo1.5 KV 量化」。需要更小的 KV cache 佔用時用此分支：
   ```sh
   git clone -b v23 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 turbo/FA 內核修復 + builder 構建分支（v25，尚未长期验证稳定）**：
+- **克隆 turbo/FA 內核修復 + builder 構建分支（v25，尚未長期驗證穩定）**：
   在 `v23` 之上修復融合 turbo-MMA 的 SMEM swizzle 寫側錯位、MMA 模板/launch 實參錯位與 turbo KV 的 FA 調度回退（turbo 系解碼最高 -18% 的根因）、恢復 MMA 內置因果掩碼優化，並引入 **builder** 標準構建流程（見下文「編譯指南」）：
   ```sh
   git clone -b v25 https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVarN 引擎支援分支（v26，尚未长期验证稳定）**：
+- **克隆 KVarN 引擎支援分支（v26，尚未長期驗證穩定）**：
   在 `v25` 之上增加 **KVarN 支援**：結構化 KV 快取（`kvarnN` 系列）、採樣防禦、自檢/EOG/重試子系統，並保留 KVMem 與 Prism 三值量化全鏈路（turbo 系列快取類型走原生路徑）。試驗 KVarN 特性時用此分支：
   ```sh
   git clone -b v26 https://github.com/naamfung/laamaafung.git
@@ -62,44 +62,53 @@
 
 ---
 
-### 编译指南（builder —— 标准生产构建流程）
+### 編譯指南（builder —— 標準生產構建流程）
 
-自 v26 起，构建统一走仓库根目录的 **builder**（Go 实现，原 `build*.sh` 脚本已移除，不再维护）。builder 内置了旧脚本踩过的全部坑的处理：代理变量自动剥离（防 MSB6001）、MSVC 开发环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache 加速、Web UI 依赖兜底、产物齐全性自检。
+構建統一走倉庫根目錄的 **builder**（Go 實現，自 v25 起隨倉庫附帶；本分支不含 builder 時，請克隆 v25 或 v26 後用其 `builder.exe -C <本分支工作區路徑>` 指向構建——構建目錄自動按分支命名，如 v26 分支 → `build-v26`，各分支互不干擾）。builder 內置：代理變量自動剝離（防 MSB6001）、MSVC 環境自建（INCLUDE/LIB/PATH 手工拼裝，無需 cmd.exe/vcvars）、CUDA 專屬 ccache、Web UI 依賴兜底、產物齊全性自檢。舊 `build*.sh` 腳本已在所有分支移除。
 
-**工具链依赖**：
+**工具鏈依賴**：
 
-| 组件 | 用途 | 说明 |
-|---|---|---|
-| Go 编译器 1.21+ | 编译 builder 本身 | `go build -o builder.exe builder.go`。**builder.exe 为本地构建产物，不入仓库**（.gitignore 已忽略），仓库只跟踪源码 builder.go |
-| Visual Studio 2022 | MSVC C/C++ 编译器 + Windows SDK 10 | builder 自动探测安装路径并自建编译环境；`-list` 可查看探测结果 |
-| CUDA Toolkit 12.x | GPU 后端（nvcc） | 默认 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆盖 |
-| Ninja | 构建生成器 | builder 默认使用；换回 VS 生成器用 `-gen vs`（ccache 自动停用） |
-| ccache 4.13+（可选） | CUDA 编译缓存 | 仅包装 nvcc（缓存目录 `<仓库父目录>/.ccache`）；**必须保持 `-DGGML_CCACHE=OFF`**——包装本机本地化 MSVC 的 cl.exe 会崩溃 |
-| bun（可选） | Web UI 源码构建 | 缺失时自动回退预构建 UI 资源，不会产出无 UI 的 llama-server |
+- **Go 編譯器 1.21+** —— 編譯 builder 本身：`go build -o builder.exe builder.go`。**builder.exe 為本地構建產物，不入倉庫**（.gitignore 已忽略），倉庫只跟蹤源碼 builder.go
 
-**基本用法**（在仓库根目录执行）：
+- **Visual Studio 2022** —— MSVC C/C++ 編譯器 + Windows SDK 10；builder 自動探測安裝路徑並自建編譯環境，`-list` 可查看探測結果
+
+- **CUDA Toolkit 12.x** —— GPU 後端（nvcc）；默認 `-DCMAKE_CUDA_ARCHITECTURES=native`，可用 `-arch` 覆蓋
+
+- **Ninja** —— 構建生成器；builder 默認使用，換回 VS 生成器用 `-gen vs`（ccache 自動停用）
+
+- **ccache 4.13+（可選）** —— CUDA 編譯緩存，僅包裝 nvcc（緩存目錄 `<倉庫父目錄>/.ccache`）；**必須保持 `-DGGML_CCACHE=OFF`**——包裝本機本地化 MSVC 的 cl.exe 會崩潰
+
+- **bun（可選）** —— Web UI 源碼構建；缺失時自動回退預構建 UI 資源，不會產出無 UI 的 llama-server
+
+**基本用法**（在倉庫根目錄執行）：
 
 ```sh
-builder.exe              # 增量构建（默认；无构建目录时即全新构建）
-builder.exe -fresh       # 先删构建目录再全量重建
-builder.exe -j 12        # 指定并行度
-builder.exe -list        # 打印探测到的工具链/环境后退出
-builder.exe clean        # 仅清理构建目录与 ui/dist
+builder.exe              # 增量構建（默認；無構建目錄時即全新構建）
+builder.exe -fresh       # 先刪構建目錄再全量重建
+builder.exe -j 12        # 指定並行度
+builder.exe -list        # 列出探測到的工具鏈/環境後退出
+builder.exe clean        # 僅清理構建目錄與 ui/dist
 ```
 
-**常用参数**：
+**常用參數**：
 
-- `-target T1,T2` —— 只构建指定目标（如 `llama-ui-assets`）；跳过产物自检
-- `-keep` —— 仅重置 CMake 状态、保留已编译对象
-- `-arch 86` —— 覆盖 CUDA 架构（默认 native）
-- `-gen ninja|vs` —— 强制生成器（换生成器需先 clean）
-- `-no-ccache` / `-ccache-all` —— 关闭 ccache / 也给 C/CXX 挂 ccache（后者在本机本地化 MSVC 下会崩，仅调试用）
-- `-ui auto|archive|off` —— UI 方案：`auto`（默认）优先复用跨 worktree 共享的依赖缓存 `<仓库父目录>/.ui-deps`（NTFS 目录联接，零拷贝）做源码构建，回退到本地归档 `files/llama-b*-ui.tar.gz`，都拿不到则报错退出——**绝不静默产出无 UI 的二进制**
-- `-no-configure` —— 确认没改过 CMakeLists 时跳过 configure
-- `-C <dir>` —— 指定仓库根（用于 worktree，如 `./builder.exe -C ../wt-v23`）
+- `-target T1,T2` —— 只構建指定目標；跳過產物自檢
 
-**构建目录与产物**：构建目录按分支命名（`build-<分支名>`，如 kvarn-align 分支 → `build-kvarn-align`）；产物在 `<构建目录>/bin`（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次构建结束自检产物齐全性 + 内嵌 UI 体积。编译日志落在 `<构建目录>/builder-build.log` 与 `builder-configure.log`；瞬时竞争错误（nvcc C1083 / MSB8066 / MSB6001）会自动重跑。
+- `-keep` —— 僅重置 CMake 狀態、保留已編譯對象
 
+- `-arch 86` —— 覆蓋 CUDA 架構（默認 native）
+
+- `-gen ninja|vs` —— 強制生成器（換生成器需先 clean）
+
+- `-no-ccache` / `-ccache-all` —— 關閉 ccache / 也給 C/CXX 掛 ccache（後者在本機本地化 MSVC 下會崩，僅調試用）
+
+- `-ui auto|archive|off` —— UI 方案：auto（默認）優先復用共享依賴緩存做源碼構建，回退本地歸檔，都拿不到則報錯退出——絕不靜默產出無 UI 的二進制
+
+- `-no-configure` —— 確認沒改過 CMakeLists 時跳過 configure
+
+- `-C <dir>` —— 指定倉庫根（用於 worktree，如 `./builder.exe -C ../wt-v23`）
+
+**構建目錄與產物**：構建目錄按分支命名（`build-<分支名>`，如 v26 分支 → `build-v26`）；產物在 `<構建目錄>/bin`（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次構建結束自檢產物齊全性 + 內嵌 UI 體積。編譯日誌落在 `<構建目錄>/builder-build.log` 與 `builder-configure.log`；瞬時競爭錯誤（nvcc C1083 / MSB8066 / MSB6001）會自動重跑。
 ---
 
 ### 推荐模型
