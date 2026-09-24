@@ -30,7 +30,7 @@
   git clone -b master https://github.com/naamfung/laamaafung.git
   ```
 
-- **克隆 KVMem 分支（v21，非穩定）**：
+- **克隆 KVMem 分支（v21，尚未长期验证稳定）**：
   KVMem（分層/稀疏 KV 記憶，見下文「KVMem」一節）目前只在 `v21` 分支上，適合需要在**有限顯存**下驅動超長上下文的場景：
   ```sh
   git clone -b v21 https://github.com/naamfung/laamaafung.git
