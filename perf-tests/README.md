@@ -17,6 +17,7 @@
 | `mtx-extract.py` / `ncm-extract.py` | 響應 JSON + 服務端日誌 → 結果表行 |
 
 腳本啟動判定只認日誌 `listening` / 進程退出；顯存同時抓峰值與最小餘量。跑之前 `unset` 代理變量、`curl --noproxy '*'`。
+**請求口徑（用戶定）**：`n_predict` 生產底線 **4096**（上限可到 16384），temperature 測試 0.6 / 寫作 1.0，禁用 temp 0 與短輸出預算（384 之類不具生產參考價值）。`results/` 中標註 `n_predict 384` 的舊數據為短輸出口徑，tg_3s 峰值仍具參考性，整段均值偏低。
 
 ## results/
 

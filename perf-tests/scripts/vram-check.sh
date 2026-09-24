@@ -26,7 +26,7 @@ base_vram=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
 # 请求放后台，同时抓峰值
 curl -s --noproxy '*' --max-time 900 "http://127.0.0.1:$PORT/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":96,"temperature":0.6,"stream":false}' \
+  -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":4096,"temperature":0.6,"stream":false}' \
   > "$TMPW/vr-$TAG-resp.json" 2>/dev/null &
 CURL=$!
 peak=$base_vram

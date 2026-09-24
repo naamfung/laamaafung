@@ -42,7 +42,7 @@ for NCM in 36 34 32 30 28 26 24; do
     base=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ",")
     free_load=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits)
     curl -s --noproxy '*' --max-time 900 "http://127.0.0.1:9580/v1/chat/completions" -H "Content-Type: application/json" \
-      -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":384,"temperature":0.6,"stream":false}' > "$TMPW/ncm-r.json" 2>/dev/null &
+      -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":4096,"temperature":0.6,"stream":false}' > "$TMPW/ncm-r.json" 2>/dev/null &
     CURL=$!
     peak=$base
     free_min=99999

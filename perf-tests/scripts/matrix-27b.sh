@@ -26,7 +26,7 @@ run_test() {
   fi
   base=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ",")
   curl -s --noproxy '*' --max-time 900 "http://127.0.0.1:9685/v1/chat/completions" -H "Content-Type: application/json" \
-    -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":384,"temperature":0.6,"stream":false}' > "$TMPW/mx4-r.json" 2>/dev/null &
+    -d '{"messages":[{"role":"user","content":"用三段话详细介绍大运河的历史与作用。"}],"n_predict":4096,"temperature":0.6,"stream":false}' > "$TMPW/mx4-r.json" 2>/dev/null &
   CURL=$!
   peak=$base; free_min=99999
   for i in $(seq 1 140); do
