@@ -846,7 +846,7 @@ Anthropic 客户端範例（`/v1/messages`）：
 
 ### 已知限制
 
-- `turbo*_tcq` 系 KV 量化（如 `-ctv turbo3_tcq`，無論是否搭配 KVMem）不被 FlashAttention vec 內核支持，啟動即觸發 `GGML_ABORT("fatal error")`（`ggml/src/ggml-cuda/fattn.cu`）；此為對未編譯類型對的有意防禦，屬不支持組合而非缺陷。普通 `turbo*` 與 `kvarn*` KV 不受影響。
+- TCQ 系 KV 量化（`turbo3_tcq` / `turbo2_tcq`）的 FlashAttention vec 算子**完整支持對稱與交叉對**（`-ctk turbo3_tcq -ctv turbo3_tcq`、`-ctk turbo3_tcq -ctv turbo2_tcq`，實測 57.1 / 57.6 t/s），但不支持與 `q8_0` 等非 TCQ 類型混配（如 `-ctk q8_0 -ctv turbo3_tcq`）——此類組合啟動即觸發 `GGML_ABORT`（`ggml/src/ggml-cuda/fattn.cu`），屬對未註冊類型對的有意防禦而非缺陷（原始實現 llama-cpp-turboquant / turbo3-cuda 亦僅支持 TCQ×TCQ 形態）。
 
 ### 復現
 
