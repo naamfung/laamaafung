@@ -58,7 +58,7 @@
 
 ### 编译指南（builder —— 标准生产构建流程）
 
-构建统一走仓库根目录的 **builder**（Go 实现）。builder 内置了旧脚本踩过的全部坑的处理：代理变量自动剥离（防 MSB6001）、MSVC 开发环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache 加速、Web UI 依赖兜底、产物齐全性自检。本分支仍保留旧 `build*.sh` 脚本，但已由 builder 取代、不再维护（v26 起移除）。
+构建统一走仓库根目录的 **builder**（Go 实现）。builder 内置了旧脚本踩过的全部坑的处理：代理变量自动剥离（防 MSB6001）、MSVC 开发环境自建（INCLUDE/LIB/PATH 手工拼装，无需 cmd.exe/vcvars）、CUDA 专属 ccache 加速、Web UI 依赖兜底、产物齐全性自检。旧 `build*.sh` 脚本已在所有分支移除。
 
 **工具链依赖**：
 
@@ -81,7 +81,7 @@ builder.exe -list        # 打印探测到的工具链/环境后退出
 builder.exe clean        # 仅清理构建目录与 ui/dist
 ```
 
-**常用参数**：`-target T1,T2`（只构建指定目标）、`-keep`（仅重置 CMake 状态）、`-arch 86`（覆盖 CUDA 架构）、`-gen ninja|vs`（强制生成器）、`-no-ccache` / `-ccache-all`、`-ui auto|archive|off`（UI 三级兜底，绝不静默产出无 UI 的二进制）、`-no-configure`、`-C <dir>`（指定仓库根，用于 worktree 或跨分支构建，如 `builder.exe -C ..\wt-v23`）。
+**常用参数**：`-target T1,T2`（只构建指定目标）、`-keep`（仅重置 CMake 状态）、`-arch 86`（覆盖 CUDA 架构）、`-gen ninja|vs`（强制生成器）、`-no-ccache` / `-ccache-all`、`-ui auto|archive|off`（UI 三级兜底，绝不静默产出无 UI 的二进制）、`-no-configure`、`-C <dir>`（指定仓库根，用于 worktree 或跨分支构建，如 `./builder.exe -C ../wt-v23`）。
 
 **构建目录与产物**：构建目录按分支命名（`build-<分支名>`）；产物在 `<构建目录>/bin`，每次构建结束自检产物齐全性 + 内嵌 UI 体积。编译日志在 `<构建目录>/builder-build.log` 与 `builder-configure.log`；瞬时竞争错误（nvcc C1083 / MSB8066 / MSB6001）自动重跑。
 
