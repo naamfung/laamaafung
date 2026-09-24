@@ -257,6 +257,19 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
     },
+
+    [GGML_TYPE_PQ2_0] = {
+        .from_float               = quantize_row_pq2_0,
+        .vec_dot                  = ggml_vec_dot_pq2_0_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_PTQ1_0] = {
+        .from_float               = quantize_row_ptq1_0,
+        .vec_dot                  = ggml_vec_dot_ptq1_0_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
     [GGML_TYPE_Q6_0] = {
         .from_float               = quantize_row_q6_0,
         .vec_dot                  = ggml_vec_dot_q6_0_q8_0,
@@ -1485,7 +1498,11 @@ void ggml_compute_forward_mul_mat(
     const struct ggml_tensor * src1 = dst->src[1];
 
     const int32_t hint = ggml_get_op_params_i32(dst, 1);
-    if (hint == GGML_HINT_SRC0_IS_HADAMARD && !params->use_ref) {
+    static int fwht_disabled = -1;
+    if (fwht_disabled < 0) {
+        fwht_disabled = getenv("GGML_FWHT_REF") != NULL;
+    }
+    if (hint == GGML_HINT_SRC0_IS_HADAMARD && !params->use_ref && !fwht_disabled) {
         ggml_compute_forward_fwht(params, dst);
         return;
     }
