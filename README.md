@@ -26,7 +26,7 @@
 
 ### 編譯指南（builder —— 標準生產構建流程）
 
-構建統一走倉庫根目錄的 **builder**（Go 實現，自 v25 起隨倉庫附帶）。本分支若不含 builder，請克隆 v25 或 v26 後用其 `builder.exe -C <本分支工作區路徑>` 指向構建。builder 內置了舊腳本踩過的全部坑的處理：代理變量自動剝離（防 MSB6001）、MSVC 開發環境自建（INCLUDE/LIB/PATH 手工拼裝，無需 cmd.exe/vcvars）、CUDA 專屬 ccache 加速、Web UI 依賴兜底、產物齊全性自檢。
+構建統一走倉庫根目錄的 **builder**（Go 實現，源碼 `builder.go` 已分發至各分支；跨分支構建可用 `-C` 指定倉庫根）。builder 內置了舊腳本踩過的全部坑的處理：代理變量自動剝離（防 MSB6001）、MSVC 開發環境自建（INCLUDE/LIB/PATH 手工拼裝，無需 cmd.exe/vcvars）、CUDA 專屬 ccache 加速、Web UI 依賴兜底、產物齊全性自檢。
 
 **工具鏈依賴**：
 
