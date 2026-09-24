@@ -372,7 +372,13 @@ static void common_params_fit_impl(
     }
 
     if (mparams->n_gpu_layers != default_mparams.n_gpu_layers) {
-        throw common_params_fit_exception("n_gpu_layers already set by user to " + std::to_string(mparams->n_gpu_layers) + ", abort");
+        // "-ngl all" (-2) needs no fitting: every layer goes to the GPU by definition.
+        // Allow it so "-ngl all --fit on" (the standard production recipe) keeps working;
+        // fit continues to adjust context size and other dimensions.
+        if (mparams->n_gpu_layers >= 0) {
+            throw common_params_fit_exception("n_gpu_layers already set by user to " + std::to_string(mparams->n_gpu_layers) + ", abort");
+        }
+        LOG_TRC("%s: n_gpu_layers = all -> no ngl fitting needed\n", __func__);
     }
     if (nd > 1) {
         if (!tensor_split) {
