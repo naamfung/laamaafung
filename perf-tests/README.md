@@ -21,9 +21,7 @@
 
 ## results/
 
-與腳本一一對應。`ncm-prod-results3.md` 末尾附 256K KVMem 組「空輸出」異常的核查閉環與
-**同參數手工重測**（24.91 t/s、HTTP 200、接受率 0.556；content 為空屬模型 reasoning-only
-行為，服務器防禦重試 3 次後正常返回，非引擎缺陷）。
-
-已知限制：KVMem × TQ 系 KV 量化組合觸發 `ggml/src/ggml-cuda/fattn.cu` 的 FA vec
-`GGML_ABORT("fatal error")`（未編譯類型對的有意防禦）。
+與腳本一一對應。`ncm-prod-results3.md` 為生產口徑極限掃描的最終結論（128K plain 極限 ncm36、
+256K 必須配 KVMem），並附 256K 首測「空輸出」排障的最終定性：`n_predict 384` 連模型思考
+（~1500–2200 token）都截不完，與溫度、模板無關 —— 由此確立請求口徑準則（4K/16K、temp 0.6/1.0）。
+已移除各檔中的無效啟動失敗段（`turbo*_tcq` KV 不被 FA vec 支持，見主 README 已知限制）。

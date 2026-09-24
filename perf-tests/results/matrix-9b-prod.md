@@ -20,6 +20,3 @@
 | v26-9B-f16 | gen 39.0 t/s (tg_3s峰值 39.88) | prefill 42 t/s |  | 峰值7836MiB(余156MiB) | `-ngl all -ngld all --n-cpu-moe 0 --threads 18 --threads-http 2 --parallel 1 --kv-unified -ctk q8_0 -ctv turbo4 -b 16384 -ub 256 --ctx-checkpoints 42 --load-mode mlock-ram --cache-prompt --cache-ram 8192 --fit on -c 131072 -ctk f16 -ctv f16` |
 | v26-9B-t12 | gen 72.1 t/s (tg_3s峰值 73.04) | prefill 55 t/s |  | 峰值7747MiB(余273MiB) | `-ngl all -ngld all --n-cpu-moe 0 --threads 18 --threads-http 2 --parallel 1 --kv-unified -ctk q8_0 -ctv turbo4 -b 16384 -ub 256 --ctx-checkpoints 42 --load-mode mlock-ram --cache-prompt --cache-ram 8192 --fit on -c 131072 --threads 12` |
 | v26-9B-ub1024 | gen 56.3 t/s (tg_3s峰值 59.17) | prefill 61 t/s |  | 峰值7851MiB(余134MiB) | `-ngl all -ngld all --n-cpu-moe 0 --threads 18 --threads-http 2 --parallel 1 --kv-unified -ctk q8_0 -ctv turbo4 -b 16384 -ub 256 --ctx-checkpoints 42 --load-mode mlock-ram --cache-prompt --cache-ram 8192 --fit on -c 131072 -ub 1024` |
-
-[v26-9B-vision] STARTUP FAILED
-error: invalid argument: C:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-BF16.gguf

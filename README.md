@@ -846,7 +846,7 @@ Anthropic 客户端範例（`/v1/messages`）：
 
 ### 已知限制
 
-- KVMem × TQ 系 KV 量化組合（如 `-ctk kvarn8 -ctv kvarn4` 換用 TQ 後再開 KVMem）會觸發 FlashAttention vec 內核的 `GGML_ABORT("fatal error")`（`ggml/src/ggml-cuda/fattn.cu`），此為對未編譯類型對的有意防禦，屬不支持組合而非缺陷。
+- `turbo*_tcq` 系 KV 量化（如 `-ctv turbo3_tcq`，無論是否搭配 KVMem）不被 FlashAttention vec 內核支持，啟動即觸發 `GGML_ABORT("fatal error")`（`ggml/src/ggml-cuda/fattn.cu`）；此為對未編譯類型對的有意防禦，屬不支持組合而非缺陷。普通 `turbo*` 與 `kvarn*` KV 不受影響。
 
 ### 復現
 

@@ -16,19 +16,6 @@
 | v26-9B-turbo3 | gen 57.8 t/s (tg_3s峰值 58.76) | prefill 59 t/s |  | 5322 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo3` |
 | v26-9B-turbo2 | gen 58.3 t/s (tg_3s峰值 59.07) | prefill 60 t/s |  | 5314 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo2` |
 
-[v26-9B-tq3] STARTUP FAILED
-0.00.080.708 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
-0.00.080.708 W srv  llama_server: -----------------
-0.00.087.994 I srv    load_model: loading model 'C:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix.gguf'
-0.03.774.835 I cmn          init: llama threadpool init, n_threads = 18
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
-[v26-9B-tq2] STARTUP FAILED
-0.00.077.600 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
-0.00.077.601 W srv  llama_server: -----------------
-0.00.085.718 I srv    load_model: loading model 'C:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix.gguf'
-0.03.786.928 I cmn          init: llama threadpool init, n_threads = 18
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
-
 | v26-9B-turbo1.5 | gen 59.2 t/s (tg_3s峰值 59.93) | prefill 60 t/s |  | 5328 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo1.5` |
 | v26-9B-kvarn4 | gen 55.7 t/s (tg_3s峰值 57.36) | prefill 575 t/s |  | 5380 MB | `-ngl 99 -c 8192 -ctk kvarn8 -ctv kvarn4` |
 | v26-9B-kvarn8-3 | gen 55.6 t/s (tg_3s峰值 56.95) | prefill 573 t/s |  | 5372 MB | `-ngl 99 -c 8192 -ctk kvarn8 -ctv kvarn3` |
@@ -47,19 +34,6 @@ G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
 | v25-9B-turbo3 | gen 58.4 t/s (tg_3s峰值 59.46) | prefill 61 t/s |  | 5345 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo3` |
 | v25-9B-turbo2 | gen 59.0 t/s (tg_3s峰值 59.46) | prefill 66 t/s |  | 5347 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo2` |
 
-[v25-9B-tq3] STARTUP FAILED
-0.00.216.419 W srv  llama_server: this can be a security risk (cross-origin attacks)
-0.00.216.419 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
-0.00.216.419 W srv  llama_server: -----------------
-0.00.226.824 I srv    load_model: loading model 'C:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix.gguf'
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
-[v25-9B-tq2] STARTUP FAILED
-0.00.232.127 W srv  llama_server: this can be a security risk (cross-origin attacks)
-0.00.232.127 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
-0.00.232.127 W srv  llama_server: -----------------
-0.00.241.752 I srv    load_model: loading model 'C:/WorkModels/Qwen3.5-9B/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix/Qwen3.5-9B-Uncensored-Genesis-FITKIT-Q3_K_L-DOWN-4.88G-genesis-imatrix.gguf'
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
-
 | v25-9B-turbo1.5 | gen 59.8 t/s (tg_3s峰值 60.7) | prefill 62 t/s |  | 5334 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo1.5` |
 | v25-9B-kvmem | gen 59.8 t/s (tg_3s峰值 60.39) | prefill 633 t/s |  | 5184 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv q8_0 --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |
 | v25-9B-kvmem-turbo4 | gen 59.5 t/s (tg_3s峰值 60.04) | prefill 628 t/s |  | 5171 MB | `-ngl 99 -c 8192 -ctk q8_0 -ctv turbo4 --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |
@@ -70,19 +44,6 @@ G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
 | v26-35B-mtp-turbo3 | gen 31.4 t/s (tg_3s峰值 34.48) | prefill 28 t/s | 0.61538/2.84 | 5565 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk q8_0 -ctv turbo3 --spec-type draft-mtp` |
 | v26-35B-mtp-turbo2 | gen 31.0 t/s (tg_3s峰值 34.76) | prefill 29 t/s | 0.58513/2.76 | 5558 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk q8_0 -ctv turbo2 --spec-type draft-mtp` |
 
-[v26-35B-mtp-tq3] STARTUP FAILED
-0.00.082.972 W srv  llama_server: -----------------
-0.00.099.741 I srv    load_model: loading model 'C:/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf'
-0.02.386.021 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
-0.05.775.113 I cmn          init: llama threadpool init, n_threads = 18
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
-[v26-35B-mtp-tq3-nmax2] STARTUP FAILED
-0.00.066.551 W srv  llama_server: -----------------
-0.00.069.268 I srv    load_model: loading model 'C:/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf'
-0.02.386.891 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
-0.05.873.314 I cmn          init: llama threadpool init, n_threads = 18
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
-
 | v26-35B-mtp-kvarn4 | gen 31.5 t/s (tg_3s峰值 34.89) | prefill 83 t/s | 0.57619/2.73 | 5606 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk kvarn8 -ctv kvarn4 --spec-type draft-mtp` |
 | v26-35B-mtp-kvarn4-nmax2 | gen 30.4 t/s (tg_3s峰值 33.76) | prefill 81 t/s | 0.68944/2.38 | 5402 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk kvarn8 -ctv kvarn4 --spec-type draft-mtp --spec-draft-n-max 2` |
 | v26-35B-mtp-kvarn8-3 | gen 31.6 t/s (tg_3s峰值 34.33) | prefill 81 t/s | 0.59322/2.78 | 5630 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk kvarn8 -ctv kvarn3 --spec-type draft-mtp` |
@@ -90,13 +51,6 @@ G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
 | v26-35B-mtp-turbo3-2 | gen 30.3 t/s (tg_3s峰值 32.62) | prefill 25 t/s | 0.58795/2.76 | 5537 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk turbo3 -ctv turbo2 --spec-type draft-mtp` |
 | v26-35B-mtp-kvmem | gen 25.6 t/s (tg_3s峰值 30.37) | prefill 26 t/s | 0.52125/2.55 | 4829 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk q8_0 -ctv turbo4 --spec-type draft-mtp --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |
 | v26-35B-mtp-kvmem-nmax2 | gen 26.4 t/s (tg_3s峰值 32.57) | prefill 25 t/s | 0.62647/2.25 | 4751 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk q8_0 -ctv turbo4 --spec-type draft-mtp --spec-draft-n-max 2 --kvmem --kvmem-budget 4096 --kvmem-gen-reserve 1024` |
-
-[v26-35B-mtp-kvmem-tq3] STARTUP FAILED
-0.00.088.513 I srv    load_model: loading model 'C:/WorkModels/Qwen3.6-35B-A3B/Mudler/Qwen-AgentWorld-35B-A3B-APEX-I-Compact-MTP.gguf'
-0.00.088.529 W KVMem is enabled: the KV working set is managed by the KVMem pool and cannot be statically fitted; forcing -fit off
-0.02.376.822 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
-0.05.751.649 I cmn          init: llama threadpool init, n_threads = 18
-G:\Agents\kvmem-works\wt-v25\ggml\src\ggml-cuda\fattn.cu:538: fatal error
 
 | v26-35B-vision-mtp | gen 30.9 t/s (tg_3s峰值 31.95) | prefill 28 t/s | 0.58173/2.73 | 5568 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk q8_0 -ctv turbo4 --spec-type draft-mtp` |
 | v25-35B-base | gen 23.8 t/s (tg_3s峰值 25.31) | prefill 27 t/s |  | 4677 MB | `-ngl 99 --n-cpu-moe 36 -c 8192 -ctk q8_0 -ctv turbo4` |
