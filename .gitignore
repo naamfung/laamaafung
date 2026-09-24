@@ -44,6 +44,8 @@
 /tags
 /.build/
 /build*
+# builder.go（仓库根构建器源码）被 /build* 误伤，反排除；builder.exe 仍忽略
+!/builder.go
 /release
 /debug
 /libllama.so
