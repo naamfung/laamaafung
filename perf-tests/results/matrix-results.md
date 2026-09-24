@@ -4,7 +4,7 @@
 - CPU：Intel Xeon E5-2696 v3 @ 2.30GHz（`--threads 18`）
 - 記憶體：31.8 GB；作業系統：Windows
 - 引擎：laamaafung build-v26 / build-v25（2026-09-24 builder.exe 全量產物）
-- 口徑：啟動判定只認日誌 `listening` 或進程退出；顯存同時抓峰值與最小餘量；生成速度為非流式單請求（`n_predict 384`、temperature 0）
+- 口徑：啟動判定只認日誌 `listening` 或進程退出；顯存同時抓峰值與最小餘量；生成速度為非流式單請求。**本檔表格為舊短輸出口徑（`n_predict 384`、temperature 0）**，tg_3s 峰值仍具參考性、整段均值偏低；新口徑見 matrix-27b-supplement.md（n_predict 4096、temp 0.6）
 
 ---
 

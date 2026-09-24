@@ -815,17 +815,24 @@ Anthropic 客户端範例（`/v1/messages`）：
 - `-ctk f16 -ctv f16` 反而掉到 39.0 —— 顯存壓力主導，量化 KV 在 8GB 卡上是必選項。
 - `--threads 12` 與 18 持平（72.1），線程不是瓶頸。
 
-### 27B 三值 PTQ1_0（ctx 4096，`-fit off`）
+### 27B 三值（PTQ1_0 與 PQ2_0，ctx 4096 與 256K）
 
-| 組合 | 生成速度 | Prefill | 顯存峰值 |
-|---|---|---|---|
-| v25 base（q8_0/q8_0） | 31.1 | 44 | 6882MiB |
-| v26 base（q8_0/q8_0） | 30.5 | 17 | 6859MiB |
-| v26 turbo4 | 30.7 | 39 | 6826MiB |
-| v26 kvarn3/kvarn2 | 29.1 | 53 | 6874MiB |
-| v26 + KVMem（budget 4096） | 30.3 | 37 | 6446MiB（省約 440MiB） |
+27B 三值為 dense 模型（無 MTP 草稿，接受率列不適用）：
 
-三值推理 CPU/CUDA 路徑完整可用；KVMem 在此段主要收益是顯存而非速度。另：27B PQ2_0 在 8GB 卡無法裸跑（差 728MiB），但 `+KVMem` 可行（38.9 t/s）。
+| 組合 | 生成速度 | tg_3s 峰值 | Prefill | 顯存峰值 |
+|---|---|---|---|---|
+| v25 PTQ1_0 base（q8_0/q8_0，c4096） | 31.1 | 31.19 | 44 | 6882MiB |
+| v26 PTQ1_0 base（c4096） | 30.5 | 31.21 | 17 | 6859MiB |
+| v26 PTQ1_0 + KVMem（budget 4096） | 30.3 | 30.49 | 37 | 6446MiB（省約 440MiB） |
+| v26 PQ2_0 + KVMem（budget 4096，turbo4） | **38.6** | 39.25 | 36 | 7833MiB（餘 192MiB） |
+| v26 PQ2_0 + KVMem 256K（budget 8192） | 29.9 | 32.45 | 29 | 7883MiB（餘 142MiB） |
+| v26 PTQ1_0 + KVMem 256K（budget 8192） | 30.3 | 30.74 | 28 | 6956MiB（餘 1069MiB） |
+| v26 PTQ1_0 plain 256K（無 KVMem） | 9.2 | 9.63 | 2 | 7876MiB（退化） |
+
+要點：
+
+- PQ2_0 裸跑無解（差 728MiB），`+KVMem` 後 38.6 t/s 為 27B 段最快；256K 長上下文亦可行（29.9 t/s，顯存貼邊）。
+- PTQ1_0 256K + KVMem 30.3 t/s 且顯存有富餘（餘 1069MiB）；**同配置無 KVMem 直接退化到 9.2 t/s、prefill 崩到 2 t/s**（顯存貼邊觸發驅動換頁）—— KVMem 在 256K 場景是 3.3 倍速度差距，並非錦上添花而是可用與不可用之分。
 
 ### n-cpu-moe × KVMem 池寬交叉（35B，ctx 8192）
 
@@ -844,8 +851,9 @@ Anthropic 客户端範例（`/v1/messages`）：
 ### 復現
 
 ```bash
-# 以 27B 三值矩陣為例（其餘同理，見腳本頭部註釋）
+# 以 27B 三值矩陣為例（含 PQ2_0 與 256K KVMem 組；其餘同理，見腳本頭部註釋）
 bash perf-tests/scripts/matrix-27b.sh /tmp/matrix-27b.md
+bash perf-tests/scripts/matrix-27b-supplement.sh /tmp/matrix-27b-supplement.md
 ```
 
 結果檔案（`perf-tests/results/`）與腳本一一對應；`ncm-prod-results3.md` 末尾附有一次「空輸出」異常的完整核查閉環記錄（結論：模型 reasoning-only 輸出行為，非引擎缺陷）。
