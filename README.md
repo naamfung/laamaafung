@@ -70,7 +70,7 @@ builder.exe clean        # 僅清理構建目錄與 ui/dist
 
 - `-C <dir>` —— 指定倉庫根（用於 worktree，如 `./builder.exe -C ../wt-v23`）
 
-**構建目錄與產物**：構建目錄按分支命名（`build-<分支名>`，如 v26 分支 → `build-v26`）；產物在 `<構建目錄>/bin`（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次構建結束自檢產物齊全性 + 內嵌 UI 體積。編譯日誌落在 `<構建目錄>/builder-build.log` 與 `builder-configure.log`；瞬時競爭錯誤（nvcc C1083 / MSB8066 / MSB6001）會自動重跑。
+**構建目錄與產物**：構建目錄按分支命名（如 v26 分支 → `build-v26`）；產物在構建目錄下的 `bin` 目錄（llama-server、llama-cli、llama-bench、llama-perplexity、llama-quantize、llama-kvmem-server 等），每次構建結束自檢產物齊全性 + 內嵌 UI 體積。編譯日誌為構建目錄下的 `builder-build.log` 與 `builder-configure.log`；瞬時競爭錯誤（nvcc C1083 / MSB8066 / MSB6001）會自動重跑。
 ---
 
 ### 推荐模型
