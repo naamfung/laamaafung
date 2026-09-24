@@ -1430,6 +1430,15 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     }
 
     if (params.fit_params) {
+        if (params.kvmem) {
+            // KVMem replaces the static KV cache with a dynamically managed working-set
+            // pool (sized by --kvmem-budget/--kvmem-gpu-ratio), which static fitting
+            // cannot account for.  A conservative fit target then rejects configs that
+            // would actually run fine (e.g. 27B ternary on 8GB), while a fit pass never
+            // sees the real pool usage either way.  Force-disable fitting.
+            LOG_WRN("%s", "KVMem is enabled: the KV working set is managed by the KVMem pool and cannot be statically fitted; forcing -fit off\n");
+            params.fit_params = false;
+        }
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
 
