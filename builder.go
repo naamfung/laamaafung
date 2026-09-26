@@ -90,6 +90,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -117,6 +118,10 @@ var proxyVars = []string{
 
 // childExtraEnv 由 main 在解析参数后填好，run()/git 调用时合并进子进程环境。
 var childExtraEnv []string
+
+// cmakeExe 是探测到的 cmake 绝对路径，由 main 填好。
+// 必须用绝对路径：exec.Command 按本进程 PATH 解析命令名，在 cmd.Env 里补 PATH 对解析无效。
+var cmakeExe = "cmake"
 
 // cleanEnv 返回剥离代理变量后的环境副本，再叠加 childExtraEnv（MSVC / ccache）。
 func cleanEnv() []string {
@@ -919,6 +924,74 @@ func msvcEnvVars(vsRoot, msvcVer, sdkVer string) []string {
 	}
 }
 
+// newestByVersion 从候选路径里挑目录版本号最高的一个。
+//
+// 不能直接 sort.Strings 取末尾：那是**字典序**，位数不同就会挑错
+// （"cmake-10.0.0" 会被 "cmake-9.0.0" 压住，因为 '1' < '9'）。
+// 这里把目录名里 prefix-<数字>[.<数字>...] 的版本段解析成整数序列再比大小；
+// 一个都解析不出时退回原来的字典序取末尾，行为不变。
+func newestByVersion(paths []string, prefix string) string {
+	best := ""
+	var bestKey []int
+	for _, p := range paths {
+		key := pathVersionKey(p, prefix)
+		if key == nil {
+			continue
+		}
+		if best == "" || versionLess(bestKey, key) {
+			best, bestKey = p, key
+		}
+	}
+	if best != "" {
+		return best
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	sort.Strings(paths)
+	return paths[len(paths)-1]
+}
+
+// pathVersionKey 取出路径中 prefix-<版本> 目录段的数字序列。
+// 只吃开头的数字段（4.1.1）——后面的 -windows-x86_64 之类与版本无关。
+func pathVersionKey(p, prefix string) []int {
+	sep := prefix + "-"
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if !strings.HasPrefix(part, sep) {
+			continue
+		}
+		rest := part[len(sep):]
+		end := 0
+		for end < len(rest) && ((rest[end] >= '0' && rest[end] <= '9') || rest[end] == '.') {
+			end++
+		}
+		ver := strings.TrimSuffix(rest[:end], ".")
+		if ver == "" {
+			return nil
+		}
+		var key []int
+		for _, f := range strings.Split(ver, ".") {
+			n, err := strconv.Atoi(f)
+			if err != nil {
+				return nil
+			}
+			key = append(key, n)
+		}
+		return key
+	}
+	return nil
+}
+
+// versionLess 按字段比较版本号：a < b 返回 true。
+func versionLess(a, b []int) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
 // findCcache 定位 ccache.exe：先 PATH，再常见便携安装目录。
 func findCcache() string {
 	if p, err := exec.LookPath("ccache"); err == nil {
@@ -930,8 +1003,33 @@ func findCcache() string {
 		filepath.Join(`D:\tools`, "ccache-*", "ccache.exe"),
 	} {
 		if ms, err := filepath.Glob(pat); err == nil && len(ms) > 0 {
-			sort.Strings(ms)
-			return ms[len(ms)-1]
+			return newestByVersion(ms, "ccache")
+		}
+	}
+	return ""
+}
+
+// findCmake 定位 cmake.exe：先 PATH，再便携工具链目录，最后 VS 自带。
+// cmake 是 configure 的必需件，但 VS 自带的那个不进 PATH，所以在这里显式兜底。
+func findCmake(vsRoot string) string {
+	if p, err := exec.LookPath("cmake"); err == nil {
+		return p
+	}
+	for _, pat := range []string{
+		filepath.Join(`D:\WinKit-Terminal\share`, "cmake-*", "bin", "cmake.exe"),
+		filepath.Join(`C:\WinKit-Terminal\share`, "cmake-*", "bin", "cmake.exe"),
+		filepath.Join(`D:\winkit\share`, "cmake-*", "bin", "cmake.exe"),
+		filepath.Join(`C:\winkit\share`, "cmake-*", "bin", "cmake.exe"),
+		filepath.Join(`D:\tools`, "cmake-*", "bin", "cmake.exe"),
+	} {
+		if ms, err := filepath.Glob(pat); err == nil && len(ms) > 0 {
+			return newestByVersion(ms, "cmake")
+		}
+	}
+	if vsRoot != "" {
+		p := filepath.Join(vsRoot, "Common7", "IDE", "CommonExtensions", "Microsoft", "CMake", "CMake", "bin", "cmake.exe")
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
 		}
 	}
 	return ""
@@ -1193,7 +1291,7 @@ func configure(repoRoot, buildDir, cudaArch, genFlag, effGen, ccachePath, logPat
 	}
 
 	args = append(args, extra...)
-	return runWithRetry(repoRoot, logPath, "cmake", 2, args...)
+	return runWithRetry(repoRoot, logPath, cmakeExe, 2, args...)
 }
 
 // build 执行编译。瞬时竞争（nvcc 临时文件等）允许再重试两次。
@@ -1204,7 +1302,7 @@ func build(repoRoot, buildDir, logPath string, jobs int, targets []string) error
 		args = append(args, "--target")
 		args = append(args, targets...)
 	}
-	return runWithRetry(repoRoot, logPath, "cmake", 3, args...)
+	return runWithRetry(repoRoot, logPath, cmakeExe, 3, args...)
 }
 
 // verifyArtifacts 收尾自检: MSB8066 只会中断单个工程，不会让 --build 整体
@@ -1343,6 +1441,10 @@ func main() {
 
 	// ---- 工具链探测 ----
 	vsRoot, msvcVer, sdkVer := findMSVC()
+	cmakePath := findCmake(vsRoot)
+	if cmakePath != "" {
+		cmakeExe = cmakePath
+	}
 	ccachePath := findCcache()
 	if *noCcache {
 		ccachePath = ""
@@ -1404,6 +1506,11 @@ func main() {
 	} else {
 		printWarning("未探测到 VS 安装：Ninja 构建可能找不到 cl.exe")
 	}
+	if cmakePath != "" {
+		printInfo("CMake: " + cmakePath)
+	} else {
+		printWarning("未找到 cmake.exe（放在 PATH、D:\\WinKit-Terminal\\share\\cmake-* 或 VS 自带目录）")
+	}
 	if chosenGen == "" {
 		chosenGen = "Visual Studio 17 2022"
 	}
@@ -1427,6 +1534,11 @@ func main() {
 			printInfo("  " + kv)
 		}
 		return
+	}
+
+	if cmakePath == "" {
+		printError("缺少 cmake.exe：configure 必需，安装 CMake 或把它加入 PATH 后重试")
+		os.Exit(1)
 	}
 
 	// 环境自检提示（有代理变量时说明剥离动作，避免 MSB6001 复发时排查无门）。
