@@ -204,7 +204,9 @@ option(GGML_CUDA_NO_PEER_COPY               "ggml: do not use peer to peer copie
 option(GGML_CUDA_NO_VMM                     "ggml: do not try to use CUDA VMM"                OFF)
 option(GGML_CUDA_FA                         "ggml: compile ggml FlashAttention CUDA kernels"  ON)
 option(GGML_CUDA_FA_ALL_QUANTS              "ggml: compile full K/V cache quant pair matrix for FlashAttention"     OFF)
-option(GGML_CUDA_KVARN                      "ggml: compile CUDA KVarN kernels"                                        ON)
+# v25: KVarN 在 llama 层零调用（孤兒實現已於 b4b57fe1b 移除），ggml 側僅為 0.23 同步留下的殘留。
+# 關閉可讓 56 個 fattn-mma-kvarn 實例與 CUDA kvarn 內核不入編譯，並規避 sm_75 的編譯阻斷。
+option(GGML_CUDA_KVARN                      "ggml: compile CUDA KVarN kernels"                                        OFF)
 unset(GGML_CUDA_KVARN_FA CACHE)
 unset(GGML_CUDA_KVARN_FAST_DECODE_ALL_PAIRS CACHE)
 option(GGML_CUDA_GRAPHS                     "ggml: use CUDA graphs (llama.cpp only)"          ${GGML_CUDA_GRAPHS_DEFAULT})
