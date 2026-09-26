@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit target directories.
+cmake_minimum_required(VERSION 3.15...3.28) # 3.15 for string(REPEAT) in scripts/ui-assets.cmake; for add_link_options and implicit target directories.
 project("llama.cpp" C CXX)
 include(CheckIncludeFileCXX)
 
