@@ -90,6 +90,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -923,6 +924,74 @@ func msvcEnvVars(vsRoot, msvcVer, sdkVer string) []string {
 	}
 }
 
+// newestByVersion 从候选路径里挑目录版本号最高的一个。
+//
+// 不能直接 sort.Strings 取末尾：那是**字典序**，位数不同就会挑错
+// （"cmake-10.0.0" 会被 "cmake-9.0.0" 压住，因为 '1' < '9'）。
+// 这里把目录名里 prefix-<数字>[.<数字>...] 的版本段解析成整数序列再比大小；
+// 一个都解析不出时退回原来的字典序取末尾，行为不变。
+func newestByVersion(paths []string, prefix string) string {
+	best := ""
+	var bestKey []int
+	for _, p := range paths {
+		key := pathVersionKey(p, prefix)
+		if key == nil {
+			continue
+		}
+		if best == "" || versionLess(bestKey, key) {
+			best, bestKey = p, key
+		}
+	}
+	if best != "" {
+		return best
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	sort.Strings(paths)
+	return paths[len(paths)-1]
+}
+
+// pathVersionKey 取出路径中 prefix-<版本> 目录段的数字序列。
+// 只吃开头的数字段（4.1.1）——后面的 -windows-x86_64 之类与版本无关。
+func pathVersionKey(p, prefix string) []int {
+	sep := prefix + "-"
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if !strings.HasPrefix(part, sep) {
+			continue
+		}
+		rest := part[len(sep):]
+		end := 0
+		for end < len(rest) && ((rest[end] >= '0' && rest[end] <= '9') || rest[end] == '.') {
+			end++
+		}
+		ver := strings.TrimSuffix(rest[:end], ".")
+		if ver == "" {
+			return nil
+		}
+		var key []int
+		for _, f := range strings.Split(ver, ".") {
+			n, err := strconv.Atoi(f)
+			if err != nil {
+				return nil
+			}
+			key = append(key, n)
+		}
+		return key
+	}
+	return nil
+}
+
+// versionLess 按字段比较版本号：a < b 返回 true。
+func versionLess(a, b []int) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
 // findCcache 定位 ccache.exe：先 PATH，再常见便携安装目录。
 func findCcache() string {
 	if p, err := exec.LookPath("ccache"); err == nil {
@@ -934,8 +1003,7 @@ func findCcache() string {
 		filepath.Join(`D:\tools`, "ccache-*", "ccache.exe"),
 	} {
 		if ms, err := filepath.Glob(pat); err == nil && len(ms) > 0 {
-			sort.Strings(ms)
-			return ms[len(ms)-1]
+			return newestByVersion(ms, "ccache")
 		}
 	}
 	return ""
@@ -955,8 +1023,7 @@ func findCmake(vsRoot string) string {
 		filepath.Join(`D:\tools`, "cmake-*", "bin", "cmake.exe"),
 	} {
 		if ms, err := filepath.Glob(pat); err == nil && len(ms) > 0 {
-			sort.Strings(ms)
-			return ms[len(ms)-1]
+			return newestByVersion(ms, "cmake")
 		}
 	}
 	if vsRoot != "" {
