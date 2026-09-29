@@ -1,10 +1,23 @@
 // laamaafung 构建器 —— build-full-v21.sh 的 Go 重写版。
 //
+// 跨平台：**单文件源码**同时支持 Linux 与 Windows（macOS 亦可编译）。平台差异一律用
+// runtime.GOOS 在运行期分派，不拆 build-tag 文件、不使用任何平台专有符号 —— 这样同一个
+// builder.go 在两边都能 go build。
+//   - 工具链：Windows 走 MSVC（cl.exe）+ Ninja，Linux/macOS 走系统自带
+//     gcc/clang + Ninja（不探测 VS，也不强制 -DCMAKE_C_COMPILER）；
+//   - 目录链接：用 os.Symlink（两边都有）。NTFS junction 虽然不需要特权，但它只能靠
+//     Windows 专有 syscall 实现，会让本文件在 Linux 上连编译都过不了，故弃用；
+//   - 产物自检：可执行文件后缀按平台取（Windows .exe / 其他无后缀）。
+//
 // 为什么用 Go：编译出的二进制执行时不经过 shell，不受 git-bash 环境、代理变量、
 // env 清洗差异的干扰。此前 SHELL 路径实测踩过的坑，这里全部内置处理：
-//   - 代理变量（HTTP_PROXY 等）会让 MSBuild 报 MSB6001 —— 子进程环境强制剥离；
+//   - 代理变量（HTTP_PROXY 等）会让 MSBuild 报 MSB6001 —— 子进程环境强制剥离（仅 Windows：
+//     Linux 上 configure 可能要 git clone/FetchContent 拉依赖，代理恰恰必需）；
+//   - 终端预设的 CC/CXX（本机 git-bash 有 cc="zig cc"）会让 CMake 判定编译器时直接拿
+//     Zig 的 Clang，绕开 MSVC —— 子进程环境强制剥离，并显式 -DCMAKE_C_COMPILER=cl 兜底
+//     （同样仅 Windows：Linux 上 CC/CXX/CFLAGS 是换编译器、交叉编译的正当用法）；
 //   - vs_cmake.sh 的 `env -i` 清洗过头的反面教训：FindCUDAToolkit 探到版本却
-//     找不到 CUDA_CUDART 库 —— 本构建器保留完整环境（仅剥离代理），CUDA 探测正常；
+//     找不到 CUDA_CUDART 库 —— 本构建器保留完整环境（仅剥离代理与工具链覆盖变量），探测正常；
 //   - `$PWD` 是 POSIX 形式（/g/...），Windows 原生 CMake 不认 —— 用 Go 原生
 //     路径（G:\...）传 LLAMA_KVMEM_ROOT；
 //   - git-bash 的 rm -rf 大目录可能被环境安全钩子拦截 —— Go 的 os.RemoveAll
@@ -36,9 +49,10 @@
 //	实测 `bun run build`(vite) 本身是纯本地的 —— 唯一卡住的就是依赖安装。
 //
 //	解法：**跨 worktree 共享一份 UI 依赖缓存**（<仓库父目录>/.ui-deps，与 .ccache
-//	同级），构建前用 **NTFS 目录联接**接到 <构建目录>/tools/ui/ui-src/node_modules
+//	同级），构建前用**目录链接**（os.Symlink）接到 <构建目录>/tools/ui/ui-src/node_modules
 //	（零拷贝 —— node_modules 约 560 MB / 数万个小文件，复制在 Defender 逐文件扫描下
-//	要数分钟；实测 os.RemoveAll 不穿透 junction，故 `-fresh` 删构建目录不波及缓存）。
+//	要数分钟；实测 os.RemoveAll 不穿透链接，故 `-fresh` 删构建目录不波及缓存）。
+//	Windows 建目录符号链接需开发者模式，拿不到就退回复制；Linux 原生支持。
 //	ui-assets.cmake 见到 node_modules/.ui-deps-stamp 就跳过 `bun install`，之后仍是
 //	**真正的源码构建**（dist/build.json 里的版本号每次构建注入，与 build-full-v21.sh
 //	的产物同源同行为）。缓存只在第一次需要时生成一次，之后各 worktree 直接复用。
@@ -48,14 +62,14 @@
 //	（仍是带 UI 的产物，但版本号固定，会打 WARN）；④连归档都没有 → 报错退出，
 //	**绝不产出无 UI 的二进制**。
 //
-// 用法：
+// 用法（下例写作 builder；Windows 上即 builder.exe）：
 //
 //	builder.exe                  增量构建（默认；无构建目录时即全新构建）
 //	builder.exe -fresh           先删构建目录再重建（全量）
 //	builder.exe -j 12            指定并行度
 //	builder.exe -keep            仅重置 CMake 状态、保留已编译对象
 //	builder.exe -arch 86         覆盖 CUDA 架构（默认 native；等价 sh 的 CUDA_ARCH）
-//	builder.exe -gen vs         强制 Visual Studio 生成器（ccache 自动停用）
+//	builder.exe -gen vs         强制 Visual Studio 生成器（仅 Windows；ccache 自动停用）
 //	builder.exe -gen ninja      强制 Ninja（换生成器需先 clean）
 //	builder.exe -no-ccache       关闭 ccache
 //	builder.exe -ccache-all      也给 C/CXX 挂 ccache（本机本地化 MSVC 下会崩，仅调试用）
@@ -80,7 +94,6 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -89,10 +102,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -116,6 +129,23 @@ var proxyVars = []string{
 	"NO_PROXY", "no_proxy",
 }
 
+// compilerOverrideVars 是会让 CMake 误判工具链的环境变量。
+//
+// CMake 判定 C/CXX 编译器的第一步就是读 CC / CXX（见 CMakeDetermineCCompiler），命中就
+// 直接拿它当编译器，根本不看 PATH。本机终端（git-bash）预设了 cc="zig cc"，于是整个构建
+// 被拽去 Zig 自带的 Clang —— 而本项目不适用：MSVC 的 ABI、CUDA 的宿主编译器都必须是
+// cl.exe（日志里的 "CUDA_ARCHITECTURES is set to native, but no NVIDIA GPU was detected"
+// 就是这条链上的连带故障：宿主 C/CXX 编译器不是 MSVC，CUDA 的探测 try_compile 一并失败）。
+//
+// Windows 环境变量名不分大小写，git-bash 传进来的小写 cc 同样会被 CMake 的 getenv("CC")
+// 命中，所以匹配一律大小写无关。
+var compilerOverrideVars = []string{
+	"CC", "CXX", "CPP", "OBJC", "OBJCXX",
+	"LD", "AR", "AS", "NM", "RANLIB", "STRIP", "OBJCOPY", "OBJDUMP", "DLLTOOL", "WINDRES",
+	"CUDAHOSTC", "CUDAHOSTCXX", "CUDACXX",
+	"CFLAGS", "CXXFLAGS", "CPPFLAGS", "CUDAFLAGS", "NVCCFLAGS", "LDFLAGS",
+}
+
 // childExtraEnv 由 main 在解析参数后填好，run()/git 调用时合并进子进程环境。
 var childExtraEnv []string
 
@@ -123,20 +153,58 @@ var childExtraEnv []string
 // 必须用绝对路径：exec.Command 按本进程 PATH 解析命令名，在 cmd.Env 里补 PATH 对解析无效。
 var cmakeExe = "cmake"
 
-// cleanEnv 返回剥离代理变量后的环境副本，再叠加 childExtraEnv（MSVC / ccache）。
+// msvcCompilerArgs 是强制走 MSVC 的 CMake 参数，main 探测到 VS 后填好，configure() 拼进命令行。
+// 与 compilerOverrideVars 的剥离是两道独立保险：剥环境变量保证 CMake 不去读 CC/CXX，
+// 这里保证即使别处（脚本、CI、手写环境）又把编译器覆盖成别的，本构建仍用 cl.exe。
+var msvcCompilerArgs []string
+
+// envName 取出 "NAME=VALUE" 里的 NAME。
+func envName(kv string) string {
+	if i := strings.IndexByte(kv, '='); i >= 0 {
+		return kv[:i]
+	}
+	return kv
+}
+
+// lookupEnvFold 大小写无关地读环境变量（Windows 下 cc 与 CC 是同一个变量）。
+func lookupEnvFold(name string) string {
+	for _, kv := range os.Environ() {
+		if n := envName(kv); strings.EqualFold(n, name) {
+			return kv[len(n)+1:]
+		}
+	}
+	return ""
+}
+
+// envBlocked 判断环境变量名是否在剥离清单里。
+// 匹配一律大小写无关：Windows 环境变量名不分大小写，git-bash 传进来的小写 cc
+// 同样会被 CMake 的 getenv("CC") 命中。
+func envBlocked(name string, list []string) bool {
+	for _, v := range list {
+		if strings.EqualFold(name, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanEnv 返回清洗后的环境副本，再叠加 childExtraEnv（MSVC / ccache）。
+//
+// 两类清洗都是 **Windows 专有**的，别平台别剥：
+//   - 代理变量：MSBuild 见到 HTTP_PROXY 会报 MSB6001（Windows 专有现象）；而 Linux 上
+//     configure 阶段可能要 git clone / FetchContent 拉依赖，代理恰恰是必需的；
+//   - CC/CXX 等工具链覆盖变量（见 compilerOverrideVars）：本机 git-bash 预设 cc="zig cc"，
+//     会把 CMake 拽去 Zig 的 Clang（Windows 专有现象）；Linux 上 CC/CXX/CFLAGS 是正当
+//     用法（换编译器、交叉编译），剥掉只会让人困惑。
 func cleanEnv() []string {
+	windows := runtime.GOOS == "windows"
 	var env []string
 	for _, kv := range os.Environ() {
-		blocked := false
-		for _, p := range proxyVars {
-			if strings.HasPrefix(kv, p+"=") {
-				blocked = true
-				break
-			}
+		name := envName(kv)
+		if windows && (envBlocked(name, proxyVars) || envBlocked(name, compilerOverrideVars)) {
+			continue
 		}
-		if !blocked {
-			env = append(env, kv)
-		}
+		env = append(env, kv)
 	}
 	return append(env, childExtraEnv...)
 }
@@ -333,16 +401,15 @@ func copyTree(src, dst string) error {
 	return copyTreeGo(src, dst)
 }
 
-// isReparsePath 判定路径是否带重解析属性（junction / 符号链接）。
-// 实测 Go 的 os.Lstat 对 junction 返回 mode=?rw-rw-rw-（IsDir=false、Symlink=false），
-// 靠 Mode 判联接必然漏判，只能查 FILE_ATTRIBUTE_REPARSE_POINT (0x400)。
-func isReparsePath(p string) bool {
-	p16, err := syscall.UTF16PtrFromString(p)
-	if err != nil {
-		return false
-	}
-	attrs, aerr := syscall.GetFileAttributes(p16)
-	return aerr == nil && attrs&0x400 != 0
+// isLinkPath 判定路径是不是目录链接。用 os.Lstat 的 ModeSymlink 位判，跨平台通用
+// （Linux 的 symlink 与 Windows 的目录符号链接都置这一位）。
+// 这里只能用 Lstat —— Stat 会跟随链接，判断必然失效。
+//
+// 注意：本构建器不再创建 NTFS junction（见 linkDir），所以不单独识别 junction；
+// 老构建目录里遗留的 junction 会被 Stat/WalkDir 当作普通目录跟随（那正是想要的效果）。
+func isLinkPath(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode()&os.ModeSymlink != 0
 }
 
 // copyTreeGo 是 copyTree 的纯 Go 回退实现。
@@ -358,10 +425,10 @@ func copyTreeGo(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		switch {
 		case d.IsDir():
-			// 带重解析属性的目录（junction/链接）绝不递归：bun 装出来的树里可能有
-			// 指回祖先的链接，递归会死循环。放弃内容（本路径只是 robocopy 缺席时的回退）。
-			if isReparsePath(p) && rel != "." {
-				printWarning("跳过重解析目录（Go 回退复制不展开联接）: " + rel)
+			// 链接目录绝不递归：bun 装出来的树里可能有指回祖先的链接，递归会死循环。
+			// 放弃内容（本路径只是 robocopy 缺席时的回退）。
+			if isLinkPath(p) && rel != "." {
+				printWarning("跳过链接目录（Go 回退复制不展开链接）: " + rel)
 				return filepath.SkipDir
 			}
 			return os.MkdirAll(target, 0o755)
@@ -425,43 +492,18 @@ func findUIDepsSeed(repoRoot string) []string {
 	return out
 }
 
-// Windows 重解析点（reparse point）常量
-const (
-	fsctlSetReparsePoint   = 0x000900A4
-	ioReparseTagMountPoint = 0xA0000003
-)
-
-// utf16NoNul 返回 UTF-16 编码（去掉结尾的 NUL，方便自己控制布局）。
-func utf16NoNul(s string) []uint16 {
-	p, err := syscall.UTF16FromString(s)
-	if err != nil {
-		return nil
-	}
-	return p[:len(p)-1]
-}
-
-// makeJunction 建 NTFS 目录联接（junction），**纯 Go 原生实现**。
+// linkDir 在 link 处建一个指向 target 的目录链接。
 //
-// 为什么不用现成手段：
-//   - cmd.exe 被本机安全策略禁用（mklink 用不了）；
-//   - PowerShell 虽然能建（实测 `New-Item -ItemType Junction` 可行），但从本进程
-//     调用会被沙箱的程序黑名单拦住，而且表现为**静默挂起**（实测 builder 卡在联接
-//     这一步数分钟、零输出），绝不可用。
+// 为什么用 os.Symlink 而不是 NTFS 目录联接（junction）：本构建器要保持**单文件源码**
+// 同时支持 Linux 与 Windows，而 junction 只能靠 Windows 专有的 syscall（CreateFile /
+// DeviceIoControl / UTF16PtrFromString）实现 —— 那些符号在 Linux 上根本不存在，同一个
+// 文件连编译都过不了（实测 11 个 undefined）。os.Symlink 两平台通用：Linux 原生支持；
+// Windows 上建目录符号链接（需开发者模式，或进程持有 SeCreateSymbolicLinkPrivilege），
+// 本机实测可用。拿不到权限时返回错误，由调用方退回复制。
 //
-// junction 是 NTFS 挂载点重解析，**不需要 SeCreateSymbolicLinkPrivilege**，
-// 所以直接 DeviceIoControl(FSCTL_SET_REPARSE_POINT) 就能建。
-//
-// 缓冲区布局（踩过的坑，勿改）：
-//
-//	REPARSE_DATA_BUFFER: [Tag(4)][DataLength(2)][Reserved(2)]
-//	  [SubstituteNameOffset(2)][SubstituteNameLength(2)]
-//	  [PrintNameOffset(2)][PrintNameLength(2)]
-//	  [替换名 UTF-16][NUL][打印名 UTF-16][NUL]
-//
-// 替换名要带 `\??\` 前缀；两个名字后面都必须有 NUL，且 DataLength 要把
-// **两个 NUL 都算进去**（8 + subLen + 2 + printLen + 2）。少算末尾那个 NUL
-// 就会 ERROR_INVALID_REPARSE_DATA —— 实测四种布局只有这一种能过。
-func makeJunction(link, target string) error {
+// target 必须传绝对路径：Windows 的相对路径链接是相对**链接自身所在目录**解析的，
+// 会让链接悬空（实测 ReadDir 报「找不到路径」）。
+func linkDir(link, target string) error {
 	absTarget, err := filepath.Abs(target)
 	if err != nil {
 		return err
@@ -471,53 +513,9 @@ func makeJunction(link, target string) error {
 		return err
 	}
 	if _, err := os.Stat(absTarget); err != nil {
-		return fmt.Errorf("联接目标不存在: %v", err)
+		return fmt.Errorf("链接目标不存在: %v", err)
 	}
-	// 联接点本身必须先存在（空目录），再把重解析数据挂上去
-	if err := os.MkdirAll(absLink, 0o755); err != nil {
-		return err
-	}
-
-	sub := utf16NoNul(`\??\` + absTarget)
-	print := utf16NoNul(absTarget)
-	subLen := len(sub) * 2
-	printLen := len(print) * 2
-
-	payload := make([]byte, 8+subLen+2+printLen+2)
-	binary.LittleEndian.PutUint16(payload[0:], 0)                // SubstituteNameOffset
-	binary.LittleEndian.PutUint16(payload[2:], uint16(subLen))   // SubstituteNameLength
-	binary.LittleEndian.PutUint16(payload[4:], uint16(subLen+2)) // PrintNameOffset
-	binary.LittleEndian.PutUint16(payload[6:], uint16(printLen)) // PrintNameLength
-	for i, c := range sub {
-		binary.LittleEndian.PutUint16(payload[8+i*2:], c)
-	}
-	for i, c := range print {
-		binary.LittleEndian.PutUint16(payload[8+subLen+2+i*2:], c)
-	}
-
-	full := make([]byte, 8+len(payload))
-	binary.LittleEndian.PutUint32(full[0:], ioReparseTagMountPoint)
-	binary.LittleEndian.PutUint16(full[4:], uint16(len(payload)))
-	binary.LittleEndian.PutUint16(full[6:], 0)
-	copy(full[8:], payload)
-
-	p, err := syscall.UTF16PtrFromString(absLink)
-	if err != nil {
-		return err
-	}
-	h, err := syscall.CreateFile(p, syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_EXISTING,
-		syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err != nil {
-		return fmt.Errorf("打开链接目录失败: %v", err)
-	}
-	defer syscall.CloseHandle(h)
-
-	var ret uint32
-	if err := syscall.DeviceIoControl(h, fsctlSetReparsePoint,
-		&full[0], uint32(len(full)), nil, 0, &ret, nil); err != nil {
-		return fmt.Errorf("设置重解析点失败: %v", err)
-	}
-	return nil
+	return os.Symlink(absTarget, absLink)
 }
 
 // uiTrashDir 返回 UI 依赖的回收区（放在共享缓存目录下，**在构建目录与源码树之外**）。
@@ -557,15 +555,15 @@ func evacuateStaleUIDeps(uiSrcDir, trashDir string) {
 	}
 }
 
-// linkOrCopyUIDeps 把依赖树放到 dst：优先目录联接（零拷贝），失败退回递归复制。
-// 返回 true 表示用的是联接。
+// linkOrCopyUIDeps 把依赖树放到 dst：优先目录链接（零拷贝），失败退回递归复制。
+// 返回 true 表示用的是链接。
 //
-// 为什么值得用联接：node_modules 约 560 MB / 数万个小文件，复制在 Defender 逐文件
-// 扫描下要数分钟（实测 5 分钟才 26 MB），而联接是瞬时的，且多个构建目录共享同一份
+// 为什么值得用链接：node_modules 约 560 MB / 数万个小文件，复制在 Defender 逐文件
+// 扫描下要数分钟（实测 5 分钟才 26 MB），而链接是瞬时的，且多个构建目录共享同一份
 // 依赖树、不占额外磁盘。
 //
-// 安全性：实测 `os.RemoveAll` 不会穿透 junction（只删链接本身，目标内容完好），
-// 所以 `builder -fresh` 删构建目录不会波及被联接的共享依赖树。
+// 安全性：实测 `os.RemoveAll` 不会穿透目录链接（只删链接本身，目标内容完好），
+// 所以 `builder -fresh` 删构建目录不会波及被链接的共享依赖树。
 func linkOrCopyUIDeps(src, dst, trashDir string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return false, err
@@ -582,10 +580,10 @@ func linkOrCopyUIDeps(src, dst, trashDir string) (bool, error) {
 		}
 	}
 
-	if err := makeJunction(dst, src); err == nil {
+	if err := linkDir(dst, src); err == nil {
 		return true, nil
 	}
-	printWarning("目录联接不可用，改为复制依赖树（约 560 MB，首次较慢）")
+	printWarning("目录链接不可用（Windows 上需开启开发者模式；Linux 无此限制），改为复制依赖树（约 560 MB，首次较慢）")
 	return false, copyTree(src, dst)
 }
 
@@ -673,11 +671,11 @@ func installCacheDeps(repoRoot, cacheDir, wantHash string) bool {
 		return false
 	}
 
-	// 摘掉旧缓存（联接直接摘，真实目录挪进回收区），把装好的树安放为缓存实体
+	// 摘掉旧缓存（链接直接摘，真实目录挪进回收区），把装好的树安放为缓存实体
 	cacheMod := filepath.Join(cacheDir, "node_modules")
 	if _, lerr := os.Lstat(cacheMod); lerr == nil {
 		if rmErr := os.Remove(cacheMod); rmErr != nil {
-			// 还在 ⇒ 是真实目录（联接/空目录会被 os.Remove 摘掉）
+			// 还在 ⇒ 是真实目录（链接/空目录会被 os.Remove 摘掉）
 			if !mvToTrash(cacheMod, uiTrashDir(cacheDir)) {
 				printWarning("旧缓存实体挪不动，放弃自动安装")
 				return false
@@ -756,9 +754,9 @@ func seedUIDeps(repoRoot, buildDir, cacheDir string) bool {
 		return false
 	}
 	if linked {
-		// 联接目标的依赖戳可能比本分支的 bun.lock 旧 —— 不刷就会重跑 bun install。
+		// 链接目标的依赖戳可能比本分支的 bun.lock 旧 —— 不刷就会重跑 bun install。
 		refreshUIDepsStamp(stamp)
-		printSuccess(fmt.Sprintf("UI 依赖就绪（目录联接，零拷贝，%s）", time.Since(start).Round(time.Second)))
+		printSuccess(fmt.Sprintf("UI 依赖就绪（目录链接，零拷贝，%s）", time.Since(start).Round(time.Second)))
 	} else {
 		if err := newUIDepsStamp(modDir); err != nil {
 			printWarning("写入依赖戳失败: " + err.Error())
@@ -767,13 +765,13 @@ func seedUIDeps(repoRoot, buildDir, cacheDir string) bool {
 		printSuccess(fmt.Sprintf("UI 依赖就绪（已复制，%s）", time.Since(start).Round(time.Second)))
 	}
 
-	// 缓存还没建好时，顺手用联接把缓存指向同一来源（同样零拷贝），
+	// 缓存还没建好时，顺手用链接把缓存指向同一来源（同样零拷贝），
 	// 之后任何新 worktree/构建目录都能直接命中缓存。
 	if wantHash != "" && pickUIDepsCache(cacheDir, wantHash) == "" {
 		cacheMod := filepath.Join(cacheDir, "node_modules")
 		if ok, _ := linkOrCopyUIDeps(src, cacheMod, trashDir); ok {
 			_ = os.WriteFile(filepath.Join(cacheDir, ".lock-hash"), []byte(wantHash+"\n"), 0o644)
-			printInfo("已建立共享 UI 依赖缓存（目录联接）: " + cacheDir)
+			printInfo("已建立共享 UI 依赖缓存（目录链接）: " + cacheDir)
 		}
 	}
 	return true
@@ -868,7 +866,11 @@ func maxDirEntry(base string) string {
 }
 
 // findMSVC 探测 VS 安装根、MSVC 工具集版本、Windows SDK 版本。
+// 非 Windows 平台直接返回空串 —— 调用方据此走 Ninja + 系统自带工具链（gcc/clang）。
 func findMSVC() (vsRoot, msvcVer, sdkVer string) {
+	if runtime.GOOS != "windows" {
+		return "", "", ""
+	}
 	for _, c := range []string{
 		`C:\Program Files\Microsoft Visual Studio\2022\Community`,
 		`C:\Program Files\Microsoft Visual Studio\2022\Professional`,
@@ -1108,6 +1110,53 @@ func clearCMakeState(repoRoot, buildDir, generator string) {
 	os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeFiles"))
 }
 
+// ensureMsvcCache 检查既有构建目录里记录的 C/CXX 编译器是不是 MSVC。
+//
+// 为什么需要：终端预设 CC/CXX（本机 git-bash 有 cc="zig cc"）时，旧版构建器会把它原样
+// 透给 CMake，于是 CMakeCache 里写死成 zig.exe。这种缓存是环境泄漏的产物：里面的对象
+// 文件都是 Zig 的 Clang 编的，换回 MSVC 后一并作废；而 CMakeCache 里已有编译器时，
+// 单靠 -DCMAKE_C_COMPILER 未必能改掉（缓存命中优先），构建会继续用错编译器。
+// 所以这里直接把 CMake 缓存状态与对象文件清掉，本次按 MSVC 全量来。
+//
+// 只在 Windows 生效：Linux 的缓存里记的是 /usr/bin/cc 之类，按「不是 cl」判会误清缓存
+// 并打出误导告警（每次增量构建都清一遍）。
+func ensureMsvcCache(repoRoot, buildDir string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(repoRoot, buildDir, "CMakeCache.txt"))
+	if err != nil {
+		return
+	}
+	bad := ""
+	for _, l := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(l, "CMAKE_C_COMPILER:") && !strings.HasPrefix(l, "CMAKE_CXX_COMPILER:") {
+			continue
+		}
+		i := strings.IndexByte(l, '=')
+		if i < 0 {
+			continue
+		}
+		v := strings.TrimSpace(l[i+1:])
+		name := strings.ToLower(filepath.Base(v))
+		// 记录的可能是不带路径的 "cl"，也可能带参数（"zig cc"），故只比首段
+		if f := strings.Fields(name); len(f) > 0 {
+			name = f[0]
+		}
+		if name != "cl" && name != "cl.exe" {
+			bad = v
+			break
+		}
+	}
+	if bad == "" {
+		return
+	}
+	printWarning("既有构建目录的 C/CXX 编译器不是 MSVC（" + bad + "）——" +
+		"多半是终端预设的 CC/CXX（如 cc=\"zig cc\"）泄漏进来的；已清掉 CMake 缓存与对象文件，本次按 MSVC 全量重建")
+	os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeCache.txt"))
+	os.RemoveAll(filepath.Join(repoRoot, buildDir, "CMakeFiles"))
+}
+
 // uiDistMarker 是写在源码树 tools/ui/dist 里的出处标记文件。
 // 有了它才能判断这份「跨分支共享」的预构建资源能不能被当前分支直接复用 ——
 // build-full-v21.sh 的做法是无条件删除，代价是每次构建都要重跑一遍 vite；
@@ -1269,6 +1318,7 @@ func configure(repoRoot, buildDir, cudaArch, genFlag, effGen, ccachePath, logPat
 		//   本构建器全量配置不依赖增量自检，直接关闭。
 		"-DCMAKE_SUPPRESS_REGENERATION=ON",
 	)
+	args = append(args, msvcCompilerArgs...)
 
 	// ccache：只挂 CUDA。ggml 自带的 GGML_CCACHE 会设全局 RULE_LAUNCH_COMPILE，
 	// Ninja 下会连 cl.exe 一起包（本机本地化 MSVC + ccache 必崩），必须关掉。
@@ -1308,14 +1358,19 @@ func build(repoRoot, buildDir, logPath string, jobs int, targets []string) error
 // verifyArtifacts 收尾自检: MSB8066 只会中断单个工程，不会让 --build 整体
 // 失败，容易漏掉静默缺失的产物。多配置生成器产物在 bin/Release/，
 // 单配置（Ninja）在 bin/。
+// 可执行文件后缀随平台变：Windows 是 .exe，Linux/macOS 没有后缀。
 func verifyArtifacts(repoRoot, buildDir string) error {
+	exeSuffix := ""
+	if runtime.GOOS == "windows" {
+		exeSuffix = ".exe"
+	}
 	candidates := []string{
 		filepath.Join(repoRoot, buildDir, "bin", "Release"),
 		filepath.Join(repoRoot, buildDir, "bin"),
 	}
 	binDir := ""
 	for _, d := range candidates {
-		if _, err := os.Stat(filepath.Join(d, "llama-cli.exe")); err == nil {
+		if _, err := os.Stat(filepath.Join(d, "llama-cli"+exeSuffix)); err == nil {
 			binDir = d
 			break
 		}
@@ -1328,12 +1383,12 @@ func verifyArtifacts(repoRoot, buildDir string) error {
 		"llama-server", "llama-cli", "llama-bench", "llama-perplexity",
 		"llama-quantize", "llama-kvmem-server", "test-model-load-cancel",
 	} {
-		p := filepath.Join(binDir, exe+".exe")
+		p := filepath.Join(binDir, exe+exeSuffix)
 		if _, err := os.Stat(p); err != nil {
 			printError("构建自检: 缺少产物 " + p)
 			missing++
 		} else {
-			printSuccess("产物 " + exe + ".exe")
+			printSuccess("产物 " + exe + exeSuffix)
 		}
 	}
 	if missing > 0 {
@@ -1454,6 +1509,11 @@ func main() {
 	childExtraEnv = nil
 	if vsRoot != "" {
 		childExtraEnv = append(childExtraEnv, msvcEnvVars(vsRoot, msvcVer, sdkVer)...)
+		msvcCompilerArgs = []string{
+			"-DCMAKE_C_COMPILER=cl",
+			"-DCMAKE_CXX_COMPILER=cl",
+			"-DCMAKE_CUDA_HOST_COMPILER=cl",
+		}
 	}
 	if ccachePath != "" {
 		childExtraEnv = append(childExtraEnv, ccacheEnvVars(repoRoot, *ccacheDir)...)
@@ -1463,6 +1523,11 @@ func main() {
 	detectedGen := detectGenerator(filepath.Join(repoRoot, buildDir))
 
 	// 选生成器：ccache 只在 Ninja 下生效，所以新目录默认 Ninja。
+	// 非 Windows 一律 Ninja —— Visual Studio 生成器只在 Windows 上存在。
+	if *gen == "vs" && runtime.GOOS != "windows" {
+		printError("-gen vs 只在本机装了 Visual Studio 的 Windows 上可用；" + runtime.GOOS + " 请用默认的 Ninja")
+		os.Exit(1)
+	}
 	chosenGen := detectedGen
 	passGen := ""
 	switch {
@@ -1483,9 +1548,7 @@ func main() {
 		case "vs":
 			chosenGen = "Visual Studio 17 2022"
 		default:
-			if vsRoot != "" && ccachePath != "" {
-				chosenGen, passGen = "Ninja", "Ninja"
-			} else if vsRoot != "" {
+			if vsRoot != "" || runtime.GOOS != "windows" {
 				chosenGen, passGen = "Ninja", "Ninja"
 			} else {
 				chosenGen = "Visual Studio 17 2022"
@@ -1503,16 +1566,22 @@ func main() {
 	printInfo(fmt.Sprintf("CUDA 架构: %s, 并行度: %d", *arch, *jobs))
 	if vsRoot != "" {
 		printInfo(fmt.Sprintf("MSVC: %s (%s) / SDK %s", vsRoot, msvcVer, sdkVer))
-	} else {
+	} else if runtime.GOOS == "windows" {
 		printWarning("未探测到 VS 安装：Ninja 构建可能找不到 cl.exe")
 	}
 	if cmakePath != "" {
 		printInfo("CMake: " + cmakePath)
-	} else {
+	} else if runtime.GOOS == "windows" {
 		printWarning("未找到 cmake.exe（放在 PATH、D:\\WinKit-Terminal\\share\\cmake-* 或 VS 自带目录）")
+	} else {
+		printWarning("未找到 cmake：装一个 CMake 或把它加入 PATH")
 	}
 	if chosenGen == "" {
-		chosenGen = "Visual Studio 17 2022"
+		if runtime.GOOS == "windows" {
+			chosenGen = "Visual Studio 17 2022"
+		} else {
+			chosenGen = "Ninja"
+		}
 	}
 	printInfo(fmt.Sprintf("生成器: %s", chosenGen))
 	if ccachePath != "" && strings.Contains(chosenGen, "Ninja") {
@@ -1524,8 +1593,10 @@ func main() {
 		}() + "）")
 	} else if ccachePath != "" {
 		printWarning("ccache: 已找到但当前生成器非 Ninja（VS 生成器会忽略 launcher），本次不生效")
-	} else {
+	} else if runtime.GOOS == "windows" {
 		printWarning("ccache: 未找到 ccache.exe（放在 PATH 或 D:\\winkit\\share\\ccache-*）")
+	} else {
+		printWarning("ccache: 未找到（装一个 ccache 并加入 PATH 即可显著加速重编）")
 	}
 
 	if *listOnly {
@@ -1537,15 +1608,26 @@ func main() {
 	}
 
 	if cmakePath == "" {
-		printError("缺少 cmake.exe：configure 必需，安装 CMake 或把它加入 PATH 后重试")
+		printError("缺少 cmake：configure 必需，安装 CMake 或把它加入 PATH 后重试")
 		os.Exit(1)
 	}
 
-	// 环境自检提示（有代理变量时说明剥离动作，避免 MSB6001 复发时排查无门）。
-	for _, p := range proxyVars {
-		if os.Getenv(p) != "" {
-			printWarning(fmt.Sprintf("检测到 %s，已对子进程剥离（防 MSB6001）", p))
-			break
+	// 环境自检提示。两类剥离都只在 Windows 生效（见 cleanEnv），所以提示也只在
+	// Windows 打，免得别平台看到「已剥离」却发现变量其实还在。
+	if runtime.GOOS == "windows" {
+		// 有代理变量时说明剥离动作，避免 MSB6001 复发时排查无门。
+		for _, p := range proxyVars {
+			if os.Getenv(p) != "" {
+				printWarning(fmt.Sprintf("检测到 %s，已对子进程剥离（防 MSB6001）", p))
+				break
+			}
+		}
+		// 终端预设 CC/CXX 时（如 git-bash 的 cc="zig cc"）逐条说清楚剥离动作 ——
+		// 不剥的话 CMake 会拿它当 C/CXX 编译器，整个构建走 Zig 的 Clang 而不是 MSVC。
+		for _, c := range compilerOverrideVars {
+			if v := lookupEnvFold(c); v != "" {
+				printWarning(fmt.Sprintf("检测到 %s=%s，已对子进程剥离（本项目用 MSVC，不走 Zig/Clang）", c, v))
+			}
 		}
 	}
 
@@ -1564,6 +1646,7 @@ func main() {
 		clearCMakeState(repoRoot, buildDir, chosenGen)
 	default:
 		printInfo("增量构建（保留已有构建状态）；要全新构建请加 -fresh")
+		ensureMsvcCache(repoRoot, buildDir)
 	}
 	// 只删「不该复用」的预构建 UI 资源：换分支 / 依赖清单变了 / UI 源码更新了。
 	syncUIFrontend(repoRoot)
